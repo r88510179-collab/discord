@@ -1,0 +1,9 @@
+node_modules
+.env
+bettracker.db
+bettracker.db-wal
+bettracker.db-shm
+.git
+README.md
+supabase-setup.sql
+migrate-to-supabase.js

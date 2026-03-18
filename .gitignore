@@ -1,0 +1,5 @@
+node_modules/
+.env
+bettracker.db
+bettracker.db-wal
+bettracker.db-shm
