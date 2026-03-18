@@ -27,6 +27,7 @@ function getPicksChannels() {
 }
 
 // Parse the TWITTER_CAPPER_MAP from env (channelID:Name,channelID:Name)
+// Parse capper maps from env
 function getTwitterCapperMap() {
   const raw = process.env.TWITTER_CAPPER_MAP || '';
   const map = {};
@@ -37,16 +38,33 @@ function getTwitterCapperMap() {
   return map;
 }
 
-// Determine who the capper is — handles bot-posted Twitter feeds
+function getCapperChannelMap() {
+  const raw = process.env.CAPPER_CHANNEL_MAP || '';
+  const map = {};
+  for (const pair of raw.split(',')) {
+    const [channelId, name] = pair.split(':').map(s => s.trim());
+    if (channelId && name) map[channelId] = name;
+  }
+  return map;
+}
+
+// Determine who the capper is — checks all maps
 function resolveCapper(message) {
   const twitterMap = getTwitterCapperMap();
+  const capperMap = getCapperChannelMap();
 
   // If this channel is a Twitter feed, attribute to the mapped capper
   if (twitterMap[message.channel.id]) {
     const capperName = twitterMap[message.channel.id];
-    // Use a consistent fake discord ID so all picks from this capper merge
     const fakeId = `twitter_${capperName.toLowerCase()}`;
     return { discordId: fakeId, name: capperName, avatar: null, source: 'twitter' };
+  }
+
+  // If this channel is a capper slips channel, attribute to that capper
+  if (capperMap[message.channel.id]) {
+    const capperName = capperMap[message.channel.id];
+    const fakeId = `capper_${capperName.toLowerCase()}`;
+    return { discordId: fakeId, name: capperName, avatar: null, source: 'discord' };
   }
 
   // Otherwise, attribute to the Discord user who posted
@@ -94,16 +112,17 @@ async function handleMessage(message) {
   if (picksChannels.length === 0) return;
   if (!picksChannels.includes(message.channel.id)) return;
 
-  // ═══ GUARD 2: For non-Twitter channels, skip all bot messages ═══
+  // ═══ GUARD 2: For non-mapped channels, skip all bot messages ═══
   const twitterMap = getTwitterCapperMap();
+  const capperMap = getCapperChannelMap();
   const isTwitterFeed = !!twitterMap[message.channel.id];
-  if (message.author.bot && !isTwitterFeed) return;
+  const isMappedCapper = !!capperMap[message.channel.id];
+  const isMappedChannel = isTwitterFeed || isMappedCapper;
+  if (message.author.bot && !isMappedChannel) return;
 
-  // ═══ GUARD 3: For Twitter feeds, ONLY process the feed bot, skip our replies ═══
-  if (isTwitterFeed) {
-    // Skip if this is BetTracker Pro replying to itself
+  // ═══ GUARD 3: For mapped channels, skip our own replies ═══
+  if (isMappedChannel) {
     if (message.author.id === message.client.user.id) return;
-    // Skip if it's a reply (our bot's confirmation messages are replies)
     if (message.reference) return;
   }
 
@@ -125,8 +144,8 @@ async function handleMessage(message) {
 
   // ═══ GUARD 5: Must look like a pick — require 2+ signals for text, or have images ═══
   const textIsPick = looksLikePick(fullText);
-  // For Twitter feeds, require stronger signal (3+ signals) since lots of noise
-  if (isTwitterFeed && !hasImages) {
+  // For mapped channels (Twitter/capper), require stronger signal (3+) since lots of noise
+  if (isMappedChannel && !hasImages) {
     let signals = 0;
     for (const p of PICK_SIGNALS) { if (p.test(fullText)) signals++; }
     if (signals < 3) return;
