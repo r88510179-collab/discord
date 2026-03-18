@@ -8,6 +8,7 @@ const db = new Database(DB_PATH);
 // ── Enable WAL mode for better performance ──────────────────
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
+db.pragma('busy_timeout = 5000');
 
 // ── Initialize schema ───────────────────────────────────────
 db.exec(`
@@ -37,6 +38,9 @@ db.exec(`
     graded_at     TEXT,
     source        TEXT DEFAULT 'manual',
     source_url    TEXT,
+    source_channel_id TEXT,
+    source_message_id TEXT,
+    fingerprint   TEXT,
     raw_text      TEXT,
     created_at    TEXT DEFAULT (datetime('now'))
   );
@@ -88,6 +92,7 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_bets_result     ON bets(result);
   CREATE INDEX IF NOT EXISTS idx_bets_created    ON bets(created_at);
   CREATE INDEX IF NOT EXISTS idx_bets_sport      ON bets(sport);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_bets_fingerprint_unique ON bets(fingerprint) WHERE fingerprint IS NOT NULL;
   CREATE INDEX IF NOT EXISTS idx_snapshots_date  ON daily_snapshots(capper_id, date);
 
   CREATE TABLE IF NOT EXISTS scan_state (
@@ -97,6 +102,13 @@ db.exec(`
   );
 `);
 
+// ── Lightweight additive migrations for older SQLite files ──
+const betColumns = db.prepare("PRAGMA table_info('bets')").all().map(c => c.name);
+if (!betColumns.includes('source_channel_id')) db.exec('ALTER TABLE bets ADD COLUMN source_channel_id TEXT');
+if (!betColumns.includes('source_message_id')) db.exec('ALTER TABLE bets ADD COLUMN source_message_id TEXT');
+if (!betColumns.includes('fingerprint')) db.exec('ALTER TABLE bets ADD COLUMN fingerprint TEXT');
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_bets_fingerprint_unique ON bets(fingerprint) WHERE fingerprint IS NOT NULL');
+
 // ── Prepared statements (fast) ──────────────────────────────
 const stmts = {
   getCapper:         db.prepare('SELECT * FROM cappers WHERE discord_id = ?'),
@@ -105,11 +117,12 @@ const stmts = {
   insertCapper:      db.prepare('INSERT INTO cappers (id, discord_id, display_name, avatar_url) VALUES (?, ?, ?, ?)'),
   insertCapperTwitter: db.prepare('INSERT INTO cappers (id, twitter_handle, display_name) VALUES (?, ?, ?)'),
 
-  insertBet: db.prepare(`INSERT INTO bets (id, capper_id, sport, league, bet_type, description, odds, units, event_date, source, source_url, raw_text)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+  insertBet: db.prepare(`INSERT INTO bets (id, capper_id, sport, league, bet_type, description, odds, units, event_date, source, source_url, source_channel_id, source_message_id, fingerprint, raw_text)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   insertLeg: db.prepare('INSERT INTO parlay_legs (id, bet_id, description, odds) VALUES (?, ?, ?, ?)'),
   gradeBet:  db.prepare('UPDATE bets SET result = ?, profit_units = ?, grade = ?, grade_reason = ?, graded_at = datetime(\'now\') WHERE id = ?'),
   getBet:    db.prepare('SELECT * FROM bets WHERE id = ?'),
+  getBetByFingerprint: db.prepare('SELECT * FROM bets WHERE fingerprint = ?'),
 
   pendingBets: db.prepare(`SELECT b.*, c.display_name AS capper_name, c.discord_id AS capper_discord_id
     FROM bets b LEFT JOIN cappers c ON b.capper_id = c.id WHERE b.result = 'pending' ORDER BY b.created_at DESC`),
@@ -132,6 +145,30 @@ const stmts = {
 };
 
 function uid() { return crypto.randomBytes(16).toString('hex'); }
+
+function normalizeDescription(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function buildFingerprint(betData) {
+  if (betData.fingerprint) return betData.fingerprint;
+  if (!betData.source_message_id) return null;
+
+  const payload = [
+    betData.capper_id || '',
+    betData.source_channel_id || '',
+    betData.source_message_id || '',
+    (betData.bet_type || 'straight').toLowerCase(),
+    normalizeDescription(betData.description),
+    betData.odds == null ? '' : String(betData.odds),
+    betData.units == null ? '1' : String(betData.units),
+  ].join('|');
+
+  return crypto.createHash('sha256').update(payload).digest('hex');
+}
 
 // ── Capper Management ───────────────────────────────────────
 function getOrCreateCapper(discordId, displayName, avatarUrl) {
@@ -164,19 +201,43 @@ function getOrCreateCapperByTwitter(handle) {
 
 // ── Bet CRUD ────────────────────────────────────────────────
 function createBet(betData) {
+  const fingerprint = buildFingerprint(betData);
+  if (fingerprint) {
+    const existing = stmts.getBetByFingerprint.get(fingerprint);
+    if (existing) return { ...existing, _deduped: true };
+  }
+
   const id = uid();
-  stmts.insertBet.run(id,
-    betData.capper_id, betData.sport || 'Unknown', betData.league || null,
-    betData.bet_type || 'straight', betData.description,
-    betData.odds || null, betData.units || 1,
-    betData.event_date || null, betData.source || 'manual',
-    betData.source_url || null, betData.raw_text || null,
-  );
-  return stmts.getBet.get(id);
+  try {
+    stmts.insertBet.run(id,
+      betData.capper_id, betData.sport || 'Unknown', betData.league || null,
+      betData.bet_type || 'straight', betData.description,
+      betData.odds || null, betData.units || 1,
+      betData.event_date || null, betData.source || 'manual',
+      betData.source_url || null, betData.source_channel_id || null,
+      betData.source_message_id || null, fingerprint, betData.raw_text || null,
+    );
+  } catch (err) {
+    // Concurrent insert race: unique fingerprint already committed by another writer.
+    const msg = String(err.message || '');
+    if (fingerprint && (msg.includes('idx_bets_fingerprint_unique') || msg.includes('UNIQUE constraint failed: bets.fingerprint'))) {
+      const existing = stmts.getBetByFingerprint.get(fingerprint);
+      if (existing) return { ...existing, _deduped: true };
+    }
+    throw err;
+  }
+  return { ...stmts.getBet.get(id), _deduped: false };
 }
 
 function createBetWithLegs(betData, legs) {
+  const fingerprint = buildFingerprint(betData);
+  if (fingerprint) {
+    const existing = stmts.getBetByFingerprint.get(fingerprint);
+    if (existing) return { ...existing, _deduped: true };
+  }
+
   const bet = createBet(betData);
+  if (bet?._deduped) return bet;
   if (legs && legs.length > 0) {
     for (const leg of legs) {
       if (!leg.description) continue; // skip legs with no description

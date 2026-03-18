@@ -171,9 +171,11 @@ async function handleMessage(message) {
             bet_type: bet.bet_type, description: bet.description,
             odds: bet.odds, units: bet.units || 1,
             event_date: bet.event_date, source,
+            source_channel_id: message.channel.id,
+            source_message_id: message.id,
             raw_text: fullText,
           }, bet.legs || []);
-          allBets.push(saved);
+          if (!saved?._deduped) allBets.push(saved);
         }
       }
     }
@@ -190,9 +192,11 @@ async function handleMessage(message) {
             bet_type: bet.bet_type, description: bet.description,
             odds: bet.odds, units: bet.units || 1,
             event_date: bet.event_date, source: 'slip',
+            source_channel_id: message.channel.id,
+            source_message_id: message.id,
             raw_text: `Image scan: ${capperInfo.name} in #${message.channel.name}`,
           }, bet.legs || []);
-          allBets.push(saved);
+          if (!saved?._deduped) allBets.push(saved);
         }
       }
     }
