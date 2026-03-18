@@ -14,8 +14,20 @@ const SPORT_MAP = {
   'NCAAB': 'basketball_ncaab',
   'MLS': 'soccer_usa_mls',
   'EPL': 'soccer_epl',
+  'UCL': 'soccer_uefa_champs_league',
+  'CHAMPIONS LEAGUE': 'soccer_uefa_champs_league',
+  'EUROPA LEAGUE': 'soccer_uefa_europa_league',
+  'LA LIGA': 'soccer_spain_la_liga',
+  'SERIE A': 'soccer_italy_serie_a',
+  'BUNDESLIGA': 'soccer_germany_bundesliga',
+  'LIGUE 1': 'soccer_france_ligue_one',
+  'WORLD CUP': 'soccer_fifa_world_cup',
+  'SOCCER': 'soccer_epl',
   'UFC': 'mma_mixed_martial_arts',
   'MMA': 'mma_mixed_martial_arts',
+  'BOXING': 'mma_mixed_martial_arts',
+  'GOLF': 'golf_pga_championship',
+  'TENNIS': 'tennis_atp_french_open',
 };
 
 // ── Fetch completed scores ──────────────────────────────────
