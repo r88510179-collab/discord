@@ -129,6 +129,11 @@ const stmts = {
 
   getLastScan:  db.prepare('SELECT last_message_id FROM scan_state WHERE channel_id = ?'),
   setLastScan:  db.prepare('INSERT OR REPLACE INTO scan_state (channel_id, last_message_id, updated_at) VALUES (?, ?, datetime(\'now\'))'),
+
+  // Duplicate detection — find similar bets from same capper in last 10 min
+  findRecentSimilar: db.prepare(`SELECT id, description FROM bets 
+    WHERE capper_id = ? AND created_at > datetime('now', '-10 minutes')
+    AND description LIKE ? LIMIT 1`),
 };
 
 function uid() { return crypto.randomBytes(16).toString('hex'); }
@@ -313,6 +318,20 @@ function setLastScannedMessage(channelId, messageId) {
   stmts.setLastScan.run(channelId, messageId);
 }
 
+// ── Duplicate detection ─────────────────────────────────────
+function isDuplicateBet(capperId, description) {
+  if (!description || description.length < 5) return false;
+  // Extract key words (player name, team, line) for fuzzy matching
+  const words = description.replace(/[^a-zA-Z0-9\s.+-]/g, '').trim().split(/\s+/);
+  const keyWord = words.slice(0, 3).join('%');
+  const result = stmts.findRecentSimilar.get(capperId, `%${keyWord}%`);
+  if (result) {
+    console.log(`[Dedup] Skipped duplicate: "${description}" matches "${result.description}"`);
+    return true;
+  }
+  return false;
+}
+
 // ── Export everything (same interface as old supabase.js) ────
 module.exports = {
   db,
@@ -335,4 +354,5 @@ module.exports = {
   saveDailySnapshot,
   getLastScannedMessage,
   setLastScannedMessage,
+  isDuplicateBet,
 };

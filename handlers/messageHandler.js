@@ -1,5 +1,5 @@
 const { parseBetText, parseBetSlipImage } = require('../services/ai');
-const { getOrCreateCapper, createBetWithLegs } = require('../services/database');
+const { getOrCreateCapper, createBetWithLegs, isDuplicateBet } = require('../services/database');
 const { betEmbed } = require('../utils/embeds');
 const { postPickTracked } = require('../services/dashboard');
 
@@ -197,6 +197,9 @@ async function handleMessage(message) {
       const parsed = await parseBetText(cleanText);
       if (parsed.bets?.length > 0) {
         for (const bet of parsed.bets) {
+          // Skip duplicates (same capper, similar description, last 10 min)
+          if (isDuplicateBet(capper.id, bet.description)) continue;
+
           const saved = await createBetWithLegs({
             capper_id: capper.id,
             sport: bet.sport, league: bet.league,
@@ -216,11 +219,13 @@ async function handleMessage(message) {
       const parsed = await scanImage(img.url, img.type);
       if (parsed?.bets?.length > 0) {
         for (const bet of parsed.bets) {
+          if (isDuplicateBet(capper.id, bet.description)) continue;
+
           const saved = await createBetWithLegs({
             capper_id: capper.id,
             sport: bet.sport, league: bet.league,
             bet_type: bet.bet_type, description: bet.description,
-            odds: bet.odds, units: bet.units || 1,
+            odds: bet.odds, units: Math.min(bet.units || 1, 50),
             event_date: bet.event_date, source: 'slip',
             raw_text: `Image scan: ${capperInfo.name} in #${message.channel.name}`,
           }, bet.legs || []);
