@@ -1,0 +1,15 @@
+[
+  { "description": "LAL -4.5", "home_team": "Los Angeles Lakers", "away_team": "Boston Celtics", "bet_sport": "NBA", "should_match": true, "expect_home": true },
+  { "description": "Dubs ML", "home_team": "Golden State Warriors", "away_team": "Phoenix Suns", "bet_sport": "NBA", "should_match": true, "expect_home": true },
+  { "description": "KC moneyline", "home_team": "Kansas City Chiefs", "away_team": "Buffalo Bills", "bet_sport": "NFL", "should_match": true, "expect_home": true },
+  { "description": "Niners +3", "home_team": "San Francisco 49ers", "away_team": "Dallas Cowboys", "bet_sport": "NFL", "should_match": true, "expect_home": true },
+  { "description": "NYY -1.5", "home_team": "New York Yankees", "away_team": "Boston Red Sox", "bet_sport": "MLB", "should_match": true, "expect_home": true },
+  { "description": "Leafs ML", "home_team": "Toronto Maple Leafs", "away_team": "Edmonton Oilers", "bet_sport": "NHL", "should_match": true, "expect_home": true },
+  { "description": "DAL -3", "home_team": "Dallas Mavericks", "away_team": "Phoenix Suns", "bet_sport": "NBA", "should_match": true, "expect_home": true },
+  { "description": "DAL -3", "home_team": "Dallas Cowboys", "away_team": "Philadelphia Eagles", "bet_sport": "NBA", "should_match": false },
+  { "description": "BOS ML", "home_team": "Boston Red Sox", "away_team": "New York Yankees", "bet_sport": "MLB", "should_match": true, "expect_home": true },
+  { "description": "BOS ML", "home_team": "Boston Celtics", "away_team": "Miami Heat", "bet_sport": "MLB", "should_match": false },
+  { "description": "BOS ML", "home_team": "Los Angeles Lakers", "away_team": "Phoenix Suns", "should_match": false },
+  { "description": "DAL +3", "home_team": "Kansas City Chiefs", "away_team": "Buffalo Bills", "should_match": false },
+  { "description": "GSW ML", "home_team": "Golden State Warriors", "away_team": "Phoenix Suns", "bet_sport": "NBA", "should_match": true, "expect_home": true }
+]

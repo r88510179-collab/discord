@@ -30,6 +30,109 @@ const SPORT_MAP = {
   'TENNIS': 'tennis_atp_french_open',
 };
 
+// Data-driven alias table for high-frequency leagues first (NBA/NFL/MLB/NHL).
+const TEAM_ALIAS_ROWS = [
+  { team: 'los angeles lakers', aliases: ['lakers', 'lal', 'la lakers', 'lake show'], league: 'NBA' },
+  { team: 'golden state warriors', aliases: ['warriors', 'gsw', 'dubs'], league: 'NBA' },
+  { team: 'boston celtics', aliases: ['celtics', 'bos'], league: 'NBA' },
+  { team: 'new york knicks', aliases: ['knicks', 'nyk'], league: 'NBA' },
+  { team: 'dallas mavericks', aliases: ['mavericks', 'mavs', 'dal'], league: 'NBA' },
+  { team: 'phoenix suns', aliases: ['suns', 'phx'], league: 'NBA' },
+  { team: 'miami heat', aliases: ['heat', 'mia'], league: 'NBA' },
+  { team: 'milwaukee bucks', aliases: ['bucks', 'mil'], league: 'NBA' },
+
+  { team: 'kansas city chiefs', aliases: ['chiefs', 'kc'], league: 'NFL' },
+  { team: 'san francisco 49ers', aliases: ['49ers', 'niners', 'sf'], league: 'NFL' },
+  { team: 'philadelphia eagles', aliases: ['eagles', 'phi'], league: 'NFL' },
+  { team: 'new york giants', aliases: ['giants', 'nyg'], league: 'NFL' },
+  { team: 'dallas cowboys', aliases: ['cowboys', 'dal'], league: 'NFL' },
+  { team: 'green bay packers', aliases: ['packers', 'gb'], league: 'NFL' },
+  { team: 'new england patriots', aliases: ['patriots', 'pats', 'ne'], league: 'NFL' },
+
+  { team: 'los angeles dodgers', aliases: ['dodgers', 'lad'], league: 'MLB' },
+  { team: 'new york yankees', aliases: ['yankees', 'nyy'], league: 'MLB' },
+  { team: 'boston red sox', aliases: ['red sox', 'bos'], league: 'MLB' },
+  { team: 'houston astros', aliases: ['astros', 'hou'], league: 'MLB' },
+  { team: 'atlanta braves', aliases: ['braves', 'atl'], league: 'MLB' },
+
+  { team: 'toronto maple leafs', aliases: ['maple leafs', 'leafs', 'tor'], league: 'NHL' },
+  { team: 'new york rangers', aliases: ['rangers', 'nyr'], league: 'NHL' },
+  { team: 'vegas golden knights', aliases: ['golden knights', 'vgk'], league: 'NHL' },
+  { team: 'edmonton oilers', aliases: ['oilers', 'edm'], league: 'NHL' },
+];
+
+const ALIAS_TO_TEAMS = {};
+const TEAM_TO_LEAGUE = {};
+for (const row of TEAM_ALIAS_ROWS) {
+  const canonical = row.team;
+  TEAM_TO_LEAGUE[canonical] = row.league;
+  if (!ALIAS_TO_TEAMS[canonical]) ALIAS_TO_TEAMS[canonical] = new Set();
+  ALIAS_TO_TEAMS[canonical].add(canonical);
+  for (const alias of row.aliases) {
+    if (!ALIAS_TO_TEAMS[alias]) ALIAS_TO_TEAMS[alias] = new Set();
+    ALIAS_TO_TEAMS[alias].add(canonical);
+  }
+}
+
+function normalizeForMatch(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function containsPhrase(text, phrase) {
+  const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|\\s)${escaped}(\\s|$)`, 'i').test(text);
+}
+
+function canonicalizeTeamName(teamName) {
+  const normalized = normalizeForMatch(teamName);
+  const matches = ALIAS_TO_TEAMS[normalized];
+  if (!matches || matches.size !== 1) return normalized;
+  return [...matches][0];
+}
+
+function normalizeSportContext(sport) {
+  const s = String(sport || '').toUpperCase();
+  if (s.includes('NBA')) return 'NBA';
+  if (s.includes('NFL') || s.includes('NCAAF')) return 'NFL';
+  if (s.includes('MLB')) return 'MLB';
+  if (s.includes('NHL')) return 'NHL';
+  return null;
+}
+
+function filterTeamsBySport(candidates, sportContext) {
+  if (!sportContext) return candidates;
+  const filtered = candidates.filter((team) => TEAM_TO_LEAGUE[team] === sportContext);
+  return filtered.length > 0 ? filtered : candidates;
+}
+
+function findMentionedTeams(description, sportContext = null) {
+  const normalized = normalizeForMatch(description);
+  const matchedTeams = new Set();
+  const ambiguousAliases = new Set();
+
+  for (const [alias, teams] of Object.entries(ALIAS_TO_TEAMS)) {
+    if (!containsPhrase(normalized, alias)) continue;
+
+    const scopedTeams = filterTeamsBySport([...teams], sportContext);
+
+    if (scopedTeams.length === 1) {
+      matchedTeams.add(scopedTeams[0]);
+      continue;
+    }
+
+    // Ambiguous alias: only accept if one candidate canonical name appears explicitly.
+    const explicit = scopedTeams.filter(team => containsPhrase(normalized, team));
+    if (explicit.length === 1) matchedTeams.add(explicit[0]);
+    else ambiguousAliases.add(alias);
+  }
+
+  return { matchedTeams, ambiguousAliases };
+}
+
 // ── Fetch completed scores ──────────────────────────────────
 async function fetchScores(sport) {
   const sportKey = SPORT_MAP[sport?.toUpperCase()];
@@ -61,18 +164,35 @@ function calcProfit(odds, units, result) {
 
 // ── Match a bet description to a game result ────────────────
 function matchBetToGame(bet, scores) {
-  const desc = bet.description.toLowerCase();
+  const desc = normalizeForMatch(bet.description);
+  const sportContext = normalizeSportContext(bet.sport);
+  const { matchedTeams, ambiguousAliases } = findMentionedTeams(bet.description, sportContext);
 
   for (const game of scores) {
-    const home = game.home_team?.toLowerCase() || '';
-    const away = game.away_team?.toLowerCase() || '';
+    const home = normalizeForMatch(game.home_team);
+    const away = normalizeForMatch(game.away_team);
+    const homeCanonical = canonicalizeTeamName(home);
+    const awayCanonical = canonicalizeTeamName(away);
 
     // Check if any team name fragment is in the bet description
     const homeWords = home.split(' ');
     const awayWords = away.split(' ');
 
-    const homeMatch = homeWords.some(w => w.length > 3 && desc.includes(w));
-    const awayMatch = awayWords.some(w => w.length > 3 && desc.includes(w));
+    const homeWordMatch = homeWords.some(w => w.length > 3 && containsPhrase(desc, w));
+    const awayWordMatch = awayWords.some(w => w.length > 3 && containsPhrase(desc, w));
+    const homeAmbiguousMatch = [...ambiguousAliases].some((alias) => {
+      const options = filterTeamsBySport([...(ALIAS_TO_TEAMS[alias] || [])], sportContext);
+      return options.includes(homeCanonical) && !options.includes(awayCanonical);
+    });
+    const awayAmbiguousMatch = [...ambiguousAliases].some((alias) => {
+      const options = filterTeamsBySport([...(ALIAS_TO_TEAMS[alias] || [])], sportContext);
+      return options.includes(awayCanonical) && !options.includes(homeCanonical);
+    });
+
+    const homeAliasMatch = matchedTeams.has(homeCanonical) || homeAmbiguousMatch;
+    const awayAliasMatch = matchedTeams.has(awayCanonical) || awayAmbiguousMatch;
+    const homeMatch = homeAliasMatch || homeWordMatch;
+    const awayMatch = awayAliasMatch || awayWordMatch;
 
     if (homeMatch || awayMatch) {
       const homeScore = game.scores?.find(s => s.name === game.home_team)?.score;
@@ -92,33 +212,20 @@ function matchBetToGame(bet, scores) {
   return null;
 }
 
-// ── Try to determine W/L from score ─────────────────────────
-function determineResult(bet, matchData) {
-  if (!matchData) return null;
+function evaluateMarketSegment(segment, matchData) {
   const { homeScore, awayScore, isHome } = matchData;
-  const desc = bet.description.toLowerCase();
+  const desc = segment.toLowerCase().trim();
 
   // Moneyline
-  if (desc.includes('ml') || desc.includes('moneyline') || desc.includes('money line')) {
+  if (/\bml\b/.test(desc) || desc.includes('moneyline') || desc.includes('money line')) {
     const teamWon = isHome ? homeScore > awayScore : awayScore > homeScore;
     if (homeScore === awayScore) return 'push';
     return teamWon ? 'win' : 'loss';
   }
 
-  // Spread — look for patterns like -3.5, +7
-  const spreadMatch = desc.match(/([+-]?\d+\.?\d*)/);
-  if (spreadMatch && (desc.includes('spread') || /[+-]\d/.test(desc))) {
-    const spread = parseFloat(spreadMatch[1]);
-    const teamScore = isHome ? homeScore : awayScore;
-    const oppScore = isHome ? awayScore : homeScore;
-    const covered = teamScore + spread - oppScore;
-    if (covered > 0) return 'win';
-    if (covered === 0) return 'push';
-    return 'loss';
-  }
-
   // Over/Under
-  const ouMatch = desc.match(/(over|under|o|u)\s*(\d+\.?\d*)/i);
+  const ouMatch = desc.match(/\b(over|under)\s*(\d+\.?\d*)\b/i)
+    || desc.match(/\b([ou])\s*([2-9]\d{1,2}(?:\.\d+)?)\b/i);
   if (ouMatch) {
     const direction = ouMatch[1].toLowerCase();
     const total = parseFloat(ouMatch[2]);
@@ -130,8 +237,45 @@ function determineResult(bet, matchData) {
     return gameTotal < total ? 'win' : 'loss';
   }
 
+  // Spread — prefer realistic line values and avoid treating odds (-110) as spread.
+  const spreadCandidates = [...desc.matchAll(/([+-]\d{1,2}(?:\.\d+)?)(?!\d)/g)]
+    .map(m => parseFloat(m[1]))
+    .filter(n => Number.isFinite(n) && Math.abs(n) <= 40);
+  const spread = spreadCandidates.length > 0 ? spreadCandidates[0] : null;
+  if (spread != null && (desc.includes('spread') || /\b([a-z]{2,})\s*[+-]\d/.test(desc))) {
+    const teamScore = isHome ? homeScore : awayScore;
+    const oppScore = isHome ? awayScore : homeScore;
+    const covered = teamScore + spread - oppScore;
+    if (covered > 0) return 'win';
+    if (covered === 0) return 'push';
+    return 'loss';
+  }
+
   // Can't determine — might be a prop, let AI handle
   return null;
+}
+
+function aggregateParlayResults(results) {
+  if (!Array.isArray(results) || results.length === 0) return null;
+  if (results.some(r => r == null)) return null;
+  if (results.includes('loss')) return 'loss';
+  if (results.every(r => r === 'push')) return 'push';
+  return 'win';
+}
+
+// ── Try to determine W/L from score ─────────────────────────
+function determineResult(bet, matchData) {
+  if (!matchData) return null;
+  const desc = bet.description.toLowerCase();
+  const isParlay = (bet.bet_type || '').toLowerCase() === 'parlay' || desc.includes('parlay');
+
+  if (isParlay && desc.includes('+')) {
+    const legs = bet.description.split('+').map(s => s.trim()).filter(Boolean);
+    const legResults = legs.map(leg => evaluateMarketSegment(leg, matchData));
+    return aggregateParlayResults(legResults);
+  }
+
+  return evaluateMarketSegment(bet.description, matchData);
 }
 
 // ── Main auto-grade cycle ───────────────────────────────────
@@ -190,4 +334,13 @@ async function runAutoGrade(client) {
   return { graded: gradedCount, bets: gradedBets };
 }
 
-module.exports = { runAutoGrade, calcProfit, fetchScores };
+module.exports = {
+  runAutoGrade,
+  calcProfit,
+  fetchScores,
+  determineResult,
+  aggregateParlayResults,
+  matchBetToGame,
+  findMentionedTeams,
+  canonicalizeTeamName,
+};

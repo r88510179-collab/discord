@@ -62,6 +62,7 @@ cp .env.example .env
 
 ```bash
 npm run deploy   # Register slash commands
+npm run check    # Validate key runtime files
 npm start        # Start the bot
 ```
 

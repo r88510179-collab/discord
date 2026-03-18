@@ -137,8 +137,63 @@ async function callLLM(prompt, system, imageBase64, mediaType) {
 }
 
 function parseJSON(t) {
-  try { return JSON.parse(t.replace(/```json|```/g, '').trim()); }
-  catch { return null; }
+  if (!t || typeof t !== 'string') return null;
+  const cleaned = t.replace(/```json|```/gi, '').trim();
+  try { return JSON.parse(cleaned); }
+  catch {
+    const start = cleaned.indexOf('{');
+    const end = cleaned.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      try { return JSON.parse(cleaned.slice(start, end + 1)); }
+      catch { return null; }
+    }
+    return null;
+  }
+}
+
+function toSafeNumber(value, fallback = null) {
+  if (value == null || value === '') return fallback;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function normalizeBet(bet) {
+  if (!bet || typeof bet !== 'object') return null;
+  const description = String(bet.description || '').trim().slice(0, 250);
+  if (!description) return null;
+
+  const rawOdds = toSafeNumber(bet.odds, -110);
+  const odds = Math.abs(rawOdds) > 9999 ? -110 : Math.trunc(rawOdds);
+  const units = Math.min(Math.max(toSafeNumber(bet.units, 1), 0.01), 100);
+  const betType = String(bet.bet_type || 'straight').toLowerCase();
+  const allowedTypes = new Set(['straight', 'parlay', 'teaser', 'prop', 'future', 'ladder']);
+
+  const legs = Array.isArray(bet.legs)
+    ? bet.legs
+        .map((leg) => {
+          const legDesc = String(leg?.description || '').trim().slice(0, 200);
+          if (!legDesc) return null;
+          return { description: legDesc, odds: toSafeNumber(leg?.odds, null) };
+        })
+        .filter(Boolean)
+    : [];
+
+  return {
+    sport: String(bet.sport || 'Unknown').trim().slice(0, 50) || 'Unknown',
+    league: bet.league ? String(bet.league).trim().slice(0, 80) : null,
+    bet_type: allowedTypes.has(betType) ? betType : 'straight',
+    description,
+    odds,
+    units,
+    event_date: bet.event_date || null,
+    legs,
+  };
+}
+
+function normalizeParsedBets(payload) {
+  const bets = Array.isArray(payload?.bets) ? payload.bets : [];
+  const clean = bets.map(normalizeBet).filter(Boolean);
+  return { bets: clean };
 }
 
 // ── Fast regex parser (no AI needed for simple bets) ────────
@@ -206,7 +261,9 @@ bet_type: straight, parlay, teaser, prop, future, ladder. Ladder = escalating th
 Sport: Use specific league — UCL not Soccer, EPL not Soccer, March Madness not NCAAB. If units not specified default 1. Parse ALL bets.`;
   const raw = await callLLM(text, sys);
   if (!raw) return { bets: [], error: 'AI unavailable' };
-  return parseJSON(raw) || { bets: [], error: 'Parse failed' };
+  const parsed = parseJSON(raw);
+  if (!parsed) return { bets: [], error: 'Parse failed' };
+  return normalizeParsedBets(parsed);
 }
 
 async function parseBetSlipImage(imageBase64, mediaType = 'image/png') {
@@ -215,14 +272,23 @@ Return ONLY JSON: {"sportsbook":"Hard Rock Bet","bets":[{"sport":"UCL","league":
 Use specific league names (UCL, EPL, La Liga, etc) not generic Soccer.`;
   const raw = await callLLM('Extract all bets from this bet slip.', sys, imageBase64, mediaType);
   if (!raw) return { bets: [], error: 'AI unavailable' };
-  return parseJSON(raw) || { bets: [], error: 'Could not read slip' };
+  const parsed = parseJSON(raw);
+  if (!parsed) return { bets: [], error: 'Could not read slip' };
+  return {
+    sportsbook: parsed.sportsbook ? String(parsed.sportsbook).slice(0, 80) : null,
+    ...normalizeParsedBets(parsed),
+  };
 }
 
 async function gradeBetAI(bet, result) {
   const sys = `Grade this bet. Return ONLY JSON: {"grade":"B","reason":"1-2 sentences"} A+/A=strong value, B=solid, C=average, D=questionable, F=terrible`;
   const raw = await callLLM(`${bet.description} | ${bet.odds} | ${result}`, sys);
   if (!raw) return { grade: 'C', reason: 'Grading unavailable' };
-  return parseJSON(raw) || { grade: 'C', reason: 'Could not analyze' };
+  const parsed = parseJSON(raw);
+  const grade = String(parsed?.grade || 'C').toUpperCase();
+  const reason = String(parsed?.reason || 'Could not analyze').slice(0, 300);
+  if (!['A+', 'A', 'B', 'C', 'D', 'F'].includes(grade)) return { grade: 'C', reason };
+  return { grade, reason };
 }
 
 async function parseTwitterPick(tweetText, author) {
