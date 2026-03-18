@@ -1,127 +1,109 @@
-# 🎰 BetTracker Pro — Discord Bot
+# BetTracker Discord Bot
 
-**AI-powered betting hub** that tracks, analyzes, grades, and ranks bets automatically.
-Uses **SQLite** (zero-config, free) — migrates to Supabase when you're ready.
+Discord bot for logging bets, scanning slips, grading completed wagers, tracking cappers, and posting recap/dashboard updates.
 
----
+This repo is normalized around the **Node/Fly.io implementation** and prepared for a **Codex handoff**.
+
+## What is in this repo
+
+- One primary runtime: **Node.js 20**
+- One deployment path: **Docker + Fly.io**
+- One local database path: **SQLite on `/data`**
+- One health endpoint for Fly: `GET /healthz`
+- One set of Codex instructions: `AGENTS.md`
+
+## Quick start
+
+```bash
+npm install
+cp .env.example .env
+# fill in your keys
+npm run deploy
+npm start
+```
 
 ## Commands
 
-| Command | What It Does |
-|---------|-------------|
-| `/bet` | Log bets in natural language — AI parses sport, odds, units |
-| `/slip` | Upload a bet slip photo → AI reads it (DraftKings, FanDuel, Hard Rock, etc.) |
-| `/stats` | Full analytics — record, win %, ROI, bankroll, recent bets |
-| `/leaderboard` | Ranked capper board sorted by profit, ROI, or win % |
-| `/bankroll` | Set/view bankroll & unit size with auto P/L tracking |
-| `/grade auto` | Auto-grade pending bets using live scores |
-| `/grade manual` | Manually grade your latest bet |
-| `/track add` | Track a Twitter/X capper — picks auto-imported via AI |
-| `/recap` | AI-written daily performance recap |
+- `/bet` — parse natural-language bets
+- `/slip` — scan a bet slip image
+- `/stats` — show performance stats
+- `/leaderboard` — rank cappers
+- `/bankroll` — set or view bankroll settings
+- `/grade auto` — auto-grade pending bets
+- `/grade manual` — manually grade the latest pending bet
+- `/track add` — track a Twitter/X account
+- `/track list` — show tracked Twitter/X accounts
+- `/recap` — generate an AI recap
 
-**Auto-features:** Picks channel auto-detection, auto-grading every 15 min, Twitter polling every 5 min.
+## Environment
 
----
+Configure at least one AI provider key:
 
-## Setup (4 Steps)
+- `GROQ_API_KEY`
+- `GEMINI_API_KEY`
+- `MISTRAL_API_KEY`
+- `OPENROUTER_API_KEY`
 
-### 1. Create a Discord Bot
+Other important values:
 
-1. Go to [discord.com/developers/applications](https://discord.com/developers/applications)
-2. Click **"New Application"** → name it (e.g. `BetTracker Pro`)
-3. **Bot** tab → click **"Reset Token"** → copy it → this is your `DISCORD_TOKEN`
-4. Same page → enable **Message Content Intent**
-5. **OAuth2 → URL Generator**:
-   - Scopes: `bot`, `applications.commands`
-   - Permissions: Send Messages, Embed Links, Attach Files, Read Message History, Add Reactions, Use Slash Commands
-6. Copy generated URL → open in browser → add to your server
+- `DISCORD_TOKEN`
+- `DISCORD_CLIENT_ID`
+- `DISCORD_GUILD_ID` for fast dev command registration
+- `ODDS_API_KEY` for auto-grading by scores
+- `DB_PATH` defaults to `/data/bettracker.db`
+- `PICKS_CHANNEL_IDS` for auto-parse channels
+- `DASHBOARD_CHANNEL_ID` for bot event posts
+- `TWITTER_CAPPER_MAP` / `CAPPER_CHANNEL_MAP` for fixed attribution
 
-Your **Client ID** is on the **General Information** page.
-
-### 2. Get API Keys
-
-| Service | Link | Notes |
-|---------|------|-------|
-| **Anthropic** | [console.anthropic.com](https://console.anthropic.com) | Powers all AI features |
-| **The Odds API** | [the-odds-api.com](https://the-odds-api.com) | 500 free requests/month |
-| **Twitter/X** *(optional)* | [developer.x.com](https://developer.x.com) | Only if tracking cappers |
-
-### 3. Configure
+## Local checks
 
 ```bash
-cd bettracker-discord
-npm install
-
-cp .env.example .env
-# Edit .env with your keys
+npm run check
 ```
 
-**To get your Server/Channel IDs:** Discord Settings → Advanced → Developer Mode ON, then right-click → Copy ID.
+This runs syntax checks across the bot files.
 
-### 4. Launch
+## Fly.io deploy
+
+This repo ships with `fly.toml` and `Dockerfile`.
+
+### Why the Fly config was adjusted
+
+The earlier Fly config exposed an HTTP service but the bot did not listen on the configured port. Fly expects `internal_port` to match a real listener, and apps with no `services` or `http_service` are treated as private/internal-only apps.
+
+This repo now includes a lightweight health server in `bot.js` and keeps the machine running by setting `auto_stop_machines = "off"`, since Fly can otherwise stop or suspend machines when idle.
+
+### Volume
+
+SQLite persistence is mounted at `/data` via the `[mounts]` section. Fly mounts require a `source` volume name and a `destination` path.
+
+Create the volume before first deploy if needed:
 
 ```bash
-npm run deploy   # Register slash commands
-npm start        # Start the bot
+fly volumes create bettracker_data --region iad
 ```
 
----
+Deploy:
 
-## Auto-Parse: Picks Channel
-
-Set `PICKS_CHANNEL_ID` in `.env`. Any message in that channel that looks like a bet gets auto-detected and logged. The bot needs 2+ signals to trigger (odds pattern, unit notation, pick keywords, bet type keywords, capper emojis like 🔒🔥💰).
-
----
-
-## Migrating to Supabase (Later)
-
-When BetTracker Pro is ready:
-
-1. `npm install @supabase/supabase-js`
-2. Add `SUPABASE_URL` and `SUPABASE_KEY` to `.env`
-3. Run `supabase-setup.sql` in Supabase SQL Editor
-4. `npm run migrate` — copies all SQLite data to Supabase
-5. Swap `services/database.js` to the Supabase version
-
-Your SQLite file stays intact as a backup.
-
----
-
-## Hosting
-
-| Option | Cost | Notes |
-|--------|------|-------|
-| **Your Mac** | Free | Just keep terminal open |
-| **Railway.app** | ~$5/mo | Easiest cloud deploy |
-| **Render.com** | Free tier | Good budget option |
-| **VPS** | $4-6/mo | Full control |
-
----
-
-## Project Structure
-
+```bash
+fly deploy
 ```
-bettracker-discord/
-├── bot.js                    # Entry point — client, cron jobs
-├── deploy-commands.js        # Register slash commands
-├── migrate-to-supabase.js    # Future migration script
-├── bettracker.db             # SQLite database (auto-created)
-├── commands/
-│   ├── bet.js                # /bet — natural language logging
-│   ├── slip.js               # /slip — bet slip OCR
-│   ├── stats.js              # /stats — analytics
-│   ├── leaderboard.js        # /leaderboard — rankings
-│   ├── bankroll.js           # /bankroll — bankroll mgmt
-│   ├── grade.js              # /grade — auto & manual
-│   ├── track.js              # /track — Twitter tracking
-│   └── recap.js              # /recap — AI daily summary
-├── services/
-│   ├── database.js           # SQLite layer (all data ops)
-│   ├── ai.js                 # Claude AI — parsing, OCR, grading
-│   ├── grading.js            # Auto-grade engine + Odds API
-│   └── twitter.js            # Twitter polling + pick detection
-├── handlers/
-│   └── messageHandler.js     # Auto-parse picks channel
-└── utils/
-    └── embeds.js             # Discord embed formatting
-```
+
+## Codex handoff
+
+OpenAI’s Codex guidance emphasizes a configured repo, reliable run/test commands, and `AGENTS.md` instructions within the repo tree.
+
+This repo includes:
+
+- `AGENTS.md` — repo instructions for Codex
+- `TASKS.md` — prioritized backlog
+- `docs/MERGE_DECISIONS.md` — what was consolidated and why
+- `docs/CODE_REVIEW.md` — issues fixed and issues still open
+- `docs/LEGACY_FEATURE_MAP.md` — what came from the older Python/Jarvis material
+
+## Known gaps
+
+- Auto-grading is strongest for sides/totals/moneylines and still limited for props/parlays.
+- OCR quality depends on the configured AI provider and the slip quality.
+- Twitter/X polling depends on a working bearer token and current API access.
+- Supabase migration exists as a scaffold and is not fully productionized.

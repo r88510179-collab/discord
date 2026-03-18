@@ -157,16 +157,9 @@ const TEAM_MAP = {
 const SPORT_KEYWORDS = {
   'nba':'NBA','nfl':'NFL','mlb':'MLB','nhl':'NHL',
   'ncaa':'NCAAF','cfb':'NCAAF','cbb':'NCAAB','college':'NCAAB',
-  'march madness':'NCAAB',
-  'ucl':'UCL','champions league':'UCL','europa league':'Europa League',
-  'premier league':'EPL','epl':'EPL','la liga':'La Liga','serie a':'Serie A',
-  'bundesliga':'Bundesliga','ligue 1':'Ligue 1',
-  'soccer':'Soccer','futbol':'Soccer','mls':'MLS',
-  'world cup':'World Cup','copa':'Copa America',
-  'ufc':'MMA','mma':'MMA','boxing':'Boxing','bellator':'MMA',
-  'golf':'Golf','pga':'Golf','masters':'Golf','open championship':'Golf',
-  'tennis':'Tennis','atp':'Tennis','wta':'Tennis',
-  'f1':'F1','nascar':'NASCAR','formula 1':'F1',
+  'soccer':'Soccer','futbol':'Soccer','epl':'Soccer','mls':'Soccer',
+  'ufc':'MMA','mma':'MMA','boxing':'MMA',
+  'golf':'Golf','tennis':'Tennis','pga':'Golf',
 };
 
 function detectSport(t) {
@@ -179,8 +172,8 @@ function detectSport(t) {
 }
 
 function regexParseBet(text) {
-  // Parlays, ladders, and multi-leg bets are too complex for regex — send to AI
-  if (/parlay|ladder|(\+.*\+.*\+)|(\d+\s*leg)|step\s*\d|tier/i.test(text)) return null;
+  // Parlays are too complex for regex — send to AI
+  if (/parlay|(\+.*\+.*\+)|(\d+\s*leg)/i.test(text)) return null;
 
   const oddsMatch = text.match(/([+-]\d{3,4})/);
   const odds = oddsMatch ? parseInt(oddsMatch[1]) : -110;
@@ -199,18 +192,14 @@ function regexParseBet(text) {
 async function parseBetText(text) {
   const quick = regexParseBet(text);
   if (quick?.bets?.length > 0) return quick;
-  const sys = `Sports betting parser. Return ONLY JSON: {"bets":[{"sport":"UCL","league":"Champions League","bet_type":"ladder","description":"Osimhen Shots 2+/4+/6+","odds":950,"units":1.0,"event_date":null,"legs":[{"description":"Osimhen 2+ Shots","odds":-200},{"description":"Osimhen 4+ Shots","odds":170}]}]}
-bet_type: straight, parlay, teaser, prop, future, ladder. Ladder = escalating thresholds on same player.
-Sport: Use specific league — UCL not Soccer, EPL not Soccer, March Madness not NCAAB. If units not specified default 1. Parse ALL bets.`;
+  const sys = `Sports betting parser. Return ONLY JSON: {"bets":[{"sport":"NBA","bet_type":"straight","description":"Lakers -3.5","odds":-110,"units":1.0,"event_date":null,"legs":[]}]}`;
   const raw = await callLLM(text, sys);
   if (!raw) return { bets: [], error: 'AI unavailable' };
   return parseJSON(raw) || { bets: [], error: 'Parse failed' };
 }
 
 async function parseBetSlipImage(imageBase64, mediaType = 'image/png') {
-  const sys = `Bet slip OCR expert. Recognize Hard Rock Bet, DraftKings, FanDuel, BetMGM, Caesars, Onyx.
-Return ONLY JSON: {"sportsbook":"Hard Rock Bet","bets":[{"sport":"UCL","league":"Champions League","bet_type":"straight","description":"Over 1.5 1H Goals - Corum vs Erokspor","odds":130,"units":1.0,"stake_amount":14.85,"potential_payout":34.15,"legs":[]}]}
-Use specific league names (UCL, EPL, La Liga, etc) not generic Soccer.`;
+  const sys = `Bet slip OCR expert. Return ONLY JSON: {"sportsbook":"name","bets":[{"sport":"NBA","bet_type":"straight","description":"Lakers -3.5","odds":-110,"units":1.0,"legs":[]}]}`;
   const raw = await callLLM('Extract all bets from this bet slip.', sys, imageBase64, mediaType);
   if (!raw) return { bets: [], error: 'AI unavailable' };
   return parseJSON(raw) || { bets: [], error: 'Could not read slip' };
