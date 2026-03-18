@@ -185,7 +185,9 @@ function regexParseBet(text) {
   const oddsMatch = text.match(/([+-]\d{3,4})/);
   const odds = oddsMatch ? parseInt(oddsMatch[1]) : -110;
   const unitsMatch = text.match(/(\d+\.?\d*)\s*u(?:nits?)?\b/i);
-  const units = unitsMatch ? parseFloat(unitsMatch[1]) : 1;
+  let units = unitsMatch ? parseFloat(unitsMatch[1]) : 1;
+  // Cap units at 50 — anything higher is probably a parsing error
+  if (units > 50) units = 1;
   let desc = text.replace(/(\d+\.?\d*)\s*u(?:nits?)?\b/gi, '').trim();
   if (desc.length > 200) desc = desc.substring(0, 200);
   if (desc.length < 3) return null;

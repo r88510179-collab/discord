@@ -12,6 +12,25 @@ const PICK_SIGNALS = [
   /🔒|🔥|💰|🎯|⚡/,
 ];
 
+// ── Celebration / Result patterns — these are NOT new picks ──
+const RESULT_PATTERNS = [
+  /✅/,                                    // checkmarks = already graded
+  /❌/,                                    // loss markers
+  /\bBANG+\b/i,                           // "BANGGGGG" celebrations
+  /\b(WINNER|CASHED|HIT|BOOM|CASH|WON)\b/i,
+  /\bPlay\s*#\d+.*\$[\d,]+/i,            // "Play #8: $9,769" = payout summary
+  /\$[\d,]{4,}/,                          // Dollar amounts over $999 = payouts not picks
+  /\b\d+-\d+\s*(record|run|streak)\b/i,   // "12-3 run" = record summary
+  /\b(recap|results|final|score)\b/i,     // recap/results posts
+];
+
+function looksLikeCelebration(text) {
+  if (!text) return false;
+  let hits = 0;
+  for (const p of RESULT_PATTERNS) { if (p.test(text)) hits++; }
+  return hits >= 1;
+}
+
 function looksLikePick(text) {
   if (!text) return false;
   let signals = 0;
@@ -142,7 +161,13 @@ async function handleMessage(message) {
   }
   const fullText = (message.content || '') + embedText;
 
-  // ═══ GUARD 5: Must look like a pick — require 2+ signals for text, or have images ═══
+  // ═══ GUARD 5: Skip celebration / result tweets (✅, BANG, WINNER, payouts) ═══
+  if (looksLikeCelebration(fullText)) {
+    console.log(`[Guard5] Skipped celebration: ${fullText.substring(0, 80)}...`);
+    return;
+  }
+
+  // ═══ GUARD 6: Must look like a pick — require 2+ signals for text, or have images ═══
   const textIsPick = looksLikePick(fullText);
   // For mapped channels (Twitter/capper), require stronger signal (3+) since lots of noise
   if (isMappedChannel && !hasImages) {
@@ -162,16 +187,23 @@ async function handleMessage(message) {
 
     // Parse text picks
     if (fullText.trim() && looksLikePick(fullText)) {
-      const parsed = await parseBetText(fullText);
+      // Clean text before parsing — strip retweet metadata and dollar amounts
+      let cleanText = fullText
+        .replace(/Retweeted @\w+/gi, '')
+        .replace(/Quoted @\w+/gi, '')
+        .replace(/\$[\d,]+\.?\d*/g, '')  // remove dollar amounts (payouts, not units)
+        .replace(/https?:\/\/\S+/g, '')   // remove URLs
+        .trim();
+      const parsed = await parseBetText(cleanText);
       if (parsed.bets?.length > 0) {
         for (const bet of parsed.bets) {
           const saved = await createBetWithLegs({
             capper_id: capper.id,
             sport: bet.sport, league: bet.league,
             bet_type: bet.bet_type, description: bet.description,
-            odds: bet.odds, units: bet.units || 1,
+            odds: bet.odds, units: Math.min(bet.units || 1, 50),
             event_date: bet.event_date, source,
-            raw_text: fullText,
+            raw_text: cleanText,
           }, bet.legs || []);
           allBets.push(saved);
         }
