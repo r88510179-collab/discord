@@ -1,8 +1,18 @@
 const Database = require('better-sqlite3');
+const Database = require('better-sqlite3');
 const path = require('path');
 const crypto = require('crypto');
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'bettracker.db');
+
+// ── TEMPORARY: Wipe old DB for schema migration after Codex merge ──
+// Remove this block after first successful deploy
+const fs = require('fs');
+try { fs.unlinkSync(DB_PATH); console.log('[DB] Wiped old database for schema migration'); } catch {}
+try { fs.unlinkSync(DB_PATH + '-wal'); } catch {}
+try { fs.unlinkSync(DB_PATH + '-shm'); } catch {}
+// ── END TEMPORARY ──
+
 const db = new Database(DB_PATH);
 
 // ── Enable WAL mode for better performance ──────────────────
@@ -104,6 +114,7 @@ db.exec(`
 
 // ── Lightweight additive migrations for older SQLite files ──
 const betColumns = db.prepare("PRAGMA table_info('bets')").all().map(c => c.name);
+if (!betColumns.includes('source_url')) db.exec('ALTER TABLE bets ADD COLUMN source_url TEXT');
 if (!betColumns.includes('source_channel_id')) db.exec('ALTER TABLE bets ADD COLUMN source_channel_id TEXT');
 if (!betColumns.includes('source_message_id')) db.exec('ALTER TABLE bets ADD COLUMN source_message_id TEXT');
 if (!betColumns.includes('fingerprint')) db.exec('ALTER TABLE bets ADD COLUMN fingerprint TEXT');
