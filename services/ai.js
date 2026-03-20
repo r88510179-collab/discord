@@ -34,7 +34,6 @@ const PROVIDERS = {
   },
 };
 
-// Get available providers (ones that have API keys set)
 function getProviders(needsImages = false) {
   return Object.entries(PROVIDERS)
     .filter(([_, p]) => {
@@ -46,7 +45,6 @@ function getProviders(needsImages = false) {
     .map(([name, p]) => ({ name, ...p, key: process.env[p.keyEnv] }));
 }
 
-// Rate limiting per provider
 const lastCall = {};
 async function waitSlot(provider) {
   const gap = provider === 'groq' ? 2100 : 4200;
@@ -55,7 +53,6 @@ async function waitSlot(provider) {
   lastCall[provider] = Date.now();
 }
 
-// ── OpenAI-format call (Groq, Mistral, OpenRouter) ──────────
 async function callOpenAI(provider, prompt, system) {
   await waitSlot(provider.name);
   const res = await fetch(provider.url, {
@@ -82,7 +79,6 @@ async function callOpenAI(provider, prompt, system) {
   return data.choices?.[0]?.message?.content || '';
 }
 
-// ── Gemini-format call (supports images) ────────────────────
 async function callGemini(provider, prompt, system, imageBase64, mediaType) {
   await waitSlot(provider.name);
   const url = `${provider.url}/${provider.model}:generateContent?key=${provider.key}`;
@@ -107,7 +103,6 @@ async function callGemini(provider, prompt, system, imageBase64, mediaType) {
   return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
 }
 
-// ── Universal call — tries providers in order ───────────────
 async function callLLM(prompt, system, imageBase64, mediaType) {
   const needsImages = !!imageBase64;
   const providers = getProviders(needsImages);
@@ -115,7 +110,6 @@ async function callLLM(prompt, system, imageBase64, mediaType) {
     console.error('[AI] No providers configured!');
     return null;
   }
-
   for (const provider of providers) {
     try {
       let result;
@@ -138,14 +132,14 @@ async function callLLM(prompt, system, imageBase64, mediaType) {
 
 function parseJSON(t) {
   if (!t || typeof t !== 'string') return null;
-  const cleaned = t.replace(/```json|```/gi, '').trim();
-  try { return JSON.parse(cleaned); }
-  catch {
+    const cleaned = t.replace(/```json|```/gi, '').trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch {
     const start = cleaned.indexOf('{');
     const end = cleaned.lastIndexOf('}');
     if (start >= 0 && end > start) {
-      try { return JSON.parse(cleaned.slice(start, end + 1)); }
-      catch { return null; }
+      try { return JSON.parse(cleaned.slice(start, end + 1)); } catch { return null; }
     }
     return null;
   }
@@ -161,13 +155,11 @@ function normalizeBet(bet) {
   if (!bet || typeof bet !== 'object') return null;
   const description = String(bet.description || '').trim().slice(0, 250);
   if (!description) return null;
-
   const rawOdds = toSafeNumber(bet.odds, -110);
   const odds = Math.abs(rawOdds) > 9999 ? -110 : Math.trunc(rawOdds);
   const units = Math.min(Math.max(toSafeNumber(bet.units, 1), 0.01), 100);
   const betType = String(bet.bet_type || 'straight').toLowerCase();
   const allowedTypes = new Set(['straight', 'parlay', 'teaser', 'prop', 'future', 'ladder']);
-
   const legs = Array.isArray(bet.legs)
     ? bet.legs
         .map((leg) => {
@@ -177,7 +169,6 @@ function normalizeBet(bet) {
         })
         .filter(Boolean)
     : [];
-
   return {
     sport: String(bet.sport || 'Unknown').trim().slice(0, 50) || 'Unknown',
     league: bet.league ? String(bet.league).trim().slice(0, 80) : null,
@@ -196,7 +187,28 @@ function normalizeParsedBets(payload) {
   return { bets: clean };
 }
 
-// ── Fast regex parser (no AI needed for simple bets) ────────
+// ── Confidence assessment for parsed bets ───────────────────
+const CONFIDENCE_THRESHOLD = 2;
+
+function assessConfidence(bet, originalText) {
+  let score = 0;
+  const text = String(originalText || bet.description || '').toLowerCase();
+  const desc = String(bet.description || '').toLowerCase();
+  if (bet.sport && bet.sport !== 'Unknown') score += 1;
+  if (/[+-]\d{3,4}/.test(text)) score += 1;
+  if (/\b(ml|moneyline|spread|over|under|o\/u|rl|pk|parlay|teaser|prop|future|ladder)\b/i.test(text)) score += 1;
+  const COMMON_WORDS = new Set(['lock','play','pick','game','this','that','take','like','best','over','under','with','from','will','have','been','them','they','what','about']);
+  const words = desc.replace(/[^a-z\s]/g, '').split(/\s+/).filter(w => w.length > 4 && !COMMON_WORDS.has(w));
+  if (words.length > 0) score += 1;
+  if (/\d+\.5\b/.test(desc) || /[+-]\d{1,2}\.?\d*/.test(desc)) score += 1;
+  return { ...bet, confidence: score, needs_review: score < CONFIDENCE_THRESHOLD };
+}
+
+function assessConfidenceAll(parsedResult, originalText) {
+  if (!parsedResult || !Array.isArray(parsedResult.bets)) return parsedResult;
+  return { ...parsedResult, bets: parsedResult.bets.map(bet => assessConfidence(bet, originalText)) };
+}
+
 const NBA_TEAMS = 'hawks|celtics|nets|hornets|bulls|cavaliers|cavs|mavericks|mavs|nuggets|pistons|warriors|rockets|pacers|clippers|lakers|grizzlies|heat|bucks|timberwolves|wolves|pelicans|knicks|thunder|magic|76ers|sixers|suns|blazers|kings|spurs|raptors|jazz';
 const NFL_TEAMS = 'cardinals|falcons|ravens|bills|panthers|bears|bengals|browns|cowboys|broncos|lions|packers|texans|colts|jaguars|jags|chiefs|raiders|chargers|rams|dolphins|vikings|patriots|pats|saints|giants|jets|eagles|steelers|49ers|niners|seahawks|commanders|titans|bucs|buccaneers';
 const MLB_TEAMS = 'diamondbacks|dbacks|braves|orioles|red sox|cubs|white sox|reds|guardians|rockies|tigers|astros|royals|angels|dodgers|marlins|brewers|twins|mets|yankees|athletics|phillies|pirates|padres|mariners|cardinals|rays|rangers|blue jays|nationals';
@@ -226,49 +238,43 @@ const SPORT_KEYWORDS = {
 
 function detectSport(t) {
   const l = t.toLowerCase();
-  // Check keywords first
   for (const [k, v] of Object.entries(SPORT_KEYWORDS)) if (l.includes(k)) return v;
-  // Then check team names
   for (const [sport, regex] of Object.entries(TEAM_MAP)) if (regex.test(t)) return sport;
   return 'Unknown';
 }
 
 function regexParseBet(text) {
-  // Parlays, ladders, and multi-leg bets are too complex for regex — send to AI
   if (/parlay|ladder|(\+.*\+.*\+)|(\d+\s*leg)|step\s*\d|tier/i.test(text)) return null;
-
   const oddsMatch = text.match(/([+-]\d{3,4})/);
   const odds = oddsMatch ? parseInt(oddsMatch[1]) : -110;
   const unitsMatch = text.match(/(\d+\.?\d*)\s*u(?:nits?)?\b/i);
   let units = unitsMatch ? parseFloat(unitsMatch[1]) : 1;
-  // Cap units at 50 — anything higher is probably a parsing error
   if (units > 50) units = 1;
   let desc = text.replace(/(\d+\.?\d*)\s*u(?:nits?)?\b/gi, '').trim();
   if (desc.length > 200) desc = desc.substring(0, 200);
   if (desc.length < 3) return null;
-  return { bets: [{
-    sport: detectSport(text), league: null,
-    bet_type: 'straight',
-    description: desc, odds, units, event_date: null, legs: [],
-  }] };
+  return {
+    bets: [{
+      sport: detectSport(text), league: null, bet_type: 'straight',
+      description: desc, odds, units, event_date: null, legs: [],
+    }]
+  };
 }
 
 async function parseBetText(text) {
   const quick = regexParseBet(text);
-  if (quick?.bets?.length > 0) return quick;
+  if (quick?.bets?.length > 0) return assessConfidenceAll(quick, text);
   const sys = `Sports betting parser. Return ONLY JSON: {"bets":[{"sport":"UCL","league":"Champions League","bet_type":"ladder","description":"Osimhen Shots 2+/4+/6+","odds":950,"units":1.0,"event_date":null,"legs":[{"description":"Osimhen 2+ Shots","odds":-200},{"description":"Osimhen 4+ Shots","odds":170}]}]}
-bet_type: straight, parlay, teaser, prop, future, ladder. Ladder = escalating thresholds on same player.
-Sport: Use specific league — UCL not Soccer, EPL not Soccer, March Madness not NCAAB. If units not specified default 1. Parse ALL bets.`;
+bet_type: straight, parlay, teaser, prop, future, ladder. Ladder = escalating thresholds on same player. Sport: Use specific league — UCL not Soccer, EPL not Soccer, March Madness not NCAAB. If units not specified default 1. Parse ALL bets.`;
   const raw = await callLLM(text, sys);
   if (!raw) return { bets: [], error: 'AI unavailable' };
   const parsed = parseJSON(raw);
   if (!parsed) return { bets: [], error: 'Parse failed' };
-  return normalizeParsedBets(parsed);
+  return assessConfidenceAll(normalizeParsedBets(parsed), text);
 }
 
 async function parseBetSlipImage(imageBase64, mediaType = 'image/png') {
-  const sys = `Bet slip OCR expert. Recognize Hard Rock Bet, DraftKings, FanDuel, BetMGM, Caesars, Onyx.
-Return ONLY JSON: {"sportsbook":"Hard Rock Bet","bets":[{"sport":"UCL","league":"Champions League","bet_type":"straight","description":"Over 1.5 1H Goals - Corum vs Erokspor","odds":130,"units":1.0,"stake_amount":14.85,"potential_payout":34.15,"legs":[]}]}
+  const sys = `Bet slip OCR expert. Recognize Hard Rock Bet, DraftKings, FanDuel, BetMGM, Caesars, Onyx. Return ONLY JSON: {"sportsbook":"Hard Rock Bet","bets":[{"sport":"UCL","league":"Champions League","bet_type":"straight","description":"Over 1.5 1H Goals - Corum vs Erokspor","odds":130,"units":1.0,"stake_amount":14.85,"potential_payout":34.15,"legs":[]}]}
 Use specific league names (UCL, EPL, La Liga, etc) not generic Soccer.`;
   const raw = await callLLM('Extract all bets from this bet slip.', sys, imageBase64, mediaType);
   if (!raw) return { bets: [], error: 'AI unavailable' };
@@ -281,7 +287,8 @@ Use specific league names (UCL, EPL, La Liga, etc) not generic Soccer.`;
 }
 
 async function gradeBetAI(bet, result) {
-  const sys = `Grade this bet. Return ONLY JSON: {"grade":"B","reason":"1-2 sentences"} A+/A=strong value, B=solid, C=average, D=questionable, F=terrible`;
+  const sys = `Grade this bet. Return ONLY JSON: {"grade":"B","reason":"1-2 sentences"}
+A+/A=strong value, B=solid, C=average, D=questionable, F=terrible`;
   const raw = await callLLM(`${bet.description} | ${bet.odds} | ${result}`, sys);
   if (!raw) return { grade: 'C', reason: 'Grading unavailable' };
   const parsed = parseJSON(raw);
@@ -303,4 +310,4 @@ async function generateRecap(stats, recentBets) {
   return (await callLLM(`Stats: ${JSON.stringify(stats)}\nBets: ${JSON.stringify(recentBets)}`, sys)) || 'Recap unavailable.';
 }
 
-module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap };
+module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessConfidence, assessConfidenceAll, CONFIDENCE_THRESHOLD };
