@@ -1,5 +1,5 @@
 const { parseBetText, parseBetSlipImage } = require('../services/ai');
-const { getOrCreateCapper, createBetWithLegs, isDuplicateBet } = require('../services/database');
+const { getOrCreateCapper, createBetWithLegs, isDuplicateBet, isAuditMode } = require('../services/database');
 const { betEmbed } = require('../utils/embeds');
 const { postPickTracked } = require('../services/dashboard');
 
@@ -201,8 +201,9 @@ async function handleMessage(message) {
           // Skip duplicates (same capper, similar description, last 10 min)
           if (isDuplicateBet(capper.id, bet.description)) continue;
 
-          // Determine review_status from confidence assessment
-          const reviewStatus = bet._confidence === 'low' ? 'needs_review' : 'confirmed';
+          // Determine review_status: audit mode overrides confidence
+          const auditOn = isAuditMode();
+          const reviewStatus = (auditOn || bet._confidence === 'low') ? 'needs_review' : 'confirmed';
 
           const saved = await createBetWithLegs({
             capper_id: capper.id,
@@ -263,9 +264,13 @@ async function handleMessage(message) {
       }
     }
 
-    // Low-confidence bets are stored with needs_review but no announcement
+    // Bets held for review (audit mode or low confidence) — notify but don't post to dashboard
     if (reviewBets.length > 0) {
-      console.log(`[Confidence] Stored ${reviewBets.length} ambiguous bet(s) for manual review from ${capperInfo.name}`);
+      const ids = reviewBets.map(b => b.id.slice(0, 8)).join(', ');
+      console.log(`[Review] Stored ${reviewBets.length} bet(s) for manual review from ${capperInfo.name} [${ids}]`);
+      await message.reply({
+        content: `🔒 **${reviewBets.length}** bet(s) saved for review. IDs: ${reviewBets.map(b => `\`${b.id.slice(0, 8)}\``).join(', ')}`,
+      });
     }
   } catch (err) {
     console.error('[MessageHandler] Error:', err.message);

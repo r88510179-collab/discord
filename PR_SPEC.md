@@ -1,18 +1,21 @@
 # PR_SPEC.md
 
 ## Title
-Team and Player Name Normalization
+Admin Audit & Staging Mode (PR #10)
 
 ## Problem
-The AI parser currently outputs whatever name it finds in the text (e.g., "GSW", "Warriors", "Dubs"). This makes it impossible to aggregate stats or search for "Golden State Warriors" bets reliably.
+The bot currently auto-posts bets. To ensure 100% accuracy and build trust, the Admin needs to review every bet before it hits the public dashboard.
 
 ## Scope
-- Create `data/mappings/teams.json` containing key-value pairs (e.g., "LAL": "Los Angeles Lakers").
-- Create `services/normalization.js` with a `normalizeTeam(name)` and `normalizePlayer(name)` function.
-- Update `services/ai.js` to run the AI output through these normalization functions before saving to the database.
-- Add a new migration `migrations/003_normalize_existing_data.sql` (optional, for later).
+1. **Settings Table:** Add a `settings` table to SQLite with a key `audit_mode` (default to `1` / true).
+2. **Admin Command:** Create `/admin audit <on|off>` to toggle this mode (Administrator only).
+3. **Logic Reroute:** Update the bet extraction flow:
+   - If `audit_mode` is `on`, ALL parsed bets are saved with `status = 'needs_review'`.
+   - The bot should NOT post to the `#dashboard` channel automatically in this mode.
+4. **Notification:** The bot should send a private confirmation to the user (or the admin log) saying: "Bet saved for review. ID: [id]".
 
 ## Acceptance Criteria
-- [ ] "LAL" and "Lakers" both resolve to "Los Angeles Lakers" before database insertion.
-- [ ] Normalization logic handles case-insensitivity.
-- [ ] `npm run test:reliability` passes with new test cases for different team aliases.
+- [ ] `/admin audit on` makes all new bets wait for approval.
+- [ ] `/admin audit off` returns the bot to "Auto-Pilot" mode.
+- [ ] New migration `003_add_settings_table.sql` created.
+- [ ] `npm run test:reliability` passes with a staging workflow test.

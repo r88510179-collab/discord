@@ -57,6 +57,10 @@ const stmts = {
     WHERE capper_id = ? AND created_at > datetime('now', '-10 minutes')
     AND description LIKE ? LIMIT 1`),
 
+  // Settings
+  getSetting: db.prepare('SELECT value FROM settings WHERE key = ?'),
+  setSetting: db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)'),
+
   // Review queue management
   approveBet: db.prepare("UPDATE bets SET review_status = 'confirmed' WHERE id = ? AND review_status = 'needs_review'"),
   rejectBet:  db.prepare("DELETE FROM bets WHERE id = ? AND review_status = 'needs_review'"),
@@ -329,6 +333,20 @@ function rejectBet(betId) {
   return info.changes > 0;
 }
 
+// ── Settings ──────────────────────────────────────────────
+function getSetting(key) {
+  const row = stmts.getSetting.get(key);
+  return row ? row.value : null;
+}
+
+function setSetting(key, value) {
+  stmts.setSetting.run(key, String(value));
+}
+
+function isAuditMode() {
+  return getSetting('audit_mode') === 'on';
+}
+
 // ── Export everything (same interface as old supabase.js) ────
 module.exports = {
   db,
@@ -356,4 +374,7 @@ module.exports = {
   getPendingReviews,
   approveBet,
   rejectBet,
+  getSetting,
+  setSetting,
+  isAuditMode,
 };
