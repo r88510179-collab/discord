@@ -234,39 +234,61 @@ function detectSport(t) {
 }
 
 // ── Confidence assessment for parsed bets ───────────────────
-// Returns { confidence: 'high'|'low', reasons: string[] }
+// Additive weighted scoring — each signal contributes a weight.
+// Total score >= AMBIGUITY_THRESHOLD → low confidence.
+// Returns { confidence: 'high'|'low', score: number, reasons: string[] }
+const AMBIGUITY_THRESHOLD = 3;
+
 function assessParseConfidence(text, bet) {
   const reasons = [];
+  let score = 0;
   const t = (text || '').trim();
 
-  // 1. Very short input is inherently ambiguous
-  if (t.length < 10) reasons.push('input_too_short');
+  // 1. Very short input is inherently ambiguous (weight: 1.5)
+  if (t.length < 10) { reasons.push('input_too_short'); score += 1.5; }
 
-  // 2. Sport couldn't be identified
-  if (!bet.sport || bet.sport === 'Unknown') reasons.push('sport_unknown');
+  // 2. Sport couldn't be identified (weight: 1)
+  if (!bet.sport || bet.sport === 'Unknown') { reasons.push('sport_unknown'); score += 1; }
 
-  // 3. No explicit odds found (defaulted to -110)
-  if (!text.match(/[+-]\d{3,4}/)) reasons.push('no_explicit_odds');
+  // 3. No explicit odds found — defaulted to -110 (weight: 0.5)
+  if (!text.match(/[+-]\d{3,4}/)) { reasons.push('no_explicit_odds'); score += 0.5; }
 
-  // 4. No explicit units found
-  if (!text.match(/\d+\.?\d*\s*u(?:nits?)?\b/i)) reasons.push('no_explicit_units');
+  // 4. No explicit units found (weight: 0.5)
+  if (!text.match(/\d+\.?\d*\s*u(?:nits?)?\b/i)) { reasons.push('no_explicit_units'); score += 0.5; }
 
-  // 5. Description is very short or generic
+  // 5. Description is very short or generic (weight: 1)
   const desc = (bet.description || '').trim();
-  if (desc.length < 8) reasons.push('description_too_short');
+  if (desc.length < 8) { reasons.push('description_too_short'); score += 1; }
 
-  // 6. Conflicting signals — text has both pick and celebration patterns
+  // 6. Conflicting signals — text has both pick and celebration patterns (weight: 2)
   const hasCelebration = /✅|❌|\bBANG+\b|\b(WINNER|CASHED|HIT|BOOM)\b/i.test(t);
   const hasPick = /\b(lock|potd|play|bet|hammer|tail)\b/i.test(t);
-  if (hasCelebration && hasPick) reasons.push('conflicting_signals');
+  if (hasCelebration && hasPick) { reasons.push('conflicting_signals'); score += 2; }
 
-  // 7. Text is mostly emojis or non-alphanumeric
+  // 7. Text is mostly emojis or non-alphanumeric (weight: 1.5)
   const alphaCount = (t.match(/[a-zA-Z0-9]/g) || []).length;
-  if (alphaCount < t.length * 0.3 && t.length > 5) reasons.push('low_alpha_content');
+  if (alphaCount < t.length * 0.3 && t.length > 5) { reasons.push('low_alpha_content'); score += 1.5; }
 
-  // Threshold: 3+ reasons → low confidence
-  const confidence = reasons.length >= 3 ? 'low' : 'high';
-  return { confidence, reasons };
+  // 8. Ambiguous line value — a bare number like "+3" could be spread or odds (weight: 1)
+  const bareNumberMatch = t.match(/^[^a-zA-Z]*([+-]?\d{1,2}(?:\.5)?)\s*$/);
+  if (bareNumberMatch && !t.match(/[+-]\d{3,4}/)) { reasons.push('ambiguous_line'); score += 1; }
+
+  // 9. Uncertain / hedging language — not a firm pick (weight: 1.5)
+  if (/\b(maybe|might|thinking about|considering|leaning|not sure|idk|unsure)\b/i.test(t)) {
+    reasons.push('uncertain_language'); score += 1.5;
+  }
+
+  // 10. Multiple sports detected — conflicting context (weight: 1)
+  let sportsFound = 0;
+  for (const regex of Object.values(TEAM_MAP)) { if (regex.test(t)) sportsFound++; }
+  if (sportsFound >= 2) { reasons.push('multiple_sports'); score += 1; }
+
+  // 11. Question mark suggests uncertainty, not a firm play (weight: 0.5)
+  if (/\?/.test(t)) { reasons.push('contains_question'); score += 0.5; }
+
+  // Additive threshold: score >= AMBIGUITY_THRESHOLD → low confidence
+  const confidence = score >= AMBIGUITY_THRESHOLD ? 'low' : 'high';
+  return { confidence, score, reasons };
 }
 
 function regexParseBet(text) {
@@ -289,17 +311,26 @@ function regexParseBet(text) {
     description: desc, odds, units, event_date: null, legs: [],
   };
 
-  // Assess confidence and attach metadata
-  const { confidence, reasons } = assessParseConfidence(text, bet);
-  bet._confidence = confidence;
-  bet._confidence_reasons = reasons;
+  return { bets: [bet], _sourceText: text };
+}
 
-  return { bets: [bet] };
+// ── Shared post-normalization confidence gating ─────────────
+function applyConfidenceGating(result, sourceText) {
+  for (const bet of result.bets) {
+    const { confidence, score, reasons } = assessParseConfidence(sourceText, bet);
+    bet._confidence = confidence;
+    bet._confidence_score = score;
+    bet._confidence_reasons = reasons;
+  }
+  return result;
 }
 
 async function parseBetText(text) {
   const quick = regexParseBet(text);
-  if (quick?.bets?.length > 0) return normalizeParsedBets(quick);
+  if (quick?.bets?.length > 0) {
+    const sourceText = quick._sourceText || text;
+    return applyConfidenceGating(normalizeParsedBets(quick), sourceText);
+  }
   const sys = `Sports betting parser. Return ONLY JSON: {"bets":[{"sport":"UCL","league":"Champions League","bet_type":"ladder","description":"Osimhen Shots 2+/4+/6+","odds":950,"units":1.0,"event_date":null,"legs":[{"description":"Osimhen 2+ Shots","odds":-200},{"description":"Osimhen 4+ Shots","odds":170}]}]}
 bet_type: straight, parlay, teaser, prop, future, ladder. Ladder = escalating thresholds on same player.
 Sport: Use specific league — UCL not Soccer, EPL not Soccer, March Madness not NCAAB. If units not specified default 1. Parse ALL bets.`;
@@ -307,16 +338,7 @@ Sport: Use specific league — UCL not Soccer, EPL not Soccer, March Madness not
   if (!raw) return { bets: [], error: 'AI unavailable' };
   const parsed = parseJSON(raw);
   if (!parsed) return { bets: [], error: 'Parse failed' };
-  const result = normalizeParsedBets(parsed);
-
-  // Assess confidence on each AI-parsed bet
-  for (const bet of result.bets) {
-    const { confidence, reasons } = assessParseConfidence(text, bet);
-    bet._confidence = confidence;
-    bet._confidence_reasons = reasons;
-  }
-
-  return result;
+  return applyConfidenceGating(normalizeParsedBets(parsed), text);
 }
 
 async function parseBetSlipImage(imageBase64, mediaType = 'image/png') {
@@ -356,4 +378,4 @@ async function generateRecap(stats, recentBets) {
   return (await callLLM(`Stats: ${JSON.stringify(stats)}\nBets: ${JSON.stringify(recentBets)}`, sys)) || 'Recap unavailable.';
 }
 
-module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence };
+module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, AMBIGUITY_THRESHOLD };
