@@ -3,6 +3,8 @@
 // Priority: Groq (fastest) → Gemini → Mistral → OpenRouter
 // ═══════════════════════════════════════════════════════════
 
+const { normalizeDescription: normalizeTeamNames } = require('./normalization');
+
 const PROVIDERS = {
   groq: {
     url: 'https://api.groq.com/openai/v1/chat/completions',
@@ -159,8 +161,11 @@ function toSafeNumber(value, fallback = null) {
 
 function normalizeBet(bet) {
   if (!bet || typeof bet !== 'object') return null;
-  const description = String(bet.description || '').trim().slice(0, 250);
-  if (!description) return null;
+  const rawDesc = String(bet.description || '').trim().slice(0, 250);
+  if (!rawDesc) return null;
+
+  // Run team/alias normalization on description before storing
+  const description = normalizeTeamNames(rawDesc);
 
   const rawOdds = toSafeNumber(bet.odds, -110);
   const odds = Math.abs(rawOdds) > 9999 ? -110 : Math.trunc(rawOdds);
@@ -173,7 +178,8 @@ function normalizeBet(bet) {
         .map((leg) => {
           const legDesc = String(leg?.description || '').trim().slice(0, 200);
           if (!legDesc) return null;
-          return { description: legDesc, odds: toSafeNumber(leg?.odds, null) };
+          // Normalize leg descriptions too
+          return { description: normalizeTeamNames(legDesc), odds: toSafeNumber(leg?.odds, null) };
         })
         .filter(Boolean)
     : [];
