@@ -44,18 +44,37 @@ function testNBATeamAliases() {
 // ═══════════════════════════════════════════════════════════
 function testOtherLeagueAliases() {
   const cases = [
+    // NFL
     ['Chiefs', 'Kansas City Chiefs'],
     ['KC', 'Kansas City Chiefs'],
     ['49ers', 'San Francisco 49ers'],
     ['niners', 'San Francisco 49ers'],
+    ['Philly', 'Philadelphia Eagles'],
+    ['Eagles', 'Philadelphia Eagles'],
+    ['Cowboys', 'Dallas Cowboys'],
+    ['Boys', 'Dallas Cowboys'],
+    ['Cincy', 'Cincinnati Bengals'],
+    ['Phins', 'Miami Dolphins'],
+    ['NYJ', 'New York Jets'],
+    // MLB
     ['Yankees', 'New York Yankees'],
     ['NYY', 'New York Yankees'],
+    ['Yanks', 'New York Yankees'],
+    ['Bronx Bombers', 'New York Yankees'],
     ['Dodgers', 'Los Angeles Dodgers'],
+    ['Stros', 'Houston Astros'],
+    ['Phillies', 'Philadelphia Phillies'],
+    ['Phils', 'Philadelphia Phillies'],
+    ['Red Sox', 'Boston Red Sox'],
+    ['Cards', 'St. Louis Cardinals'],
+    ['STL', 'St. Louis Cardinals'],
+    ['Blue Jays', 'Toronto Blue Jays'],
+    ['Jays', 'Toronto Blue Jays'],
+    // NHL
     ['Oilers', 'Edmonton Oilers'],
     ['Avs', 'Colorado Avalanche'],
     ['Leafs', 'Toronto Maple Leafs'],
     ['Bruins', 'Boston Bruins'],
-    ['Red Sox', 'Boston Red Sox'],
   ];
 
   for (const [input, expected] of cases) {
@@ -64,6 +83,25 @@ function testOtherLeagueAliases() {
       `normalizeTeam("${input}") should return "${expected}" but got "${result}"`);
   }
   console.log('  ✓ NFL, MLB, NHL aliases resolve to canonical names');
+}
+
+// ═══════════════════════════════════════════════════════════
+// TEST 2b: Ambiguous cross-league abbreviations pass through
+// ═══════════════════════════════════════════════════════════
+function testAmbiguousAbbreviations() {
+  // PHI and TOR map to different teams across leagues — should pass through
+  const ambiguous = ['PHI', 'TOR'];
+  for (const abbr of ambiguous) {
+    const result = normalizeTeam(abbr);
+    assert.strictEqual(result, abbr,
+      `Ambiguous abbreviation "${abbr}" should pass through unchanged but got "${result}"`);
+  }
+  // Non-ambiguous abbreviations that only appear in one league should still resolve
+  assert.strictEqual(normalizeTeam('BOS'), 'Boston Red Sox');
+  assert.strictEqual(normalizeTeam('DAL'), 'Dallas Cowboys');
+  assert.strictEqual(normalizeTeam('MIA'), 'Miami Dolphins');
+  assert.strictEqual(normalizeTeam('ATL'), 'Atlanta Braves');
+  console.log('  ✓ Ambiguous abbreviations pass through, unique ones resolve');
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -153,6 +191,7 @@ function testCanonicalSelfMap() {
 console.log('Normalization validation:');
 testNBATeamAliases();
 testOtherLeagueAliases();
+testAmbiguousAbbreviations();
 testCaseInsensitivity();
 testUnknownPassthrough();
 testDescriptionNormalization();

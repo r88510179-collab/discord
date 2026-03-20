@@ -16,15 +16,27 @@ let aliasIndex = {};
 function loadTeamMappings() {
   const raw = JSON.parse(fs.readFileSync(TEAMS_PATH, 'utf-8'));
   const index = {};
+  const AMBIGUOUS = Symbol('ambiguous');
 
   for (const [league, teams] of Object.entries(raw)) {
     for (const [canonical, aliases] of Object.entries(teams)) {
-      // Index the canonical name itself
+      // Index the canonical name itself (full names never collide)
       index[canonical.toLowerCase()] = canonical;
       for (const alias of aliases) {
-        index[alias.toLowerCase()] = canonical;
+        const key = alias.toLowerCase();
+        if (key in index && index[key] !== canonical && index[key] !== AMBIGUOUS) {
+          // Cross-league collision — mark as ambiguous so it passes through
+          index[key] = AMBIGUOUS;
+        } else if (index[key] !== AMBIGUOUS) {
+          index[key] = canonical;
+        }
       }
     }
+  }
+
+  // Remove ambiguous entries so lookups fall through to passthrough
+  for (const key of Object.keys(index)) {
+    if (index[key] === AMBIGUOUS) delete index[key];
   }
 
   return index;
@@ -64,15 +76,23 @@ function normalizeDescription(text) {
   // Sort aliases by length descending so longer matches take priority
   const sortedAliases = Object.keys(aliasIndex).sort((a, b) => b.length - a.length);
 
+  // Use placeholder tokens to prevent cascading replacements
+  const replacements = [];
   let result = text;
+
   for (const alias of sortedAliases) {
-    // Only replace whole-word matches (word boundary)
-    // Escape regex special chars in alias
     const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const regex = new RegExp(`\\b${escaped}\\b`, 'gi');
-    if (regex.test(result)) {
-      result = result.replace(regex, aliasIndex[alias]);
-    }
+    result = result.replace(regex, (match) => {
+      const token = `\x00${replacements.length}\x00`;
+      replacements.push(aliasIndex[alias]);
+      return token;
+    });
+  }
+
+  // Restore tokens with canonical names
+  for (let i = 0; i < replacements.length; i++) {
+    result = result.replace(`\x00${i}\x00`, replacements[i]);
   }
 
   return result;
