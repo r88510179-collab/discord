@@ -4,6 +4,7 @@ const crypto = require('crypto');
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'bettracker.db');
 
+
 const db = new Database(DB_PATH);
 
 // ── Enable WAL mode for better performance ──────────────────
@@ -109,6 +110,7 @@ if (!betColumns.includes('source_url')) db.exec('ALTER TABLE bets ADD COLUMN sou
 if (!betColumns.includes('source_channel_id')) db.exec('ALTER TABLE bets ADD COLUMN source_channel_id TEXT');
 if (!betColumns.includes('source_message_id')) db.exec('ALTER TABLE bets ADD COLUMN source_message_id TEXT');
 if (!betColumns.includes('fingerprint')) db.exec('ALTER TABLE bets ADD COLUMN fingerprint TEXT');
+if (!betColumns.includes('review_status')) db.exec("ALTER TABLE bets ADD COLUMN review_status TEXT DEFAULT 'confirmed'");
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_bets_fingerprint_unique ON bets(fingerprint) WHERE fingerprint IS NOT NULL');
 
 // ── Prepared statements (fast) ──────────────────────────────
@@ -119,8 +121,8 @@ const stmts = {
   insertCapper:      db.prepare('INSERT INTO cappers (id, discord_id, display_name, avatar_url) VALUES (?, ?, ?, ?)'),
   insertCapperTwitter: db.prepare('INSERT INTO cappers (id, twitter_handle, display_name) VALUES (?, ?, ?)'),
 
-  insertBet: db.prepare(`INSERT INTO bets (id, capper_id, sport, league, bet_type, description, odds, units, event_date, source, source_url, source_channel_id, source_message_id, fingerprint, raw_text)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+  insertBet: db.prepare(`INSERT INTO bets (id, capper_id, sport, league, bet_type, description, odds, units, event_date, source, source_url, source_channel_id, source_message_id, fingerprint, raw_text, review_status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   insertLeg: db.prepare('INSERT INTO parlay_legs (id, bet_id, description, odds) VALUES (?, ?, ?, ?)'),
   gradeBet:  db.prepare('UPDATE bets SET result = ?, profit_units = ?, grade = ?, grade_reason = ?, graded_at = datetime(\'now\') WHERE id = ?'),
   getBet:    db.prepare('SELECT * FROM bets WHERE id = ?'),
@@ -128,6 +130,8 @@ const stmts = {
 
   pendingBets: db.prepare(`SELECT b.*, c.display_name AS capper_name, c.discord_id AS capper_discord_id
     FROM bets b LEFT JOIN cappers c ON b.capper_id = c.id WHERE b.result = 'pending' ORDER BY b.created_at DESC`),
+  needsReviewBets: db.prepare(`SELECT b.*, c.display_name AS capper_name, c.discord_id AS capper_discord_id
+    FROM bets b LEFT JOIN cappers c ON b.capper_id = c.id WHERE b.review_status = 'needs_review' ORDER BY b.created_at DESC`),
   recentBets:  db.prepare('SELECT * FROM bets WHERE capper_id = ? ORDER BY created_at DESC LIMIT ?'),
   recentBetsAll: db.prepare('SELECT * FROM bets ORDER BY created_at DESC LIMIT ?'),
 
@@ -223,6 +227,7 @@ function createBet(betData) {
       betData.event_date || null, betData.source || 'manual',
       betData.source_url || null, betData.source_channel_id || null,
       betData.source_message_id || null, fingerprint, betData.raw_text || null,
+      betData.review_status || 'confirmed',
     );
   } catch (err) {
     // Concurrent insert race: unique fingerprint already committed by another writer.
@@ -382,6 +387,10 @@ function setLastScannedMessage(channelId, messageId) {
 }
 
 // ── Duplicate detection ─────────────────────────────────────
+function getNeedsReviewBets() {
+  return stmts.needsReviewBets.all();
+}
+
 function isDuplicateBet(capperId, description) {
   if (!description || description.length < 5) return false;
   // Extract key words (player name, team, line) for fuzzy matching
@@ -418,4 +427,5 @@ module.exports = {
   getLastScannedMessage,
   setLastScannedMessage,
   isDuplicateBet,
+  getNeedsReviewBets,
 };

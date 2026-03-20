@@ -17,6 +17,7 @@ function loadHandlerWithMocks({ parseBetText, parseBetSlipImage, createBetWithLe
     exports: {
       getOrCreateCapper: async () => ({ id: 'capper_1' }),
       createBetWithLegs,
+      isDuplicateBet: () => false,
     },
   };
   require.cache[embedsPath] = { id: embedsPath, filename: embedsPath, loaded: true, exports: { betEmbed: (b) => ({ title: b.description }) } };
