@@ -150,9 +150,15 @@ const stmts = {
   setLastScan:  db.prepare('INSERT OR REPLACE INTO scan_state (channel_id, last_message_id, updated_at) VALUES (?, ?, datetime(\'now\'))'),
 
   // Duplicate detection — find similar bets from same capper in last 10 min
-  findRecentSimilar: db.prepare(`SELECT id, description FROM bets 
+  findRecentSimilar: db.prepare(`SELECT id, description FROM bets
     WHERE capper_id = ? AND created_at > datetime('now', '-10 minutes')
     AND description LIKE ? LIMIT 1`),
+
+  // Review queue management
+  approveBet: db.prepare("UPDATE bets SET review_status = 'confirmed' WHERE id = ? AND review_status = 'needs_review'"),
+  rejectBet:  db.prepare("DELETE FROM bets WHERE id = ? AND review_status = 'needs_review'"),
+  getReviewBetWithCapper: db.prepare(`SELECT b.*, c.display_name AS capper_name, c.discord_id AS capper_discord_id
+    FROM bets b LEFT JOIN cappers c ON b.capper_id = c.id WHERE b.id = ?`),
 };
 
 function uid() { return crypto.randomBytes(16).toString('hex'); }
@@ -404,6 +410,22 @@ function isDuplicateBet(capperId, description) {
   return false;
 }
 
+// ── Review queue management ──────────────────────────────────
+function getPendingReviews() {
+  return stmts.needsReviewBets.all();
+}
+
+function approveBet(betId) {
+  const info = stmts.approveBet.run(betId);
+  if (info.changes === 0) return null;
+  return stmts.getReviewBetWithCapper.get(betId);
+}
+
+function rejectBet(betId) {
+  const info = stmts.rejectBet.run(betId);
+  return info.changes > 0;
+}
+
 // ── Export everything (same interface as old supabase.js) ────
 module.exports = {
   db,
@@ -428,4 +450,7 @@ module.exports = {
   setLastScannedMessage,
   isDuplicateBet,
   getNeedsReviewBets,
+  getPendingReviews,
+  approveBet,
+  rejectBet,
 };

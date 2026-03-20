@@ -7,8 +7,8 @@
     "start": "node bot.js",
     "deploy": "node scripts/deploy-commands.js",
     "dev": "node --watch bot.js",
-    "check": "node --check bot.js && node --check handlers/messageHandler.js && node --check services/ai.js && node --check services/database.js && node --check services/grading.js && node --check tests/confidence-validation.js",
-    "test:reliability": "node tests/confidence-validation.js && node tests/reliability-validation.js && node tests/message-handler.integration.js && node tests/db-concurrency-validation.js && node tests/grading-validation.js"
+    "check": "node --check bot.js && node --check handlers/messageHandler.js && node --check services/ai.js && node --check services/database.js && node --check services/grading.js && node --check commands/review.js && node --check tests/confidence-validation.js && node --check tests/review-commands-validation.js",
+    "test:reliability": "node tests/confidence-validation.js && node tests/reliability-validation.js && node tests/message-handler.integration.js && node tests/db-concurrency-validation.js && node tests/grading-validation.js && node tests/review-commands-validation.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.0.0",
