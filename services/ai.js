@@ -299,7 +299,7 @@ function regexParseBet(text) {
 
 async function parseBetText(text) {
   const quick = regexParseBet(text);
-  if (quick?.bets?.length > 0) return quick;
+  if (quick?.bets?.length > 0) return normalizeParsedBets(quick);
   const sys = `Sports betting parser. Return ONLY JSON: {"bets":[{"sport":"UCL","league":"Champions League","bet_type":"ladder","description":"Osimhen Shots 2+/4+/6+","odds":950,"units":1.0,"event_date":null,"legs":[{"description":"Osimhen 2+ Shots","odds":-200},{"description":"Osimhen 4+ Shots","odds":170}]}]}
 bet_type: straight, parlay, teaser, prop, future, ladder. Ladder = escalating thresholds on same player.
 Sport: Use specific league — UCL not Soccer, EPL not Soccer, March Madness not NCAAB. If units not specified default 1. Parse ALL bets.`;
