@@ -10,22 +10,21 @@ PR #5 successfully routed low-confidence bets to a `needs_review` state in the d
 Without a UI to clear the review queue, flagged bets will accumulate silently and users will wonder why their picks weren't recorded.
 
 ## Scope
-- Create a new Discord slash command group (e.g., `/review`).
+- Create a new Discord slash command group: `/review`.
 - Subcommand `/review list`: Shows a list of pending bets currently in `needs_review` status (include the Bet ID, user, and text).
 - Subcommand `/review approve <bet_id>`: Changes a bet's status from `needs_review` to `confirmed` and triggers the public announcement in the picks channel.
 - Subcommand `/review reject <bet_id>`: Deletes the flagged bet from the database (or marks it as rejected/invalid).
-- Ensure these commands are restricted to users with Admin permissions (or a specific configured role/user ID).
+- Ensure these commands are restricted to users with Admin permissions.
+- All responses should be ephemeral (only visible to the admin).
 
 ## Non-goals
 - Do not build a web UI or dashboard.
 - Do not modify the existing parsing or AI confidence logic.
 - Do not modify grading logic.
-- Do not touch the regex fast-path.
 
 ## Likely files touched
 - `commands/review.js` (new file)
 - `services/database.js` (add queries for fetching, approving, or rejecting review bets)
-- `handlers/messageHandler.js` (potentially expose the announcement logic so `/review approve` can call it)
 
 ## Required validation
 - `npm run check`
@@ -33,7 +32,7 @@ Without a UI to clear the review queue, flagged bets will accumulate silently an
 
 ## Acceptance criteria
 - [ ] `/review list` successfully retrieves low-confidence bets from SQLite.
-- [ ] `/review approve` successfully updates the DB and posts the bet to the picks channel.
+- [ ] `/review approve` successfully updates the DB and posts the bet.
 - [ ] `/review reject` successfully removes or invalidates the bet.
 - [ ] Commands are restricted to authorized admins.
 - [ ] `npm run check` and `npm run test:reliability` pass.
