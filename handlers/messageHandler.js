@@ -186,6 +186,7 @@ async function handleMessage(message) {
     const allBets = [];
 
     // Parse text picks
+    const reviewBets = [];
     if (fullText.trim() && looksLikePick(fullText)) {
       // Clean text before parsing — strip retweet metadata and dollar amounts
       let cleanText = fullText
@@ -200,6 +201,9 @@ async function handleMessage(message) {
           // Skip duplicates (same capper, similar description, last 10 min)
           if (isDuplicateBet(capper.id, bet.description)) continue;
 
+          // Determine review_status from confidence assessment
+          const reviewStatus = bet._confidence === 'low' ? 'needs_review' : 'confirmed';
+
           const saved = await createBetWithLegs({
             capper_id: capper.id,
             sport: bet.sport, league: bet.league,
@@ -209,8 +213,15 @@ async function handleMessage(message) {
             source_channel_id: message.channel.id,
             source_message_id: message.id,
             raw_text: cleanText,
+            review_status: reviewStatus,
           }, bet.legs || []);
-          if (!saved?._deduped) allBets.push(saved);
+          if (!saved?._deduped) {
+            if (reviewStatus === 'needs_review') {
+              reviewBets.push(saved);
+            } else {
+              allBets.push(saved);
+            }
+          }
         }
       }
     }
@@ -250,6 +261,11 @@ async function handleMessage(message) {
       for (const bet of allBets) {
         await postPickTracked(message.client, bet, capperInfo.name, message.channel.name, capperInfo.source);
       }
+    }
+
+    // Low-confidence bets are stored with needs_review but no announcement
+    if (reviewBets.length > 0) {
+      console.log(`[Confidence] Stored ${reviewBets.length} ambiguous bet(s) for manual review from ${capperInfo.name}`);
     }
   } catch (err) {
     console.error('[MessageHandler] Error:', err.message);

@@ -233,6 +233,42 @@ function detectSport(t) {
   return 'Unknown';
 }
 
+// ── Confidence assessment for parsed bets ───────────────────
+// Returns { confidence: 'high'|'low', reasons: string[] }
+function assessParseConfidence(text, bet) {
+  const reasons = [];
+  const t = (text || '').trim();
+
+  // 1. Very short input is inherently ambiguous
+  if (t.length < 10) reasons.push('input_too_short');
+
+  // 2. Sport couldn't be identified
+  if (!bet.sport || bet.sport === 'Unknown') reasons.push('sport_unknown');
+
+  // 3. No explicit odds found (defaulted to -110)
+  if (!text.match(/[+-]\d{3,4}/)) reasons.push('no_explicit_odds');
+
+  // 4. No explicit units found
+  if (!text.match(/\d+\.?\d*\s*u(?:nits?)?\b/i)) reasons.push('no_explicit_units');
+
+  // 5. Description is very short or generic
+  const desc = (bet.description || '').trim();
+  if (desc.length < 8) reasons.push('description_too_short');
+
+  // 6. Conflicting signals — text has both pick and celebration patterns
+  const hasCelebration = /✅|❌|\bBANG+\b|\b(WINNER|CASHED|HIT|BOOM)\b/i.test(t);
+  const hasPick = /\b(lock|potd|play|bet|hammer|tail)\b/i.test(t);
+  if (hasCelebration && hasPick) reasons.push('conflicting_signals');
+
+  // 7. Text is mostly emojis or non-alphanumeric
+  const alphaCount = (t.match(/[a-zA-Z0-9]/g) || []).length;
+  if (alphaCount < t.length * 0.3 && t.length > 5) reasons.push('low_alpha_content');
+
+  // Threshold: 3+ reasons → low confidence
+  const confidence = reasons.length >= 3 ? 'low' : 'high';
+  return { confidence, reasons };
+}
+
 function regexParseBet(text) {
   // Parlays, ladders, and multi-leg bets are too complex for regex — send to AI
   if (/parlay|ladder|(\+.*\+.*\+)|(\d+\s*leg)|step\s*\d|tier/i.test(text)) return null;
@@ -246,11 +282,19 @@ function regexParseBet(text) {
   let desc = text.replace(/(\d+\.?\d*)\s*u(?:nits?)?\b/gi, '').trim();
   if (desc.length > 200) desc = desc.substring(0, 200);
   if (desc.length < 3) return null;
-  return { bets: [{
+
+  const bet = {
     sport: detectSport(text), league: null,
     bet_type: 'straight',
     description: desc, odds, units, event_date: null, legs: [],
-  }] };
+  };
+
+  // Assess confidence and attach metadata
+  const { confidence, reasons } = assessParseConfidence(text, bet);
+  bet._confidence = confidence;
+  bet._confidence_reasons = reasons;
+
+  return { bets: [bet] };
 }
 
 async function parseBetText(text) {
@@ -263,7 +307,16 @@ Sport: Use specific league — UCL not Soccer, EPL not Soccer, March Madness not
   if (!raw) return { bets: [], error: 'AI unavailable' };
   const parsed = parseJSON(raw);
   if (!parsed) return { bets: [], error: 'Parse failed' };
-  return normalizeParsedBets(parsed);
+  const result = normalizeParsedBets(parsed);
+
+  // Assess confidence on each AI-parsed bet
+  for (const bet of result.bets) {
+    const { confidence, reasons } = assessParseConfidence(text, bet);
+    bet._confidence = confidence;
+    bet._confidence_reasons = reasons;
+  }
+
+  return result;
 }
 
 async function parseBetSlipImage(imageBase64, mediaType = 'image/png') {
@@ -303,4 +356,4 @@ async function generateRecap(stats, recentBets) {
   return (await callLLM(`Stats: ${JSON.stringify(stats)}\nBets: ${JSON.stringify(recentBets)}`, sys)) || 'Recap unavailable.';
 }
 
-module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap };
+module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence };
