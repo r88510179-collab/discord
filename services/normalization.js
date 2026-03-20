@@ -48,14 +48,25 @@ function loadPlayerMappings() {
   if (!fs.existsSync(PLAYERS_PATH)) return {};
   const raw = JSON.parse(fs.readFileSync(PLAYERS_PATH, 'utf-8'));
   const index = {};
+  const AMBIGUOUS = Symbol('ambiguous');
 
   for (const [league, players] of Object.entries(raw)) {
     for (const [canonical, aliases] of Object.entries(players)) {
       index[canonical.toLowerCase()] = canonical;
       for (const alias of aliases) {
-        index[alias.toLowerCase()] = canonical;
+        const key = alias.toLowerCase();
+        if (key in index && index[key] !== canonical && index[key] !== AMBIGUOUS) {
+          index[key] = AMBIGUOUS;
+        } else if (index[key] !== AMBIGUOUS) {
+          index[key] = canonical;
+        }
       }
     }
+  }
+
+  // Remove ambiguous entries so lookups fall through to passthrough
+  for (const key of Object.keys(index)) {
+    if (index[key] === AMBIGUOUS) delete index[key];
   }
 
   return index;
