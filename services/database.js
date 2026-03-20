@@ -4,17 +4,6 @@ const crypto = require('crypto');
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'bettracker.db');
 
-// ── TEMPORARY: Wipe old DB for schema migration after Codex merge ──
-// Remove this block after first successful deploy
-// Skip wipe for test databases (tmp paths set by test harness)
-const fs = require('fs');
-const _isTestDb = DB_PATH.includes(require('os').tmpdir());
-if (!_isTestDb) {
-  try { fs.unlinkSync(DB_PATH); console.log('[DB] Wiped old database for schema migration'); } catch {}
-  try { fs.unlinkSync(DB_PATH + '-wal'); } catch {}
-  try { fs.unlinkSync(DB_PATH + '-shm'); } catch {}
-}
-// ── END TEMPORARY ──
 
 const db = new Database(DB_PATH);
 
