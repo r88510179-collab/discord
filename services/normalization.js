@@ -9,9 +9,11 @@ const fs = require('fs');
 const path = require('path');
 
 const TEAMS_PATH = path.join(__dirname, '..', 'data', 'mappings', 'teams.json');
+const PLAYERS_PATH = path.join(__dirname, '..', 'data', 'mappings', 'players.json');
 
-// ── Build lookup index: alias (lowercase) → canonical name ──
+// ── Build lookup indices: alias (lowercase) → canonical name ──
 let aliasIndex = {};
+let playerIndex = {};
 
 function loadTeamMappings() {
   const raw = JSON.parse(fs.readFileSync(TEAMS_PATH, 'utf-8'));
@@ -42,8 +44,37 @@ function loadTeamMappings() {
   return index;
 }
 
+function loadPlayerMappings() {
+  if (!fs.existsSync(PLAYERS_PATH)) return {};
+  const raw = JSON.parse(fs.readFileSync(PLAYERS_PATH, 'utf-8'));
+  const index = {};
+  const AMBIGUOUS = Symbol('ambiguous');
+
+  for (const [league, players] of Object.entries(raw)) {
+    for (const [canonical, aliases] of Object.entries(players)) {
+      index[canonical.toLowerCase()] = canonical;
+      for (const alias of aliases) {
+        const key = alias.toLowerCase();
+        if (key in index && index[key] !== canonical && index[key] !== AMBIGUOUS) {
+          index[key] = AMBIGUOUS;
+        } else if (index[key] !== AMBIGUOUS) {
+          index[key] = canonical;
+        }
+      }
+    }
+  }
+
+  // Remove ambiguous entries so lookups fall through to passthrough
+  for (const key of Object.keys(index)) {
+    if (index[key] === AMBIGUOUS) delete index[key];
+  }
+
+  return index;
+}
+
 // Load once at module init
 aliasIndex = loadTeamMappings();
+playerIndex = loadPlayerMappings();
 
 /**
  * Resolve a team name/abbreviation to its canonical form.
@@ -73,8 +104,9 @@ function normalizeTeam(name) {
 function normalizeDescription(text) {
   if (!text || typeof text !== 'string') return text || '';
 
-  // Sort aliases by length descending so longer matches take priority
-  const sortedAliases = Object.keys(aliasIndex).sort((a, b) => b.length - a.length);
+  // Merge team and player aliases, sorted by length descending
+  const combined = { ...aliasIndex, ...playerIndex };
+  const sortedAliases = Object.keys(combined).sort((a, b) => b.length - a.length);
 
   // Use placeholder tokens to prevent cascading replacements
   const replacements = [];
@@ -85,7 +117,7 @@ function normalizeDescription(text) {
     const regex = new RegExp(`\\b${escaped}\\b`, 'gi');
     result = result.replace(regex, (match) => {
       const token = `\x00${replacements.length}\x00`;
-      replacements.push(aliasIndex[alias]);
+      replacements.push(combined[alias]);
       return token;
     });
   }
@@ -99,16 +131,22 @@ function normalizeDescription(text) {
 }
 
 /**
- * Normalize a player name. Currently a pass-through with
- * basic cleanup — can be extended with a player mappings file.
+ * Resolve a player name/nickname to its canonical form.
+ * Handles case-insensitivity and punctuation normalization
+ * (e.g., "A.J. Brown" vs "AJ Brown").
  *
- * @param {string} name
- * @returns {string}
+ * @param {string} name — e.g. "LeBron", "LBJ", "CP3"
+ * @returns {string} — e.g. "LeBron James"
  */
 function normalizePlayer(name) {
   if (!name || typeof name !== 'string') return name || '';
-  // Basic cleanup: trim, collapse whitespace, title-case
-  return name.trim().replace(/\s+/g, ' ');
+  const trimmed = name.trim().replace(/\s+/g, ' ');
+  const key = trimmed.toLowerCase();
+  if (playerIndex[key]) return playerIndex[key];
+  // Try stripping periods for punctuation variants (A.J. -> AJ)
+  const noDots = key.replace(/\./g, '').replace(/\s+/g, ' ').trim();
+  if (noDots !== key && playerIndex[noDots]) return playerIndex[noDots];
+  return trimmed;
 }
 
 /**
@@ -116,6 +154,7 @@ function normalizePlayer(name) {
  */
 function reloadMappings() {
   aliasIndex = loadTeamMappings();
+  playerIndex = loadPlayerMappings();
 }
 
 module.exports = { normalizeTeam, normalizeDescription, normalizePlayer, reloadMappings };

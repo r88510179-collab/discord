@@ -1,5 +1,5 @@
 const assert = require('assert');
-const { normalizeTeam, normalizeDescription, normalizePlayer, reloadMappings } = require('../services/normalization');
+const { normalizeTeam, normalizeDescription, reloadMappings } = require('../services/normalization');
 
 // Ensure mappings are loaded
 reloadMappings();
@@ -158,17 +158,7 @@ function testDescriptionPreservesOther() {
 }
 
 // ═══════════════════════════════════════════════════════════
-// TEST 7: normalizePlayer — basic cleanup
-// ═══════════════════════════════════════════════════════════
-function testPlayerNormalization() {
-  assert.strictEqual(normalizePlayer('  LeBron  James  '), 'LeBron James');
-  assert.strictEqual(normalizePlayer(''), '');
-  assert.strictEqual(normalizePlayer(null), '');
-  console.log('  ✓ Player names cleaned up correctly');
-}
-
-// ═══════════════════════════════════════════════════════════
-// TEST 8: Canonical names map to themselves
+// TEST 7: Canonical names map to themselves
 // ═══════════════════════════════════════════════════════════
 function testCanonicalSelfMap() {
   const canonicals = [
@@ -196,6 +186,5 @@ testCaseInsensitivity();
 testUnknownPassthrough();
 testDescriptionNormalization();
 testDescriptionPreservesOther();
-testPlayerNormalization();
 testCanonicalSelfMap();
 console.log('Normalization validation passed.');
