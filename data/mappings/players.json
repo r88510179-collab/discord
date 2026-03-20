@@ -1,0 +1,21 @@
+{
+  "NBA": {
+    "LeBron James": ["lebron", "lbj", "king james", "bron"],
+    "Stephen Curry": ["steph", "curry", "steph curry", "chef curry"],
+    "Kevin Durant": ["kd", "durant", "kevin durant"],
+    "Giannis Antetokounmpo": ["giannis", "greek freak", "antetokounmpo"],
+    "Nikola Jokic": ["jokic", "the joker", "nikola jokic"],
+    "Luka Doncic": ["luka", "doncic", "luka doncic"],
+    "Victor Wembanyama": ["wemby", "wembanyama", "victor wembanyama"]
+  },
+  "NFL": {
+    "Patrick Mahomes": ["mahomes", "patrick mahomes"],
+    "Christian McCaffrey": ["cmc", "mccaffrey", "christian mccaffrey"],
+    "Tyreek Hill": ["tyreek", "cheetah", "tyreek hill"],
+    "Lamar Jackson": ["lamar", "lamar jackson"]
+  },
+  "MLB": {
+    "Shohei Ohtani": ["shohei", "ohtani", "shohei ohtani"],
+    "Aaron Judge": ["judge", "aaron judge"]
+  }
+}
