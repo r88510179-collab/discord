@@ -1,17 +1,8 @@
 const Database = require('better-sqlite3');
-const Database = require('better-sqlite3');
 const path = require('path');
 const crypto = require('crypto');
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'bettracker.db');
-
-// ── TEMPORARY: Wipe old DB for schema migration after Codex merge ──
-// Remove this block after first successful deploy
-const fs = require('fs');
-try { fs.unlinkSync(DB_PATH); console.log('[DB] Wiped old database for schema migration'); } catch {}
-try { fs.unlinkSync(DB_PATH + '-wal'); } catch {}
-try { fs.unlinkSync(DB_PATH + '-shm'); } catch {}
-// ── END TEMPORARY ──
 
 const db = new Database(DB_PATH);
 
