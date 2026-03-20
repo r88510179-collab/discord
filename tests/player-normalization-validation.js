@@ -1,5 +1,5 @@
 const assert = require('assert');
-const { normalizePlayer, normalizePlayerDescription, reloadMappings } = require('../services/normalization');
+const { normalizePlayer, normalizeDescription, reloadMappings } = require('../services/normalization');
 
 reloadMappings();
 
@@ -53,21 +53,28 @@ function testNFLMLBPlayerAliases() {
 }
 
 // ═══════════════════════════════════════════════════════════
-// TEST 3: Ambiguous cross-sport aliases pass through
+// TEST 3: "The Alien" -> Victor Wembanyama
 // ═══════════════════════════════════════════════════════════
-function testAmbiguousPlayerAliases() {
-  // "The Alien" is used for both Wembanyama (NBA) and De La Cruz (MLB)
-  const result = normalizePlayer('The Alien');
-  assert.strictEqual(result, 'The Alien',
-    `Ambiguous alias "The Alien" should pass through but got "${result}"`);
-  console.log('  ✓ Ambiguous player aliases (The Alien) pass through safely');
+function testTheAlienAlias() {
+  assert.strictEqual(normalizePlayer('The Alien'), 'Victor Wembanyama');
+  assert.strictEqual(normalizePlayer('the alien'), 'Victor Wembanyama');
+  console.log('  ✓ "The Alien" resolves to Victor Wembanyama');
 }
 
 // ═══════════════════════════════════════════════════════════
-// TEST 4: Punctuation normalization (C.J. vs CJ)
+// TEST 4: "SGA" -> Shai Gilgeous-Alexander
+// ═══════════════════════════════════════════════════════════
+function testSGAAlias() {
+  assert.strictEqual(normalizePlayer('SGA'), 'Shai Gilgeous-Alexander');
+  assert.strictEqual(normalizePlayer('sga'), 'Shai Gilgeous-Alexander');
+  assert.strictEqual(normalizePlayer('Shai'), 'Shai Gilgeous-Alexander');
+  console.log('  ✓ "SGA" resolves to Shai Gilgeous-Alexander');
+}
+
+// ═══════════════════════════════════════════════════════════
+// TEST 5: Punctuation normalization (C.J. vs CJ)
 // ═══════════════════════════════════════════════════════════
 function testPunctuationNormalization() {
-  // Both "C.J. Stroud" and "CJ Stroud" should resolve
   assert.strictEqual(normalizePlayer('C.J. Stroud'), 'C.J. Stroud');
   assert.strictEqual(normalizePlayer('CJ Stroud'), 'C.J. Stroud');
   assert.strictEqual(normalizePlayer('c.j. stroud'), 'C.J. Stroud');
@@ -76,30 +83,30 @@ function testPunctuationNormalization() {
 }
 
 // ═══════════════════════════════════════════════════════════
-// TEST 5: Player description inline replacement
+// TEST 6: Player description inline replacement via normalizeDescription
 // ═══════════════════════════════════════════════════════════
 function testPlayerDescriptionInline() {
   assert.strictEqual(
-    normalizePlayerDescription('SGA over 30 points'),
+    normalizeDescription('SGA over 30 points'),
     'Shai Gilgeous-Alexander over 30 points'
   );
   assert.strictEqual(
-    normalizePlayerDescription('LeBron over 25 points'),
+    normalizeDescription('LeBron over 25 points'),
     'LeBron James over 25 points'
   );
   assert.strictEqual(
-    normalizePlayerDescription('Skenes 8+ strikeouts'),
+    normalizeDescription('Skenes 8+ strikeouts'),
     'Paul Skenes 8+ strikeouts'
   );
   assert.strictEqual(
-    normalizePlayerDescription('Stroud 250+ passing yards'),
+    normalizeDescription('Stroud 250+ passing yards'),
     'C.J. Stroud 250+ passing yards'
   );
   console.log('  ✓ Player aliases replaced inline in bet descriptions');
 }
 
 // ═══════════════════════════════════════════════════════════
-// TEST 6: Canonical names map to themselves
+// TEST 7: Canonical names map to themselves
 // ═══════════════════════════════════════════════════════════
 function testCanonicalPlayerSelfMap() {
   const canonicals = [
@@ -108,6 +115,7 @@ function testCanonicalPlayerSelfMap() {
     'C.J. Stroud',
     'Paul Skenes',
     'Elly De La Cruz',
+    'Victor Wembanyama',
   ];
   for (const name of canonicals) {
     assert.strictEqual(normalizePlayer(name), name,
@@ -117,7 +125,7 @@ function testCanonicalPlayerSelfMap() {
 }
 
 // ═══════════════════════════════════════════════════════════
-// TEST 7: Unknown players pass through
+// TEST 8: Unknown players pass through
 // ═══════════════════════════════════════════════════════════
 function testUnknownPlayerPassthrough() {
   assert.strictEqual(normalizePlayer('Random Rookie'), 'Random Rookie');
@@ -132,7 +140,8 @@ function testUnknownPlayerPassthrough() {
 console.log('Player normalization validation:');
 testNBAPlayerAliases();
 testNFLMLBPlayerAliases();
-testAmbiguousPlayerAliases();
+testTheAlienAlias();
+testSGAAlias();
 testPunctuationNormalization();
 testPlayerDescriptionInline();
 testCanonicalPlayerSelfMap();

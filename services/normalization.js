@@ -104,8 +104,9 @@ function normalizeTeam(name) {
 function normalizeDescription(text) {
   if (!text || typeof text !== 'string') return text || '';
 
-  // Sort aliases by length descending so longer matches take priority
-  const sortedAliases = Object.keys(aliasIndex).sort((a, b) => b.length - a.length);
+  // Merge team and player aliases, sorted by length descending
+  const combined = { ...aliasIndex, ...playerIndex };
+  const sortedAliases = Object.keys(combined).sort((a, b) => b.length - a.length);
 
   // Use placeholder tokens to prevent cascading replacements
   const replacements = [];
@@ -116,7 +117,7 @@ function normalizeDescription(text) {
     const regex = new RegExp(`\\b${escaped}\\b`, 'gi');
     result = result.replace(regex, (match) => {
       const token = `\x00${replacements.length}\x00`;
-      replacements.push(aliasIndex[alias]);
+      replacements.push(combined[alias]);
       return token;
     });
   }
@@ -149,38 +150,6 @@ function normalizePlayer(name) {
 }
 
 /**
- * Scan a bet description and replace known player aliases
- * with canonical names. Uses the same placeholder-token
- * approach as team normalization to prevent cascading.
- *
- * @param {string} text
- * @returns {string}
- */
-function normalizePlayerDescription(text) {
-  if (!text || typeof text !== 'string') return text || '';
-
-  const sortedAliases = Object.keys(playerIndex).sort((a, b) => b.length - a.length);
-  const replacements = [];
-  let result = text;
-
-  for (const alias of sortedAliases) {
-    const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const regex = new RegExp(`\\b${escaped}\\b`, 'gi');
-    result = result.replace(regex, (match) => {
-      const token = `\x01${replacements.length}\x01`;
-      replacements.push(playerIndex[alias]);
-      return token;
-    });
-  }
-
-  for (let i = 0; i < replacements.length; i++) {
-    result = result.replace(`\x01${i}\x01`, replacements[i]);
-  }
-
-  return result;
-}
-
-/**
  * Reload mappings from disk (useful if teams.json is updated).
  */
 function reloadMappings() {
@@ -188,4 +157,4 @@ function reloadMappings() {
   playerIndex = loadPlayerMappings();
 }
 
-module.exports = { normalizeTeam, normalizeDescription, normalizePlayer, normalizePlayerDescription, reloadMappings };
+module.exports = { normalizeTeam, normalizeDescription, normalizePlayer, reloadMappings };

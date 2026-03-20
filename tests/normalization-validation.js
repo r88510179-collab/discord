@@ -1,5 +1,5 @@
 const assert = require('assert');
-const { normalizeTeam, normalizeDescription, normalizePlayer, normalizePlayerDescription, reloadMappings } = require('../services/normalization');
+const { normalizeTeam, normalizeDescription, reloadMappings } = require('../services/normalization');
 
 // Ensure mappings are loaded
 reloadMappings();
@@ -158,67 +158,7 @@ function testDescriptionPreservesOther() {
 }
 
 // ═══════════════════════════════════════════════════════════
-// TEST 7: normalizePlayer — alias resolution
-// ═══════════════════════════════════════════════════════════
-function testPlayerNormalization() {
-  // NBA
-  assert.strictEqual(normalizePlayer('LeBron'), 'LeBron James');
-  assert.strictEqual(normalizePlayer('lebron'), 'LeBron James');
-  assert.strictEqual(normalizePlayer('LBJ'), 'LeBron James');
-  assert.strictEqual(normalizePlayer('Steph'), 'Stephen Curry');
-  assert.strictEqual(normalizePlayer('Curry'), 'Stephen Curry');
-  assert.strictEqual(normalizePlayer('KD'), 'Kevin Durant');
-  assert.strictEqual(normalizePlayer('Giannis'), 'Giannis Antetokounmpo');
-  assert.strictEqual(normalizePlayer('Jokic'), 'Nikola Jokic');
-  assert.strictEqual(normalizePlayer('Luka'), 'Luka Doncic');
-  assert.strictEqual(normalizePlayer('Wemby'), 'Victor Wembanyama');
-  // NFL
-  assert.strictEqual(normalizePlayer('Mahomes'), 'Patrick Mahomes');
-  assert.strictEqual(normalizePlayer('CMC'), 'Christian McCaffrey');
-  assert.strictEqual(normalizePlayer('Tyreek'), 'Tyreek Hill');
-  assert.strictEqual(normalizePlayer('Lamar'), 'Lamar Jackson');
-  // MLB
-  assert.strictEqual(normalizePlayer('Shohei'), 'Shohei Ohtani');
-  assert.strictEqual(normalizePlayer('Ohtani'), 'Shohei Ohtani');
-  assert.strictEqual(normalizePlayer('Judge'), 'Aaron Judge');
-  // Passthrough
-  assert.strictEqual(normalizePlayer('  LeBron  James  '), 'LeBron James');
-  assert.strictEqual(normalizePlayer('Unknown Player'), 'Unknown Player');
-  assert.strictEqual(normalizePlayer(''), '');
-  assert.strictEqual(normalizePlayer(null), '');
-  console.log('  ✓ Player aliases resolve to canonical names');
-}
-
-// ═══════════════════════════════════════════════════════════
-// TEST 7b: normalizePlayerDescription — inline in bet text
-// ═══════════════════════════════════════════════════════════
-function testPlayerDescriptionNormalization() {
-  assert.strictEqual(
-    normalizePlayerDescription('LeBron over 25 points'),
-    'LeBron James over 25 points'
-  );
-  assert.strictEqual(
-    normalizePlayerDescription('Steph 3+ threes -130'),
-    'Stephen Curry 3+ threes -130'
-  );
-  assert.strictEqual(
-    normalizePlayerDescription('Mahomes 300+ passing yards'),
-    'Patrick Mahomes 300+ passing yards'
-  );
-  assert.strictEqual(
-    normalizePlayerDescription('Ohtani HR +350'),
-    'Shohei Ohtani HR +350'
-  );
-  // Unknown players pass through
-  assert.strictEqual(
-    normalizePlayerDescription('Random Player 10+ rebounds'),
-    'Random Player 10+ rebounds'
-  );
-  console.log('  ✓ Player aliases replaced inline in descriptions');
-}
-
-// ═══════════════════════════════════════════════════════════
-// TEST 8: Canonical names map to themselves
+// TEST 7: Canonical names map to themselves
 // ═══════════════════════════════════════════════════════════
 function testCanonicalSelfMap() {
   const canonicals = [
@@ -246,7 +186,5 @@ testCaseInsensitivity();
 testUnknownPassthrough();
 testDescriptionNormalization();
 testDescriptionPreservesOther();
-testPlayerNormalization();
-testPlayerDescriptionNormalization();
 testCanonicalSelfMap();
 console.log('Normalization validation passed.');

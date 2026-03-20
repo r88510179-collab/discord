@@ -3,7 +3,7 @@
 // Priority: Groq (fastest) → Gemini → Mistral → OpenRouter
 // ═══════════════════════════════════════════════════════════
 
-const { normalizeDescription: normalizeTeamNames, normalizePlayerDescription } = require('./normalization');
+const { normalizeDescription, normalizePlayer } = require('./normalization');
 
 const PROVIDERS = {
   groq: {
@@ -165,7 +165,7 @@ function normalizeBet(bet) {
   if (!rawDesc) return null;
 
   // Run team and player normalization on description before storing
-  const description = normalizePlayerDescription(normalizeTeamNames(rawDesc));
+  const description = normalizeDescription(rawDesc);
 
   const rawOdds = toSafeNumber(bet.odds, -110);
   const odds = Math.abs(rawOdds) > 9999 ? -110 : Math.trunc(rawOdds);
@@ -179,7 +179,7 @@ function normalizeBet(bet) {
           const legDesc = String(leg?.description || '').trim().slice(0, 200);
           if (!legDesc) return null;
           // Normalize leg descriptions too
-          return { description: normalizePlayerDescription(normalizeTeamNames(legDesc)), odds: toSafeNumber(leg?.odds, null) };
+          return { description: normalizeDescription(legDesc), odds: toSafeNumber(leg?.odds, null) };
         })
         .filter(Boolean)
     : [];
