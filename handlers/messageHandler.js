@@ -3,6 +3,7 @@ const { getOrCreateCapper, createBetWithLegs, isDuplicateBet, isAuditMode } = re
 const { betEmbed } = require('../utils/embeds');
 const { postPickTracked } = require('../services/dashboard');
 const { sendStagingEmbed } = require('../services/warRoom');
+const { extractTextFromImage } = require('../services/ocr');
 
 const PICK_SIGNALS = [
   /\b(pick|lock|potd|play|bet|wager|hammer|tail|fade)\b/i,
@@ -122,11 +123,74 @@ async function scanImage(imageUrl, mediaType) {
   }
 }
 
+// ── OCR Slip Feed — dedicated channel for bet slip images ───
+async function handleSlipFeed(message) {
+  const slipChannelId = process.env.SLIP_FEED_CHANNEL_ID;
+  if (!slipChannelId || message.channel.id !== slipChannelId) return false;
+
+  const images = getImageAttachments(message);
+  if (images.length === 0) return false;
+
+  try {
+    const img = images[0];
+    console.log(`[SlipFeed] Processing image from ${message.author.displayName || message.author.username}`);
+
+    // Extract text via OCR
+    const ocrText = await extractTextFromImage(img.url);
+    if (!ocrText) {
+      console.log('[SlipFeed] OCR returned no text — skipping.');
+      return true; // consumed the message even if OCR failed
+    }
+
+    // Parse the OCR text through the AI bet parser
+    const parsed = await parseBetText(ocrText);
+    if (!parsed.bets || parsed.bets.length === 0) {
+      console.log('[SlipFeed] No bets found in OCR text.');
+      return true;
+    }
+
+    // Resolve capper and save bets
+    const capperInfo = resolveCapper(message);
+    const capper = await getOrCreateCapper(capperInfo.discordId, capperInfo.name, capperInfo.avatar);
+
+    for (const bet of parsed.bets) {
+      if (isDuplicateBet(capper.id, bet.description)) continue;
+
+      const saved = await createBetWithLegs({
+        capper_id: capper.id,
+        sport: bet.sport, league: bet.league,
+        bet_type: bet.bet_type, description: bet.description,
+        odds: bet.odds, units: Math.min(bet.units || 1, 50),
+        event_date: bet.event_date, source: 'ocr_slip',
+        source_channel_id: message.channel.id,
+        source_message_id: message.id,
+        raw_text: ocrText.slice(0, 500),
+        review_status: 'needs_review',
+      }, bet.legs || [], bet.props || []);
+
+      if (saved && !saved._deduped) {
+        await sendStagingEmbed(message.client, saved, capperInfo.name);
+      }
+    }
+
+    await message.react('🔍');
+    console.log(`[SlipFeed] Processed ${parsed.bets.length} bet(s) from OCR scan.`);
+    return true;
+  } catch (err) {
+    console.error('[SlipFeed] Error:', err.message);
+    return true;
+  }
+}
+
 async function handleMessage(message) {
   if (!message.guild) return;
 
   // ═══ GUARD 1: Never process our own messages (prevents infinite loop) ═══
   if (message.author.id === message.client.user.id) return;
+
+  // ═══ OCR Slip Feed — check before picks channel guard ═══
+  const slipHandled = await handleSlipFeed(message);
+  if (slipHandled) return;
 
   const picksChannels = getPicksChannels();
   if (picksChannels.length === 0) return;
