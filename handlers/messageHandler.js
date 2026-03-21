@@ -216,7 +216,7 @@ async function handleMessage(message) {
             source_message_id: message.id,
             raw_text: cleanText,
             review_status: reviewStatus,
-          }, bet.legs || []);
+          }, bet.legs || [], bet.props || []);
           if (!saved?._deduped) {
             if (reviewStatus === 'needs_review') {
               reviewBets.push(saved);

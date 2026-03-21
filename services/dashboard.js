@@ -1,4 +1,16 @@
 const { EmbedBuilder } = require('discord.js');
+const { getBetProps } = require('./database');
+
+// Format structured props for dashboard display
+function formatPropsLine(props) {
+  if (!props || props.length === 0) return null;
+  return props.map(p => {
+    const dir = p.direction === 'over' ? 'O' : 'U';
+    const odds = p.odds ? ` (${p.odds > 0 ? '+' : ''}${p.odds})` : '';
+    const cat = p.stat_category.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    return `${p.player_name} — ${cat}: ${dir} ${p.line}${odds}`;
+  }).join('\n');
+}
 
 // Dashboard channel ID from env
 function getDashboardChannel(client) {
@@ -13,10 +25,15 @@ async function postPickTracked(client, bet, capperName, channelName, source) {
   if (!ch) return;
 
   const sourceEmoji = { discord: '💬', twitter: '🐦', slip: '📸', manual: '📝' };
+
+  // Fetch structured props if this bet has them
+  const props = getBetProps(bet.id);
+  const propsLine = formatPropsLine(props);
+
   const embed = new EmbedBuilder()
     .setColor(0x6C63FF)
     .setTitle(`${sourceEmoji[source] || '📝'} Pick Tracked`)
-    .setDescription(`**${bet.description}**`)
+    .setDescription(propsLine ? `**${bet.description}**\n\n${propsLine}` : `**${bet.description}**`)
     .addFields(
       { name: 'Capper', value: capperName, inline: true },
       { name: 'Sport', value: bet.sport || 'Unknown', inline: true },

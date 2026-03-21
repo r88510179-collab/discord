@@ -6,9 +6,20 @@ const {
   EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
   ModalBuilder, TextInputBuilder, TextInputStyle,
 } = require('discord.js');
-const { approveBet, rejectBet, updateBetFields } = require('./database');
+const { approveBet, rejectBet, updateBetFields, getBetProps } = require('./database');
 const { postPickTracked } = require('./dashboard');
 const { COLORS } = require('../utils/embeds');
+
+// Format structured props for embed display
+function formatPropsForEmbed(props) {
+  if (!props || props.length === 0) return null;
+  return props.map(p => {
+    const dir = p.direction === 'over' ? 'O' : 'U';
+    const odds = p.odds ? ` (${p.odds > 0 ? '+' : ''}${p.odds})` : '';
+    const cat = p.stat_category.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    return `\u{1F464} ${p.player_name} | \u{1F4CA} ${cat} | ${dir === 'O' ? '\u{1F4C8}' : '\u{1F4C9}'} ${dir} ${p.line}${odds}`;
+  }).join('\n');
+}
 
 async function sendStagingEmbed(client, bet, capperName) {
   const channelId = process.env.ADMIN_LOG_CHANNEL_ID;
@@ -23,6 +34,10 @@ async function sendStagingEmbed(client, bet, capperName) {
     return;
   }
 
+  // Fetch structured props for this bet
+  const props = getBetProps(bet.id);
+  const propsDisplay = formatPropsForEmbed(props);
+
   const embed = new EmbedBuilder()
     .setTitle('Bet Pending Review')
     .setColor(COLORS.warning)
@@ -33,8 +48,13 @@ async function sendStagingEmbed(client, bet, capperName) {
       { name: 'Description', value: bet.description || 'N/A' },
       { name: 'Odds', value: String(bet.odds ?? 'N/A'), inline: true },
       { name: 'Units', value: String(bet.units ?? 1), inline: true },
-      { name: 'Bet ID', value: `\`${bet.id}\``, inline: false },
-    )
+    );
+
+  if (propsDisplay) {
+    embed.addFields({ name: 'Props', value: propsDisplay });
+  }
+
+  embed.addFields({ name: 'Bet ID', value: `\`${bet.id}\``, inline: false })
     .setTimestamp();
 
   const row = new ActionRowBuilder().addComponents(
