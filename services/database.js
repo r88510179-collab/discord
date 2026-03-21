@@ -69,6 +69,10 @@ const stmts = {
 
   // Bet field updates (war room edit modal)
   updateBetFieldsStmt: db.prepare('UPDATE bets SET description = ?, odds = COALESCE(?, odds) WHERE id = ?'),
+
+  // Structured props
+  insertProp: db.prepare('INSERT INTO bet_props (id, bet_id, player_name, stat_category, line, direction, odds) VALUES (?, ?, ?, ?, ?, ?, ?)'),
+  getPropsByBetId: db.prepare('SELECT * FROM bet_props WHERE bet_id = ? ORDER BY created_at'),
 };
 
 function uid() { return crypto.randomBytes(16).toString('hex'); }
@@ -157,7 +161,7 @@ function createBet(betData) {
   return { ...stmts.getBet.get(id), _deduped: false };
 }
 
-function createBetWithLegs(betData, legs) {
+function createBetWithLegs(betData, legs, props) {
   const fingerprint = buildFingerprint(betData);
   if (fingerprint) {
     const existing = stmts.getBetByFingerprint.get(fingerprint);
@@ -172,7 +176,18 @@ function createBetWithLegs(betData, legs) {
       stmts.insertLeg.run(uid(), bet.id, leg.description, leg.odds || null);
     }
   }
+  // Insert structured props if present
+  if (props && props.length > 0) {
+    for (const prop of props) {
+      if (!prop.player_name || !prop.stat_category || prop.line == null) continue;
+      stmts.insertProp.run(uid(), bet.id, prop.player_name, prop.stat_category, prop.line, prop.direction, prop.odds || null);
+    }
+  }
   return bet;
+}
+
+function getBetProps(betId) {
+  return stmts.getPropsByBetId.all(betId);
 }
 
 function gradeBetRecord(betId, result, profitUnits, grade, gradeReason) {
@@ -387,4 +402,5 @@ module.exports = {
   setSetting,
   isAuditMode,
   updateBetFields,
+  getBetProps,
 };

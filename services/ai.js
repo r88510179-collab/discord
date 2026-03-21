@@ -184,6 +184,28 @@ function normalizeBet(bet) {
         .filter(Boolean)
     : [];
 
+  // Normalize structured props if present
+  const props = Array.isArray(bet.props)
+    ? bet.props
+        .map((p) => {
+          if (!p || typeof p !== 'object') return null;
+          const playerName = String(p.player_name || '').trim();
+          const statCategory = String(p.stat_category || '').trim().toLowerCase().replace(/\s+/g, '_');
+          const line = toSafeNumber(p.line, null);
+          const dir = String(p.direction || '').trim().toLowerCase();
+          const propOdds = toSafeNumber(p.odds, null);
+          if (!playerName || !statCategory || line == null || (dir !== 'over' && dir !== 'under')) return null;
+          return {
+            player_name: normalizePlayer ? normalizePlayer(playerName) : playerName,
+            stat_category: statCategory,
+            line,
+            direction: dir,
+            odds: propOdds != null ? Math.trunc(propOdds) : null,
+          };
+        })
+        .filter(Boolean)
+    : [];
+
   return {
     sport: String(bet.sport || 'Unknown').trim().slice(0, 50) || 'Unknown',
     league: bet.league ? String(bet.league).trim().slice(0, 80) : null,
@@ -193,6 +215,7 @@ function normalizeBet(bet) {
     units,
     event_date: bet.event_date || null,
     legs,
+    props,
   };
 }
 
@@ -337,8 +360,9 @@ async function parseBetText(text) {
     const sourceText = quick._sourceText || text;
     return applyConfidenceGating(normalizeParsedBets(quick), sourceText);
   }
-  const sys = `Sports betting parser. Return ONLY JSON: {"bets":[{"sport":"UCL","league":"Champions League","bet_type":"ladder","description":"Osimhen Shots 2+/4+/6+","odds":950,"units":1.0,"event_date":null,"legs":[{"description":"Osimhen 2+ Shots","odds":-200},{"description":"Osimhen 4+ Shots","odds":170}]}]}
+  const sys = `Sports betting parser. Return ONLY JSON: {"bets":[{"sport":"NBA","league":"NBA","bet_type":"prop","description":"LeBron James Over 22.5 Points","odds":-110,"units":1.0,"event_date":null,"legs":[],"props":[{"player_name":"LeBron James","stat_category":"points","line":22.5,"direction":"over","odds":-110}]}]}
 bet_type: straight, parlay, teaser, prop, future, ladder. Ladder = escalating thresholds on same player.
+IMPORTANT: When a bet is a player prop (over/under on a player stat), set bet_type to "prop" and include a "props" array. Each prop object MUST have: player_name (string), stat_category (snake_case: points, rebounds, assists, steals, blocks, threes, strikeouts, passing_yards, rushing_yards, receiving_yards, home_runs, hits, etc.), line (number), direction ("over" or "under"), odds (integer). A single bet can have multiple props (e.g., a parlay of props).
 Sport: Use specific league — UCL not Soccer, EPL not Soccer, March Madness not NCAAB. If units not specified default 1. Parse ALL bets.`;
   const raw = await callLLM(text, sys);
   if (!raw) return { bets: [], error: 'AI unavailable' };
