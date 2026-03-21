@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 
 const { handleMessage } = require('./handlers/messageHandler');
+const { handleWarRoomInteraction } = require('./services/warRoom');
 const { runAutoGrade } = require('./services/grading');
 const { pollTwitterPicks } = require('./services/twitter');
 const { postGradeSummary, postDailyLeaderboard } = require('./services/dashboard');
@@ -33,6 +34,19 @@ for (const file of commandFiles) {
 
 // ── Handle slash commands ───────────────────────────────────
 client.on(Events.InteractionCreate, async (interaction) => {
+  // War room buttons and modals
+  if (interaction.isButton() || interaction.isModalSubmit()) {
+    if (interaction.customId.startsWith('war_')) {
+      try {
+        await handleWarRoomInteraction(interaction);
+      } catch (err) {
+        console.error('[WarRoom] Interaction error:', err.message);
+      }
+      return;
+    }
+  }
+
+  // Slash commands
   if (!interaction.isChatInputCommand()) return;
 
   const command = client.commands.get(interaction.commandName);

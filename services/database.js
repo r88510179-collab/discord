@@ -62,6 +62,13 @@ const stmts = {
   rejectBet:  db.prepare("DELETE FROM bets WHERE id = ? AND review_status = 'needs_review'"),
   getReviewBetWithCapper: db.prepare(`SELECT b.*, c.display_name AS capper_name, c.discord_id AS capper_discord_id
     FROM bets b LEFT JOIN cappers c ON b.capper_id = c.id WHERE b.id = ?`),
+
+  // Settings
+  getSetting: db.prepare('SELECT value FROM settings WHERE key = ?'),
+  setSetting: db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)'),
+
+  // Bet field updates (war room edit modal)
+  updateBetFieldsStmt: db.prepare('UPDATE bets SET description = ?, odds = COALESCE(?, odds) WHERE id = ?'),
 };
 
 function uid() { return crypto.randomBytes(16).toString('hex'); }
@@ -329,6 +336,26 @@ function rejectBet(betId) {
   return info.changes > 0;
 }
 
+// ── Settings ─────────────────────────────────────────────────
+function getSetting(key) {
+  const row = stmts.getSetting.get(key);
+  return row ? row.value : null;
+}
+
+function setSetting(key, value) {
+  stmts.setSetting.run(key, String(value));
+}
+
+function isAuditMode() {
+  return getSetting('audit_mode') === 'on';
+}
+
+// ── Bet field updates (war room edit modal) ──────────────────
+function updateBetFields(betId, description, odds) {
+  stmts.updateBetFieldsStmt.run(description, odds, betId);
+  return stmts.getBet.get(betId);
+}
+
 // ── Export everything (same interface as old supabase.js) ────
 module.exports = {
   db,
@@ -356,4 +383,8 @@ module.exports = {
   getPendingReviews,
   approveBet,
   rejectBet,
+  getSetting,
+  setSetting,
+  isAuditMode,
+  updateBetFields,
 };
