@@ -1,7 +1,8 @@
 const { parseBetText, parseBetSlipImage } = require('../services/ai');
-const { getOrCreateCapper, createBetWithLegs, isDuplicateBet } = require('../services/database');
+const { getOrCreateCapper, createBetWithLegs, isDuplicateBet, isAuditMode } = require('../services/database');
 const { betEmbed } = require('../utils/embeds');
 const { postPickTracked } = require('../services/dashboard');
+const { sendStagingEmbed } = require('../services/warRoom');
 
 const PICK_SIGNALS = [
   /\b(pick|lock|potd|play|bet|wager|hammer|tail|fade)\b/i,
@@ -201,8 +202,9 @@ async function handleMessage(message) {
           // Skip duplicates (same capper, similar description, last 10 min)
           if (isDuplicateBet(capper.id, bet.description)) continue;
 
-          // Determine review_status from confidence assessment
-          const reviewStatus = bet._confidence === 'low' ? 'needs_review' : 'confirmed';
+          // Determine review_status: audit mode overrides confidence
+          const auditOn = isAuditMode();
+          const reviewStatus = (auditOn || bet._confidence === 'low') ? 'needs_review' : 'confirmed';
 
           const saved = await createBetWithLegs({
             capper_id: capper.id,
@@ -263,9 +265,18 @@ async function handleMessage(message) {
       }
     }
 
-    // Low-confidence bets are stored with needs_review but no announcement
+    // Bets held for review — send staging embeds to admin war room
     if (reviewBets.length > 0) {
-      console.log(`[Confidence] Stored ${reviewBets.length} ambiguous bet(s) for manual review from ${capperInfo.name}`);
+      const ids = reviewBets.map(b => b.id.slice(0, 8)).join(', ');
+      console.log(`[Review] Stored ${reviewBets.length} bet(s) for manual review from ${capperInfo.name} [${ids}]`);
+      await message.reply({
+        content: `🔒 **${reviewBets.length}** bet(s) saved for review. IDs: ${reviewBets.map(b => `\`${b.id.slice(0, 8)}\``).join(', ')}`,
+      });
+
+      // Send staging embeds with Approve/Edit/Reject buttons to admin channel
+      for (const bet of reviewBets) {
+        await sendStagingEmbed(message.client, bet, capperInfo.name);
+      }
     }
   } catch (err) {
     console.error('[MessageHandler] Error:', err.message);
