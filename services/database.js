@@ -70,6 +70,21 @@ const stmts = {
 
   // Parlay legs
   getLegsByBetId: db.prepare('SELECT * FROM parlay_legs WHERE bet_id = ? ORDER BY created_at'),
+
+  // Dashboard summary
+  dashboardSummary: db.prepare(`SELECT
+    COUNT(*) AS total_bets,
+    COUNT(CASE WHEN result = 'pending' THEN 1 END) AS pending,
+    COUNT(CASE WHEN result = 'win' THEN 1 END) AS wins,
+    COUNT(CASE WHEN result = 'loss' THEN 1 END) AS losses,
+    COUNT(CASE WHEN result = 'push' THEN 1 END) AS pushes,
+    COALESCE(SUM(profit_units), 0) AS total_profit
+    FROM bets WHERE review_status = 'confirmed'`),
+  recentPendingBets: db.prepare(`SELECT b.*, c.display_name AS capper_name
+    FROM bets b LEFT JOIN cappers c ON b.capper_id = c.id
+    WHERE b.result = 'pending' AND b.review_status = 'confirmed'
+    ORDER BY b.created_at DESC LIMIT ?`),
+  totalBankroll: db.prepare(`SELECT COALESCE(SUM(current), 0) AS total FROM bankrolls`),
 };
 
 function uid() { return crypto.randomBytes(16).toString('hex'); }
@@ -361,6 +376,19 @@ function getBetLegs(betId) {
   return stmts.getLegsByBetId.all(betId);
 }
 
+function getDashboardSummary() {
+  return stmts.dashboardSummary.get();
+}
+
+function getRecentPendingBets(limit = 3) {
+  return stmts.recentPendingBets.all(limit);
+}
+
+function getTotalBankroll() {
+  const row = stmts.totalBankroll.get();
+  return row ? row.total : 0;
+}
+
 // ── Export everything (same interface as old supabase.js) ────
 module.exports = {
   db,
@@ -393,4 +421,7 @@ module.exports = {
   isAuditMode,
   updateBetFields,
   getBetLegs,
+  getDashboardSummary,
+  getRecentPendingBets,
+  getTotalBankroll,
 };
