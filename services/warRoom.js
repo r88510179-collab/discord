@@ -159,10 +159,8 @@ async function handleWarRoomInteraction(interaction) {
         return interaction.reply({ content: 'Bet not found or already processed.', ephemeral: true });
       }
 
-      const rejectedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
-        .setTitle('❌ Bet Rejected')
-        .setColor(COLORS.danger);
-      await interaction.update({ embeds: [rejectedEmbed], components: [] });
+      await interaction.reply({ content: '❌ Slip rejected and removed from queue.', ephemeral: true });
+      await interaction.message.delete().catch(() => {});
       return true;
     }
   }
