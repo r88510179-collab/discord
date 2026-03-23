@@ -358,8 +358,10 @@ If the text is sports news, commentary, game recaps, opinions, retweets, fan rep
 
 STRICT RULES:
 - If the text is a retweet (starts with "RT"), a reply to a fan, or a capper celebrating someone else's win, return type "ignore".
+- If you see "[Quoted]" or "Quoted @", you MUST ignore the quoted text entirely. Only evaluate the capper's original text above it.
 - bet_type: straight, parlay, teaser, prop, future, ladder.
 - For parlays, ALWAYS populate the "legs" array. Each leg MUST have: description, odds, team (or player name), line (spread/total/ML), type (spread/moneyline/total/prop).
+- For parlays, the description MUST list the actual legs/players involved (e.g., "Donovan Clingan 11+ Reb, Jalen Duren 10+ Pts"). Do NOT just name it "3 Pick Parlay" or "4 Leg Parlay" — specify what the legs ARE.
 - If wager amount or payout/to-pay is visible, include "wager" (number) and "payout" (number) on the bet.
 - Sport: Use specific league — UCL not Soccer, EPL not Soccer, March Madness not NCAAB. If units not specified default 1.
 - Parse ALL bets. For player props, include a "props" array: player_name, stat_category (snake_case), line (number), direction ("over"/"under"), odds (integer).

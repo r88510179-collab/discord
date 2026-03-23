@@ -1,5 +1,5 @@
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
-const { getDashboardSummary, getRecentPendingBets, getTotalBankroll } = require('../services/database');
+const { getDashboardSummary, getRecentPendingBets, getTotalBankroll, getRiskedCapital } = require('../services/database');
 const { COLORS, fmtOdds, fmtUnits, fmtMoney } = require('../utils/embeds');
 
 module.exports = {
@@ -10,6 +10,8 @@ module.exports = {
   async execute(interaction) {
     const summary = getDashboardSummary();
     const bankroll = getTotalBankroll();
+    const risked = getRiskedCapital();
+    const available = bankroll - (risked * parseFloat(process.env.DEFAULT_UNIT_SIZE || 25));
     const recentPending = getRecentPendingBets(3);
 
     const winRate = (summary.wins + summary.losses) > 0
@@ -22,13 +24,14 @@ module.exports = {
       .setTitle('ZoneTracker Dashboard')
       .setColor(profitColor)
       .addFields(
-        { name: 'Total Bankroll', value: fmtMoney(bankroll), inline: true },
+        { name: 'Starting Bankroll', value: fmtMoney(bankroll), inline: true },
+        { name: 'Risked Capital', value: `${risked}u`, inline: true },
+        { name: 'Available Cash', value: fmtMoney(Math.max(available, 0)), inline: true },
         { name: 'Profit/Loss', value: fmtUnits(summary.total_profit), inline: true },
         { name: 'Win Rate', value: `${winRate}%`, inline: true },
         { name: 'Pending', value: `${summary.pending}`, inline: true },
         { name: 'Wins', value: `${summary.wins}`, inline: true },
         { name: 'Losses', value: `${summary.losses}`, inline: true },
-        { name: 'Pushes', value: `${summary.pushes}`, inline: true },
         { name: 'Total Bets', value: `${summary.total_bets}`, inline: true },
       )
       .setTimestamp()
