@@ -10,6 +10,7 @@ const {
 } = require('discord.js');
 const { approveBet, rejectBet, updateBetFields, getBetLegs } = require('./database');
 const { postPickTracked } = require('./dashboard');
+const { shopLine, formatLineShop, extractTeamFromDescription } = require('./odds');
 const { COLORS } = require('../utils/embeds');
 
 /**
@@ -62,6 +63,20 @@ async function sendStagingEmbed(client, bet, capperName) {
     if (bet.wager) parts.push(`**Wager:** $${Number(bet.wager).toFixed(2)}`);
     if (bet.payout) parts.push(`**To Pay:** $${Number(bet.payout).toFixed(2)}`);
     embed.addFields({ name: 'Financials', value: parts.join('  |  '), inline: false });
+  }
+
+  // Line Shop — compare capper's odds to live market
+  try {
+    const teamSearch = extractTeamFromDescription(bet.description);
+    if (teamSearch) {
+      const bestOffer = await shopLine(teamSearch, bet.sport);
+      const formatted = formatLineShop(bestOffer);
+      if (formatted) {
+        embed.addFields({ name: 'Line Shop', value: formatted, inline: false });
+      }
+    }
+  } catch (err) {
+    console.log(`[WarRoom] Line shop error: ${err.message}`);
   }
 
   embed.addFields({ name: 'Bet ID', value: `\`${bet.id}\``, inline: false })
