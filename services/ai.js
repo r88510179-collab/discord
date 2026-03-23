@@ -362,6 +362,7 @@ STRICT RULES:
 - bet_type: straight, parlay, teaser, prop, future, ladder.
 - For parlays, ALWAYS populate the "legs" array. Each leg MUST have: description, odds, team (or player name), line (spread/total/ML), type (spread/moneyline/total/prop).
 - For parlays, the description MUST list the actual legs/players involved (e.g., "Donovan Clingan 11+ Reb, Jalen Duren 10+ Pts"). Do NOT just name it "3 Pick Parlay" or "4 Leg Parlay" — specify what the legs ARE.
+- If the capper mentions a parlay or multiple legs but does NOT list the actual teams/players in the text or OCR data (e.g., they just say "Tap link to load", "Link in bio", or the picks are hidden behind a URL), you MUST set the description to: "MISSING LEGS: Capper hid the picks in a link or missing image." Do NOT fabricate leg details.
 - If wager amount or payout/to-pay is visible, include "wager" (number) and "payout" (number) on the bet.
 - Sport: Use specific league — UCL not Soccer, EPL not Soccer, March Madness not NCAAB. If units not specified default 1.
 - Parse ALL bets. For player props, include a "props" array: player_name, stat_category (snake_case), line (number), direction ("over"/"under"), odds (integer).

@@ -8,6 +8,20 @@ const { extractTextFromImage } = require('../services/ocr');
 // ── Dedup guard: prevent double-processing of the same Discord message ──
 const processedMessages = new Set();
 
+// ── Hard Scrub: strip TweetShift markdown and junk before AI parsing ──
+function hardScrub(text) {
+  return text
+    .replace(/\[Quoted\]\([^)]*\)/gi, '')           // [Quoted](url)
+    .replace(/\[@[^\]]*\]\([^)]*\)/g, '')            // [@username](url)
+    .replace(/\[[^\]]*\]\(https?:\/\/[^)]*\)/g, '')  // any [text](url) markdown link
+    .replace(/Retweeted @\w+/gi, '')
+    .replace(/Quoted @\w+/gi, '')
+    .replace(/\$[\d,]+\.?\d*/g, '')                   // dollar amounts (payouts)
+    .replace(/https?:\/\/\S+/g, '')                   // bare URLs
+    .replace(/\n{3,}/g, '\n\n')                       // collapse excessive newlines
+    .trim();
+}
+
 const PICK_SIGNALS = [
   /\b(pick|lock|potd|play|bet|wager|hammer|tail|fade)\b/i,
   /[+-]\d{3}/,
@@ -364,13 +378,8 @@ async function handleMessage(message) {
     // Parse text picks
     const reviewBets = [];
     if (fullText.trim() && looksLikePick(fullText)) {
-      // Clean text before parsing — strip retweet metadata and dollar amounts
-      let cleanText = fullText
-        .replace(/Retweeted @\w+/gi, '')
-        .replace(/Quoted @\w+/gi, '')
-        .replace(/\$[\d,]+\.?\d*/g, '')  // remove dollar amounts (payouts, not units)
-        .replace(/https?:\/\/\S+/g, '')   // remove URLs
-        .trim();
+      // Hard Scrub: strip TweetShift markdown, retweet metadata, URLs, dollar amounts
+      let cleanText = hardScrub(fullText);
       const parsed = await parseBetText(cleanText);
       // Tier 2a: AI detected a result/grading event — auto-grade
       if (parsed.type === 'result') {
@@ -412,25 +421,51 @@ async function handleMessage(message) {
       }
     }
 
-    // Scan images for bet slips (max 1 per message to save API quota)
+    // Scan images for bet slips — OCR first, then pass combined text to AI
     if (hasImages) {
       const img = images[0]; // only scan first image
-      const parsed = await scanImage(img.url, img.type);
-      if (parsed?.bets?.length > 0) {
+      let ocrText = '';
+      try {
+        ocrText = await extractTextFromImage(img.url) || '';
+      } catch (err) {
+        console.log(`[OCR] Failed for picks channel image: ${err.message}`);
+      }
+
+      // Combine message text + OCR text so the AI sees everything
+      const combinedText = hardScrub([cleanText || fullText, ocrText].filter(Boolean).join('\n'));
+      let parsed;
+      if (combinedText.length > 10) {
+        parsed = await parseBetText(combinedText);
+      } else {
+        parsed = await scanImage(img.url, img.type);
+      }
+
+      if (parsed?.bets?.length > 0 && parsed.is_bet !== false) {
         for (const bet of parsed.bets) {
           if (isDuplicateBet(capper.id, bet.description)) continue;
+
+          const auditOn = isAuditMode();
+          const reviewStatus = (auditOn || bet._confidence === 'low') ? 'needs_review' : 'confirmed';
 
           const saved = await createBetWithLegs({
             capper_id: capper.id,
             sport: bet.sport, league: bet.league,
             bet_type: bet.bet_type, description: bet.description,
             odds: bet.odds, units: Math.min(bet.units || 1, 50),
-            event_date: bet.event_date, source: 'slip',
+            wager: bet.wager || null, payout: bet.payout || null,
+            event_date: bet.event_date, source: ocrText ? 'ocr_slip' : 'slip',
             source_channel_id: message.channel.id,
             source_message_id: message.id,
-            raw_text: `Image scan: ${capperInfo.name} in #${message.channel.name}`,
+            raw_text: (ocrText || `Image: ${capperInfo.name}`).slice(0, 500),
+            review_status: reviewStatus,
           }, bet.legs || []);
-          if (!saved?._deduped) allBets.push(saved);
+          if (!saved?._deduped) {
+            if (reviewStatus === 'needs_review') {
+              reviewBets.push(saved);
+            } else {
+              allBets.push(saved);
+            }
+          }
         }
       }
     }
