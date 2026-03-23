@@ -88,7 +88,7 @@ client.on(Events.MessageCreate, (message) => {
 client.once(Events.ClientReady, (c) => {
   console.log('');
   console.log('╔═══════════════════════════════════════════════╗');
-  console.log('║   🎰  BetTracker Pro — Discord Bot  🎰       ║');
+  console.log('║   🎰  ZoneTracker — Discord Bot  🎰       ║');
   console.log('╠═══════════════════════════════════════════════╣');
   console.log(`║   Logged in as: ${c.user.tag.padEnd(28)}║`);
   console.log(`║   Commands:     ${client.commands.size.toString().padEnd(28)}║`);

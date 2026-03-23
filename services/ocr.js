@@ -47,7 +47,7 @@ async function extractTextFromImage(imageUrl) {
     const res = await fetch(OCR_API_URL, {
       method: 'POST',
       headers: {
-        'User-Agent': 'BetTracker-Discord/1.0',
+        'User-Agent': 'ZoneTracker-Discord/1.0',
         'Content-Type': 'application/x-www-form-urlencoded',
       },
       body: formData.toString(),

@@ -1,7 +1,7 @@
 /**
  * ── Migrate SQLite → Supabase ───────────────────────────────
  *
- * Run this when you're ready to connect to BetTracker Pro.
+ * Run this when you're ready to connect to ZoneTracker.
  *
  * Usage:
  *   1. Add SUPABASE_URL and SUPABASE_KEY to your .env

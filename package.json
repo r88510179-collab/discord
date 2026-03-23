@@ -1,5 +1,5 @@
 {
-  "name": "bettracker-discord",
+  "name": "zonetracker-discord",
   "version": "1.0.0",
   "description": "AI-powered Discord betting hub",
   "main": "bot.js",
