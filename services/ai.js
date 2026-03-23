@@ -341,8 +341,11 @@ async function parseBetText(text) {
     const sourceText = quick._sourceText || text;
     return applyConfidenceGating(normalizeParsedBets(quick), sourceText);
   }
-  const sys = `Sports betting parser. Return ONLY valid JSON. Example:
-{"bets":[{"sport":"NCAAB","league":"March Madness","bet_type":"parlay","description":"Gonzaga -6.5 / Houston ML","odds":180,"units":2.0,"wager":50,"payout":90.06,"event_date":null,"legs":[{"description":"Gonzaga -6.5","odds":-110,"team":"Gonzaga","line":"-6.5","type":"spread"},{"description":"Houston ML","odds":-150,"team":"Houston","line":"ML","type":"moneyline"}],"props":[]}]}
+  const sys = `You are a STRICT sports betting parser. Return ONLY valid JSON.
+CRITICAL: If the text is just sports news, commentary, game recaps, scores, opinions, or anything WITHOUT a clear future prediction/wager, you MUST return: {"is_bet":false,"bets":[]}
+Only return {"is_bet":true,"bets":[...]} when there is a clear actionable bet with a team/player, line/odds, and a prediction.
+Example:
+{"is_bet":true,"bets":[{"sport":"NCAAB","league":"March Madness","bet_type":"parlay","description":"Gonzaga -6.5 / Houston ML","odds":180,"units":2.0,"wager":50,"payout":90.06,"event_date":null,"legs":[{"description":"Gonzaga -6.5","odds":-110,"team":"Gonzaga","line":"-6.5","type":"spread"},{"description":"Houston ML","odds":-150,"team":"Houston","line":"ML","type":"moneyline"}],"props":[]}]}
 RULES:
 - bet_type: straight, parlay, teaser, prop, future, ladder.
 - For parlays, ALWAYS populate the "legs" array. Each leg MUST have: description, odds, team (or player name), line (spread/total/ML), type (spread/moneyline/total/prop).
@@ -354,6 +357,10 @@ RULES:
   if (!raw) return { bets: [], error: 'AI unavailable' };
   const parsed = parseJSON(raw);
   if (!parsed) return { bets: [], error: 'Parse failed' };
+  // Respect AI's is_bet verdict — short-circuit if not a bet
+  if (parsed.is_bet === false) {
+    return { is_bet: false, bets: [] };
+  }
   return applyConfidenceGating(normalizeParsedBets(parsed), text);
 }
 

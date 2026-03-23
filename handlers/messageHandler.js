@@ -12,6 +12,9 @@ const PICK_SIGNALS = [
   /\b(ml|moneyline|spread|over|under|o\/u|rl|pk)\b/i,
   /\b(parlay|teaser|prop)\b/i,
   /🔒|🔥|💰|🎯|⚡/,
+  /[+-]\d+\.?\d*/,                           // any +/- number (spreads, lines)
+  /\b\d+\.5\b/,                              // half-point lines (22.5, 3.5)
+  /\b(unit|units)\b/i,                       // "2 units" without the 'u' shorthand
 ];
 
 // ── Celebration / Result patterns — these are NOT new picks ──
@@ -281,7 +284,10 @@ async function handleMessage(message) {
         .replace(/https?:\/\/\S+/g, '')   // remove URLs
         .trim();
       const parsed = await parseBetText(cleanText);
-      if (parsed.bets?.length > 0) {
+      // Tier 2: AI says this isn't a bet — silently ignore
+      if (parsed.is_bet === false) {
+        console.log(`[Filter] AI rejected as non-bet: ${cleanText.substring(0, 60)}...`);
+      } else if (parsed.bets?.length > 0) {
         for (const bet of parsed.bets) {
           // Skip duplicates (same capper, similar description, last 10 min)
           if (isDuplicateBet(capper.id, bet.description)) continue;
