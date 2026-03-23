@@ -342,26 +342,53 @@ async function parseBetText(text) {
     return applyConfidenceGating(normalizeParsedBets(quick), sourceText);
   }
   const sys = `You are a STRICT sports betting parser. Return ONLY valid JSON.
-CRITICAL: If the text is just sports news, commentary, game recaps, scores, opinions, or anything WITHOUT a clear future prediction/wager, you MUST return: {"is_bet":false,"bets":[]}
-Only return {"is_bet":true,"bets":[...]} when there is a clear actionable bet with a team/player, line/odds, and a prediction.
-Example:
-{"is_bet":true,"bets":[{"sport":"NCAAB","league":"March Madness","bet_type":"parlay","description":"Gonzaga -6.5 / Houston ML","odds":180,"units":2.0,"wager":50,"payout":90.06,"event_date":null,"legs":[{"description":"Gonzaga -6.5","odds":-110,"team":"Gonzaga","line":"-6.5","type":"spread"},{"description":"Houston ML","odds":-150,"team":"Houston","line":"ML","type":"moneyline"}],"props":[]}]}
-RULES:
+
+RESPONSE TYPE 1 — New Bet:
+If the text contains a clear actionable bet (team/player + line/odds + prediction):
+{"type":"bet","is_bet":true,"bets":[{"sport":"NCAAB","league":"March Madness","bet_type":"parlay","description":"Gonzaga -6.5 / Houston ML","odds":180,"units":2.0,"wager":50,"payout":90.06,"event_date":null,"legs":[{"description":"Gonzaga -6.5","odds":-110,"team":"Gonzaga","line":"-6.5","type":"spread"},{"description":"Houston ML","odds":-150,"team":"Houston","line":"ML","type":"moneyline"}],"props":[]}]}
+
+RESPONSE TYPE 2 — Result/Grading Event:
+If the text celebrates a WIN or reports a LOSS (e.g., "WINNER", "CASHED", "CASH IT", "HIT!", "BANG", or loss indicators like "took an L", "tough loss"):
+{"type":"result","is_bet":false,"outcome":"win","subject":["Real Madrid","Gonzaga"]}
+The "subject" array should contain the team names or player names mentioned. "outcome" must be "win" or "loss".
+
+RESPONSE TYPE 3 — Not a Bet:
+If the text is sports news, commentary, game recaps, opinions, retweets, fan replies, or celebrating someone ELSE's win (e.g., "Look at this hit!", "Great call by @someone"):
+{"type":"ignore","is_bet":false,"bets":[]}
+
+STRICT RULES:
+- If the text is a retweet (starts with "RT"), a reply to a fan, or a capper celebrating someone else's win, return type "ignore".
 - bet_type: straight, parlay, teaser, prop, future, ladder.
 - For parlays, ALWAYS populate the "legs" array. Each leg MUST have: description, odds, team (or player name), line (spread/total/ML), type (spread/moneyline/total/prop).
 - If wager amount or payout/to-pay is visible, include "wager" (number) and "payout" (number) on the bet.
 - Sport: Use specific league — UCL not Soccer, EPL not Soccer, March Madness not NCAAB. If units not specified default 1.
 - Parse ALL bets. For player props, include a "props" array: player_name, stat_category (snake_case), line (number), direction ("over"/"under"), odds (integer).
-- You are analyzing raw OCR text from a betting slip. It will contain typos and garbage chars. Do your best (e.g., "0ver"="over", "und3r"="under", "Lebr0n"="LeBron").`;
+- Raw OCR text may contain typos and garbage chars. Do your best (e.g., "0ver"="over", "und3r"="under", "Lebr0n"="LeBron").`;
   const raw = await callLLM(text, sys);
   if (!raw) return { bets: [], error: 'AI unavailable' };
   const parsed = parseJSON(raw);
   if (!parsed) return { bets: [], error: 'Parse failed' };
-  // Respect AI's is_bet verdict — short-circuit if not a bet
-  if (parsed.is_bet === false) {
-    return { is_bet: false, bets: [] };
+
+  // Type 2: Result/grading event
+  if (parsed.type === 'result' && parsed.outcome) {
+    return {
+      type: 'result',
+      is_bet: false,
+      outcome: parsed.outcome,
+      subject: Array.isArray(parsed.subject) ? parsed.subject : [parsed.subject].filter(Boolean),
+      bets: [],
+    };
   }
-  return applyConfidenceGating(normalizeParsedBets(parsed), text);
+
+  // Type 3: Ignore (not a bet)
+  if (parsed.is_bet === false || parsed.type === 'ignore') {
+    return { type: 'ignore', is_bet: false, bets: [] };
+  }
+
+  // Type 1: Bet
+  const result = applyConfidenceGating(normalizeParsedBets(parsed), text);
+  result.type = 'bet';
+  return result;
 }
 
 async function parseBetSlipImage(imageBase64, mediaType = 'image/png') {

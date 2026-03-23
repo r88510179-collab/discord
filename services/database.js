@@ -71,6 +71,13 @@ const stmts = {
   // Parlay legs
   getLegsByBetId: db.prepare('SELECT * FROM parlay_legs WHERE bet_id = ? ORDER BY created_at'),
 
+  // Auto-grading: find oldest pending bet matching a search term
+  findPendingBySubject: db.prepare(`SELECT b.*, c.display_name AS capper_name
+    FROM bets b LEFT JOIN cappers c ON b.capper_id = c.id
+    WHERE b.result = 'pending' AND b.review_status = 'confirmed'
+    AND LOWER(b.description) LIKE LOWER(?)
+    ORDER BY b.created_at ASC LIMIT 1`),
+
   // Dashboard summary
   dashboardSummary: db.prepare(`SELECT
     COUNT(*) AS total_bets,
@@ -376,6 +383,14 @@ function getBetLegs(betId) {
   return stmts.getLegsByBetId.all(betId);
 }
 
+function findPendingBetBySubject(searchTerms) {
+  for (const term of searchTerms) {
+    const match = stmts.findPendingBySubject.get(`%${term}%`);
+    if (match) return match;
+  }
+  return null;
+}
+
 function getDashboardSummary() {
   return stmts.dashboardSummary.get();
 }
@@ -424,4 +439,5 @@ module.exports = {
   getDashboardSummary,
   getRecentPendingBets,
   getTotalBankroll,
+  findPendingBetBySubject,
 };

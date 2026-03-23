@@ -1,5 +1,5 @@
 const { parseBetText, parseBetSlipImage } = require('../services/ai');
-const { getOrCreateCapper, createBetWithLegs, isDuplicateBet, isAuditMode } = require('../services/database');
+const { getOrCreateCapper, createBetWithLegs, isDuplicateBet, isAuditMode, findPendingBetBySubject, gradeBet: gradeBetRecord, getBankroll, updateBankroll } = require('../services/database');
 const { betEmbed } = require('../utils/embeds');
 const { postPickTracked } = require('../services/dashboard');
 const { sendStagingEmbed } = require('../services/warRoom');
@@ -205,11 +205,86 @@ async function handleSlipFeed(message) {
   }
 }
 
+// ── Auto-Grade Engine ─────────────────────────────────────────
+// Finds a matching pending bet and grades it based on outcome.
+async function autoGradeBet(client, outcome, subjects) {
+  if (!subjects || subjects.length === 0) return null;
+
+  const bet = findPendingBetBySubject(subjects);
+  if (!bet) {
+    console.log(`[AutoGrade] No pending bet found for subjects: ${subjects.join(', ')}`);
+    return null;
+  }
+
+  // Calculate profit/loss
+  const result = outcome === 'win' ? 'win' : outcome === 'loss' ? 'loss' : null;
+  if (!result) return null;
+
+  const odds = bet.odds || -110;
+  const units = bet.units || 1;
+  let profitUnits = 0;
+
+  if (result === 'win') {
+    profitUnits = odds > 0 ? units * (odds / 100) : units * (100 / Math.abs(odds));
+  } else {
+    profitUnits = -units;
+  }
+
+  // Grade the bet
+  const graded = gradeBetRecord(bet.id, result, profitUnits, null, `Auto-graded from capper graphic`);
+
+  // Update bankroll
+  const bankroll = getBankroll(bet.capper_id);
+  if (bankroll) {
+    const unitSize = bankroll.unit_size || 25;
+    updateBankroll(bet.capper_id, profitUnits * unitSize);
+  }
+
+  // Notify War Room
+  const warRoomId = process.env.WAR_ROOM_CHANNEL_ID;
+  if (warRoomId && client) {
+    const channel = await client.channels.fetch(warRoomId).catch(() => null);
+    if (channel) {
+      const emoji = result === 'win' ? '✅' : '❌';
+      const sign = profitUnits >= 0 ? '+' : '';
+      await channel.send(
+        `🤖 **Auto-Graded:** ${emoji} **${bet.description}** marked as **${result.toUpperCase()}** (${sign}${profitUnits.toFixed(2)}u) — ${bet.capper_name || 'Unknown'}\n> Based on capper graphic`
+      );
+    }
+  }
+
+  console.log(`[AutoGrade] Graded bet ${bet.id.slice(0, 8)} as ${result} (${profitUnits.toFixed(2)}u)`);
+  return graded;
+}
+
+// Handle celebration messages by parsing them for grading signals
+async function handleAutoGrade(message, fullText) {
+  let cleanText = fullText
+    .replace(/https?:\/\/\S+/g, '')
+    .replace(/\$[\d,]+\.?\d*/g, '')
+    .trim();
+
+  if (cleanText.length < 3) return;
+
+  const parsed = await parseBetText(cleanText);
+  if (parsed.type === 'result' && parsed.outcome && parsed.subject?.length > 0) {
+    await autoGradeBet(message.client, parsed.outcome, parsed.subject);
+  } else {
+    console.log(`[AutoGrade] AI could not extract result from celebration text.`);
+  }
+}
+
 async function handleMessage(message) {
   if (!message.guild) return;
 
   // ═══ GUARD 1: Never process our own messages (prevents infinite loop) ═══
   if (message.author.id === message.client.user.id) return;
+
+  // ═══ HARD FILTER: Reject retweets and fan replies instantly ═══
+  const rawContent = message.content || '';
+  if (/^RT\s/i.test(rawContent)) return;
+  if (/\breplying\s+to\b/i.test(rawContent)) return;
+  if (/vxtwitter\.com|fixupx\.com/i.test(rawContent) && !/\b(pick|lock|play|bet)\b/i.test(rawContent)) return;
 
   // ═══ OCR Slip Feed — check before picks channel guard ═══
   const slipHandled = await handleSlipFeed(message);
@@ -249,9 +324,14 @@ async function handleMessage(message) {
   }
   const fullText = (message.content || '') + embedText;
 
-  // ═══ GUARD 5: Skip celebration / result tweets (✅, BANG, WINNER, payouts) ═══
+  // ═══ GUARD 5: Celebration / result tweets → route to auto-grader ═══
   if (looksLikeCelebration(fullText)) {
-    console.log(`[Guard5] Skipped celebration: ${fullText.substring(0, 80)}...`);
+    console.log(`[AutoGrade] Detected celebration: ${fullText.substring(0, 80)}...`);
+    try {
+      await handleAutoGrade(message, fullText);
+    } catch (err) {
+      console.error('[AutoGrade] Error:', err.message);
+    }
     return;
   }
 
@@ -284,7 +364,13 @@ async function handleMessage(message) {
         .replace(/https?:\/\/\S+/g, '')   // remove URLs
         .trim();
       const parsed = await parseBetText(cleanText);
-      // Tier 2: AI says this isn't a bet — silently ignore
+      // Tier 2a: AI detected a result/grading event — auto-grade
+      if (parsed.type === 'result') {
+        console.log(`[AutoGrade] AI detected result: ${parsed.outcome} for ${parsed.subject?.join(', ')}`);
+        await autoGradeBet(message.client, parsed.outcome, parsed.subject || []);
+        return;
+      }
+      // Tier 2b: AI says this isn't a bet — silently ignore
       if (parsed.is_bet === false) {
         console.log(`[Filter] AI rejected as non-bet: ${cleanText.substring(0, 60)}...`);
       } else if (parsed.bets?.length > 0) {
