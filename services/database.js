@@ -92,6 +92,22 @@ const stmts = {
     WHERE b.result = 'pending' AND b.review_status = 'confirmed'
     ORDER BY b.created_at DESC LIMIT ?`),
   totalBankroll: db.prepare(`SELECT COALESCE(SUM(current), 0) AS total FROM bankrolls`),
+
+  // Capper analytics
+  findCapperByName: db.prepare(`SELECT * FROM cappers WHERE LOWER(display_name) LIKE LOWER(?) LIMIT 1`),
+  capperGradedBets: db.prepare(`SELECT b.* FROM bets b
+    WHERE b.capper_id = ? AND b.result IN ('win', 'loss', 'push') AND b.review_status = 'confirmed'
+    ORDER BY b.created_at DESC`),
+  capperRecentResults: db.prepare(`SELECT b.result FROM bets b
+    WHERE b.capper_id = ? AND b.result IN ('win', 'loss', 'push') AND b.review_status = 'confirmed'
+    ORDER BY b.created_at DESC LIMIT 5`),
+  capperSportBreakdown: db.prepare(`SELECT b.sport,
+    COUNT(CASE WHEN b.result = 'win' THEN 1 END) AS wins,
+    COUNT(CASE WHEN b.result = 'loss' THEN 1 END) AS losses,
+    COUNT(*) AS total
+    FROM bets b
+    WHERE b.capper_id = ? AND b.result IN ('win', 'loss', 'push') AND b.review_status = 'confirmed'
+    GROUP BY b.sport ORDER BY wins DESC`),
 };
 
 function uid() { return crypto.randomBytes(16).toString('hex'); }
@@ -404,6 +420,49 @@ function getTotalBankroll() {
   return row ? row.total : 0;
 }
 
+function findCapperByName(name) {
+  return stmts.findCapperByName.get(`%${name}%`) || null;
+}
+
+function getCapperAnalytics(capperId) {
+  const graded = stmts.capperGradedBets.all(capperId);
+  const recent5 = stmts.capperRecentResults.all(capperId);
+  const sportBreakdown = stmts.capperSportBreakdown.all(capperId);
+
+  const wins = graded.filter(b => b.result === 'win').length;
+  const losses = graded.filter(b => b.result === 'loss').length;
+  const pushes = graded.filter(b => b.result === 'push').length;
+  const totalProfit = graded.reduce((sum, b) => sum + (b.profit_units || 0), 0);
+  const avgOdds = graded.length > 0
+    ? Math.round(graded.reduce((sum, b) => sum + (b.odds || 0), 0) / graded.length)
+    : 0;
+  const winRate = (wins + losses) > 0
+    ? ((wins / (wins + losses)) * 100).toFixed(1)
+    : '0.0';
+
+  // Streak from most recent results
+  let streak = '';
+  if (recent5.length > 0) {
+    const first = recent5[0].result;
+    let count = 0;
+    for (const r of recent5) {
+      if (r.result === first) count++;
+      else break;
+    }
+    const letter = first === 'win' ? 'W' : first === 'loss' ? 'L' : 'P';
+    streak = `${letter}${count}`;
+  }
+
+  // Best sport
+  const bestSport = sportBreakdown.length > 0 ? sportBreakdown[0] : null;
+
+  return {
+    total: graded.length, wins, losses, pushes,
+    totalProfit, avgOdds, winRate, streak,
+    bestSport, sportBreakdown,
+  };
+}
+
 // ── Export everything (same interface as old supabase.js) ────
 module.exports = {
   db,
@@ -440,4 +499,6 @@ module.exports = {
   getRecentPendingBets,
   getTotalBankroll,
   findPendingBetBySubject,
+  findCapperByName,
+  getCapperAnalytics,
 };
