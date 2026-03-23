@@ -1,28 +1,28 @@
 const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } = require('discord.js');
-const { voidAllPending } = require('../services/database');
+const { deleteAllPending } = require('../services/database');
 const { COLORS } = require('../utils/embeds');
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('purge')
-    .setDescription('Admin: purge pending bets')
+    .setDescription('Admin: permanently delete pending bets')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .addSubcommand(sub =>
       sub.setName('pending')
-        .setDescription('Void all pending bets (kept for historical records)')),
+        .setDescription('Permanently delete all pending bets from the database')),
 
   async execute(interaction) {
     const sub = interaction.options.getSubcommand();
 
     if (sub === 'pending') {
-      const count = voidAllPending();
+      const count = deleteAllPending();
 
       const embed = new EmbedBuilder()
         .setTitle('Purged Pending Bets')
-        .setColor(count > 0 ? COLORS.success : COLORS.info)
+        .setColor(count > 0 ? COLORS.danger : COLORS.info)
         .setDescription(
           count > 0
-            ? `Voided **${count}** pending bet${count === 1 ? '' : 's'}. They remain in the database for historical records but are removed from the active queue and dashboard.`
+            ? `Permanently deleted **${count}** pending bet${count === 1 ? '' : 's'} from the database.`
             : 'No pending bets to purge.',
         )
         .setTimestamp()

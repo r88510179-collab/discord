@@ -93,7 +93,7 @@ const stmts = {
     ORDER BY b.created_at DESC LIMIT ?`),
   totalBankroll: db.prepare(`SELECT COALESCE(SUM(current), 0) AS total FROM bankrolls`),
   riskedCapital: db.prepare(`SELECT COALESCE(SUM(units), 0) AS risked FROM bets WHERE result = 'pending' AND review_status = 'confirmed'`),
-  voidAllPending: db.prepare(`UPDATE bets SET result = 'void' WHERE result = 'pending'`),
+  deleteAllPending: db.prepare(`DELETE FROM bets WHERE result = 'pending'`),
 
   // Capper analytics
   findCapperByName: db.prepare(`SELECT * FROM cappers WHERE LOWER(display_name) LIKE LOWER(?) LIMIT 1`),
@@ -427,8 +427,8 @@ function getRiskedCapital() {
   return row ? row.risked : 0;
 }
 
-function voidAllPending() {
-  const info = stmts.voidAllPending.run();
+function deleteAllPending() {
+  const info = stmts.deleteAllPending.run();
   return info.changes;
 }
 
@@ -511,7 +511,7 @@ module.exports = {
   getRecentPendingBets,
   getTotalBankroll,
   getRiskedCapital,
-  voidAllPending,
+  deleteAllPending,
   findPendingBetBySubject,
   findCapperByName,
   getCapperAnalytics,
