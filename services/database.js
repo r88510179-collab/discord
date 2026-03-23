@@ -24,8 +24,8 @@ const stmts = {
   insertCapper:      db.prepare('INSERT INTO cappers (id, discord_id, display_name, avatar_url) VALUES (?, ?, ?, ?)'),
   insertCapperTwitter: db.prepare('INSERT INTO cappers (id, twitter_handle, display_name) VALUES (?, ?, ?)'),
 
-  insertBet: db.prepare(`INSERT INTO bets (id, capper_id, sport, league, bet_type, description, odds, units, event_date, source, source_url, source_channel_id, source_message_id, fingerprint, raw_text, review_status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+  insertBet: db.prepare(`INSERT INTO bets (id, capper_id, sport, league, bet_type, description, odds, units, event_date, source, source_url, source_channel_id, source_message_id, fingerprint, raw_text, review_status, wager, payout)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   insertLeg: db.prepare('INSERT INTO parlay_legs (id, bet_id, description, odds) VALUES (?, ?, ?, ?)'),
   gradeBet:  db.prepare('UPDATE bets SET result = ?, profit_units = ?, grade = ?, grade_reason = ?, graded_at = datetime(\'now\') WHERE id = ?'),
   getBet:    db.prepare('SELECT * FROM bets WHERE id = ?'),
@@ -57,22 +57,19 @@ const stmts = {
     WHERE capper_id = ? AND created_at > datetime('now', '-10 minutes')
     AND description LIKE ? LIMIT 1`),
 
-  // Review queue management
-  approveBet: db.prepare("UPDATE bets SET review_status = 'confirmed' WHERE id = ? AND review_status = 'needs_review'"),
-  rejectBet:  db.prepare("DELETE FROM bets WHERE id = ? AND review_status = 'needs_review'"),
-  getReviewBetWithCapper: db.prepare(`SELECT b.*, c.display_name AS capper_name, c.discord_id AS capper_discord_id
-    FROM bets b LEFT JOIN cappers c ON b.capper_id = c.id WHERE b.id = ?`),
-
   // Settings
   getSetting: db.prepare('SELECT value FROM settings WHERE key = ?'),
   setSetting: db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)'),
 
-  // Bet field updates (war room edit modal)
-  updateBetFieldsStmt: db.prepare('UPDATE bets SET description = ?, odds = COALESCE(?, odds) WHERE id = ?'),
+  // Review queue management
+  approveBet: db.prepare("UPDATE bets SET review_status = 'confirmed' WHERE id = ? AND review_status = 'needs_review'"),
+  rejectBet:  db.prepare("DELETE FROM bets WHERE id = ? AND review_status = 'needs_review'"),
+  updateBetFields: db.prepare("UPDATE bets SET description = ?, odds = ? WHERE id = ?"),
+  getReviewBetWithCapper: db.prepare(`SELECT b.*, c.display_name AS capper_name, c.discord_id AS capper_discord_id
+    FROM bets b LEFT JOIN cappers c ON b.capper_id = c.id WHERE b.id = ?`),
 
-  // Structured props
-  insertProp: db.prepare('INSERT INTO bet_props (id, bet_id, player_name, stat_category, line, direction, odds) VALUES (?, ?, ?, ?, ?, ?, ?)'),
-  getPropsByBetId: db.prepare('SELECT * FROM bet_props WHERE bet_id = ? ORDER BY created_at'),
+  // Parlay legs
+  getLegsByBetId: db.prepare('SELECT * FROM parlay_legs WHERE bet_id = ? ORDER BY created_at'),
 };
 
 function uid() { return crypto.randomBytes(16).toString('hex'); }
@@ -148,6 +145,7 @@ function createBet(betData) {
       betData.source_url || null, betData.source_channel_id || null,
       betData.source_message_id || null, fingerprint, betData.raw_text || null,
       betData.review_status || 'confirmed',
+      betData.wager || null, betData.payout || null,
     );
   } catch (err) {
     // Concurrent insert race: unique fingerprint already committed by another writer.
@@ -161,7 +159,7 @@ function createBet(betData) {
   return { ...stmts.getBet.get(id), _deduped: false };
 }
 
-function createBetWithLegs(betData, legs, props) {
+function createBetWithLegs(betData, legs) {
   const fingerprint = buildFingerprint(betData);
   if (fingerprint) {
     const existing = stmts.getBetByFingerprint.get(fingerprint);
@@ -176,18 +174,7 @@ function createBetWithLegs(betData, legs, props) {
       stmts.insertLeg.run(uid(), bet.id, leg.description, leg.odds || null);
     }
   }
-  // Insert structured props if present
-  if (props && props.length > 0) {
-    for (const prop of props) {
-      if (!prop.player_name || !prop.stat_category || prop.line == null) continue;
-      stmts.insertProp.run(uid(), bet.id, prop.player_name, prop.stat_category, prop.line, prop.direction, prop.odds || null);
-    }
-  }
   return bet;
-}
-
-function getBetProps(betId) {
-  return stmts.getPropsByBetId.all(betId);
 }
 
 function gradeBetRecord(betId, result, profitUnits, grade, gradeReason) {
@@ -351,7 +338,12 @@ function rejectBet(betId) {
   return info.changes > 0;
 }
 
-// ── Settings ─────────────────────────────────────────────────
+function updateBetFields(betId, description, odds) {
+  stmts.updateBetFields.run(description, odds, betId);
+  return stmts.getBet.get(betId);
+}
+
+// ── Settings ──────────────────────────────────────────────
 function getSetting(key) {
   const row = stmts.getSetting.get(key);
   return row ? row.value : null;
@@ -365,10 +357,8 @@ function isAuditMode() {
   return getSetting('audit_mode') === 'on';
 }
 
-// ── Bet field updates (war room edit modal) ──────────────────
-function updateBetFields(betId, description, odds) {
-  stmts.updateBetFieldsStmt.run(description, odds, betId);
-  return stmts.getBet.get(betId);
+function getBetLegs(betId) {
+  return stmts.getLegsByBetId.all(betId);
 }
 
 // ── Export everything (same interface as old supabase.js) ────
@@ -402,5 +392,5 @@ module.exports = {
   setSetting,
   isAuditMode,
   updateBetFields,
-  getBetProps,
+  getBetLegs,
 };

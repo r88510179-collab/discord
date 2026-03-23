@@ -1,11 +1,13 @@
 // OCR Service — extracts text from bet slip images via OCR.space API
+// Downloads image as base64 to avoid Discord CDN expiry issues.
 // Requires OCR_SPACE_API_KEY environment variable
 
-const OCR_API_URL = 'https://api.ocr.space/parse/imageurl';
+const OCR_API_URL = 'https://api.ocr.space/parse/image';
 
 /**
  * Extract text from an image URL using the OCR.space free API.
- * @param {string} imageUrl - Public URL of the image to scan
+ * Downloads the image first, converts to base64, and POSTs it.
+ * @param {string} imageUrl - URL of the image to scan
  * @returns {Promise<string|null>} Extracted text or null on failure
  */
 async function extractTextFromImage(imageUrl) {
@@ -18,9 +20,23 @@ async function extractTextFromImage(imageUrl) {
   if (!imageUrl) return null;
 
   try {
-    const params = new URLSearchParams({
+    // Step 1: Download image from Discord CDN
+    const imgRes = await fetch(imageUrl);
+    if (!imgRes.ok) {
+      console.error(`[OCR] Failed to download image: HTTP ${imgRes.status}`);
+      return null;
+    }
+
+    const buffer = Buffer.from(await imgRes.arrayBuffer());
+    const contentType = imgRes.headers.get('content-type') || 'image/png';
+    const base64 = `data:${contentType};base64,${buffer.toString('base64')}`;
+
+    console.log(`[OCR] Downloaded image: ${buffer.length} bytes, type: ${contentType}`);
+
+    // Step 2: POST base64 to OCR.space
+    const formData = new URLSearchParams({
       apikey: apiKey,
-      url: imageUrl,
+      base64Image: base64,
       language: 'eng',
       isOverlayRequired: 'false',
       detectOrientation: 'true',
@@ -28,17 +44,24 @@ async function extractTextFromImage(imageUrl) {
       OCREngine: '2',
     });
 
-    const res = await fetch(`${OCR_API_URL}?${params.toString()}`, {
-      method: 'GET',
-      headers: { 'User-Agent': 'BetTracker-Discord/1.0' },
+    const res = await fetch(OCR_API_URL, {
+      method: 'POST',
+      headers: {
+        'User-Agent': 'ZoneTracker-Discord/1.0',
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: formData.toString(),
     });
 
     if (!res.ok) {
-      console.error(`[OCR] HTTP ${res.status}: ${(await res.text()).substring(0, 100)}`);
+      console.error(`[OCR] HTTP ${res.status}: ${(await res.text()).substring(0, 200)}`);
       return null;
     }
 
     const data = await res.json();
+
+    // Debug: log raw API response
+    console.log('[OCR] Raw API response:', JSON.stringify(data).substring(0, 500));
 
     if (data.IsErroredOnProcessing) {
       console.error(`[OCR] API error: ${data.ErrorMessage || 'Unknown error'}`);

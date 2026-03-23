@@ -6,6 +6,7 @@ const path = require('path');
 
 const { handleMessage } = require('./handlers/messageHandler');
 const { handleWarRoomInteraction } = require('./services/warRoom');
+const { handleGradeInteraction } = require('./handlers/gradeButtons');
 const { runAutoGrade } = require('./services/grading');
 const { pollTwitterPicks } = require('./services/twitter');
 const { postGradeSummary, postDailyLeaderboard } = require('./services/dashboard');
@@ -32,7 +33,7 @@ for (const file of commandFiles) {
   }
 }
 
-// ── Handle slash commands ───────────────────────────────────
+// ── Handle all interactions (slash commands + war room buttons/modals) ──
 client.on(Events.InteractionCreate, async (interaction) => {
   // War room buttons and modals
   if (interaction.isButton() || interaction.isModalSubmit()) {
@@ -41,6 +42,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await handleWarRoomInteraction(interaction);
       } catch (err) {
         console.error('[WarRoom] Interaction error:', err.message);
+      }
+      return;
+    }
+    if (interaction.customId.startsWith('grade_')) {
+      try {
+        await handleGradeInteraction(interaction);
+      } catch (err) {
+        console.error('[GradeBtn] Interaction error:', err.message);
       }
       return;
     }
@@ -56,23 +65,30 @@ client.on(Events.InteractionCreate, async (interaction) => {
     await command.execute(interaction);
   } catch (err) {
     console.error(`[Command Error] /${interaction.commandName}:`, err);
-    const reply = { content: '❌ Something went wrong. Please try again.', ephemeral: true };
-    if (interaction.deferred || interaction.replied) {
-      await interaction.editReply(reply);
-    } else {
-      await interaction.reply(reply);
+    try {
+      const reply = { content: '❌ Something went wrong. Please try again.', ephemeral: true };
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply(reply);
+      } else {
+        await interaction.reply(reply);
+      }
+    } catch (replyErr) {
+      console.error(`[Command Error] Failed to send error reply:`, replyErr.message);
     }
   }
 });
 
 // ── Handle messages (auto-parse picks channel) ──────────────
-client.on(Events.MessageCreate, handleMessage);
+client.on(Events.MessageCreate, (message) => {
+  console.log(`[DEBUG] Message received in channel: ${message.channel.id} from: ${message.author.tag} content: "${message.content.slice(0, 50)}" attachments: ${message.attachments.size}`);
+  handleMessage(message);
+});
 
 // ── Bot ready ───────────────────────────────────────────────
 client.once(Events.ClientReady, (c) => {
   console.log('');
   console.log('╔═══════════════════════════════════════════════╗');
-  console.log('║   🎰  BetTracker Pro — Discord Bot  🎰       ║');
+  console.log('║   🎰  ZoneTracker — Discord Bot  🎰       ║');
   console.log('╠═══════════════════════════════════════════════╣');
   console.log(`║   Logged in as: ${c.user.tag.padEnd(28)}║`);
   console.log(`║   Commands:     ${client.commands.size.toString().padEnd(28)}║`);

@@ -1,5 +1,5 @@
 -- ╔═══════════════════════════════════════════════════════════╗
--- ║  BetTracker Discord — Supabase Schema                    ║
+-- ║  ZoneTracker Discord — Supabase Schema                    ║
 -- ║  Run this in Supabase SQL Editor to set up your database  ║
 -- ╚═══════════════════════════════════════════════════════════╝
 

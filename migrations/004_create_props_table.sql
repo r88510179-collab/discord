@@ -1,6 +1,5 @@
 -- 004_create_props_table.sql
--- Structured player prop storage linked to bets.
--- Enables querying by player, stat category, line, and direction.
+-- Structured prop bets + wager/payout fields on bets
 
 CREATE TABLE IF NOT EXISTS bet_props (
   id            TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
@@ -16,3 +15,7 @@ CREATE TABLE IF NOT EXISTS bet_props (
 CREATE INDEX IF NOT EXISTS idx_bet_props_bet_id   ON bet_props(bet_id);
 CREATE INDEX IF NOT EXISTS idx_bet_props_player   ON bet_props(player_name);
 CREATE INDEX IF NOT EXISTS idx_bet_props_category ON bet_props(stat_category);
+
+-- Add wager/payout columns to bets table
+ALTER TABLE bets ADD COLUMN wager REAL;
+ALTER TABLE bets ADD COLUMN payout REAL;

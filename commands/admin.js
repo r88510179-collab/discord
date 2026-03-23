@@ -8,9 +8,9 @@ module.exports = {
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .addSubcommand(sub =>
       sub.setName('audit')
-        .setDescription('Toggle audit mode on/off')
+        .setDescription('Toggle audit mode (all bets require review)')
         .addStringOption(opt =>
-          opt.setName('state')
+          opt.setName('mode')
             .setDescription('on or off')
             .setRequired(true)
             .addChoices(
@@ -22,11 +22,25 @@ module.exports = {
     const sub = interaction.options.getSubcommand();
 
     if (sub === 'audit') {
-      const state = interaction.options.getString('state');
-      setSetting('audit_mode', state);
-      const current = getSetting('audit_mode');
-      await interaction.reply({
-        content: `Audit mode is now **${current}**. ${current === 'on' ? 'All new bets will be held for review.' : 'Bets will be auto-confirmed.'}`,
+      const mode = interaction.options.getString('mode');
+      const current = getSetting('audit_mode') || 'on';
+
+      if (mode === current) {
+        return interaction.reply({
+          content: `Audit mode is already **${mode}**.`,
+          ephemeral: true,
+        });
+      }
+
+      setSetting('audit_mode', mode);
+
+      const emoji = mode === 'on' ? '🔒' : '🟢';
+      const desc = mode === 'on'
+        ? 'All new bets will be saved as **needs_review** and will NOT be posted to the dashboard.'
+        : 'Bets will now be posted to the dashboard automatically (Auto-Pilot mode).';
+
+      return interaction.reply({
+        content: `${emoji} Audit mode set to **${mode}**.\n${desc}`,
         ephemeral: true,
       });
     }

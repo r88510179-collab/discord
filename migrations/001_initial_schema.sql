@@ -1,5 +1,5 @@
 -- 001_initial_schema.sql
--- Core tables for BetTracker Pro
+-- Core tables for ZoneTracker
 
 CREATE TABLE IF NOT EXISTS cappers (
   id            TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),

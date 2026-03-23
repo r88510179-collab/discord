@@ -1,158 +1,185 @@
 const assert = require('assert');
 const Database = require('better-sqlite3');
 const path = require('path');
-const crypto = require('crypto');
+const os = require('os');
+const fs = require('fs');
+const { runMigrations } = require('../services/migrator');
 
-const TEST_DB = path.join(__dirname, `test-audit-${Date.now()}.db`);
-
-function setupDb() {
-  const db = new Database(TEST_DB);
+function freshDb() {
+  const dbPath = path.join(os.tmpdir(), `audit_test_${Date.now()}_${Math.random().toString(36).slice(2)}.db`);
+  const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS settings (
-      key   TEXT PRIMARY KEY,
-      value TEXT NOT NULL
-    );
-    INSERT OR IGNORE INTO settings (key, value) VALUES ('audit_mode', 'on');
-
-    CREATE TABLE IF NOT EXISTS cappers (
-      id TEXT PRIMARY KEY,
-      discord_id TEXT UNIQUE,
-      display_name TEXT NOT NULL,
-      avatar_url TEXT,
-      created_at TEXT DEFAULT (datetime('now'))
-    );
-
-    CREATE TABLE IF NOT EXISTS bets (
-      id TEXT PRIMARY KEY,
-      capper_id TEXT REFERENCES cappers(id),
-      sport TEXT NOT NULL DEFAULT 'Unknown',
-      league TEXT,
-      bet_type TEXT NOT NULL DEFAULT 'straight',
-      description TEXT NOT NULL,
-      odds INTEGER,
-      units REAL DEFAULT 1.0,
-      result TEXT DEFAULT 'pending',
-      profit_units REAL DEFAULT 0,
-      event_date TEXT,
-      source TEXT DEFAULT 'manual',
-      source_channel_id TEXT,
-      source_message_id TEXT,
-      fingerprint TEXT,
-      raw_text TEXT,
-      review_status TEXT DEFAULT 'confirmed',
-      created_at TEXT DEFAULT (datetime('now'))
-    );
-  `);
-  return db;
+  runMigrations(db);
+  return { db, dbPath };
 }
 
-function uid() { return crypto.randomBytes(16).toString('hex'); }
+function cleanup(dbPath) {
+  try { fs.unlinkSync(dbPath); } catch {}
+  try { fs.unlinkSync(dbPath + '-wal'); } catch {}
+  try { fs.unlinkSync(dbPath + '-shm'); } catch {}
+}
 
-// Test 1: Settings table created with audit_mode = 'on' by default
-function testSettingsTableCreated() {
-  const db = setupDb();
-  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get('audit_mode');
+// ═══════════════════════════════════════════════════════════
+// TEST 1: Migration creates settings table with audit_mode = 'on'
+// ═══════════════════════════════════════════════════════════
+function testMigrationCreatesSettings() {
+  const { db, dbPath } = freshDb();
+
+  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='settings'").all();
+  assert.strictEqual(tables.length, 1, 'settings table should exist');
+
+  const row = db.prepare("SELECT value FROM settings WHERE key = 'audit_mode'").get();
+  assert.ok(row, 'audit_mode row should exist');
   assert.strictEqual(row.value, 'on', 'audit_mode should default to on');
+
   db.close();
+  cleanup(dbPath);
+  console.log('  ✓ Migration creates settings table with audit_mode = on');
 }
 
-// Test 2: getSetting / setSetting toggle
-function testSettingToggle() {
-  const db = setupDb();
-  const get = db.prepare('SELECT value FROM settings WHERE key = ?');
-  const set = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
+// ═══════════════════════════════════════════════════════════
+// TEST 2: getSetting / setSetting work correctly
+// ═══════════════════════════════════════════════════════════
+function testGetSetSetting() {
+  const { db, dbPath } = freshDb();
 
-  assert.strictEqual(get.get('audit_mode').value, 'on');
-  set.run('audit_mode', 'off');
-  assert.strictEqual(get.get('audit_mode').value, 'off');
-  set.run('audit_mode', 'on');
-  assert.strictEqual(get.get('audit_mode').value, 'on');
+  const getSetting = db.prepare('SELECT value FROM settings WHERE key = ?');
+  const setSetting = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
+
+  // Read default
+  let row = getSetting.get('audit_mode');
+  assert.strictEqual(row.value, 'on');
+
+  // Toggle off
+  setSetting.run('audit_mode', 'off');
+  row = getSetting.get('audit_mode');
+  assert.strictEqual(row.value, 'off');
+
+  // Toggle back on
+  setSetting.run('audit_mode', 'on');
+  row = getSetting.get('audit_mode');
+  assert.strictEqual(row.value, 'on');
+
   db.close();
+  cleanup(dbPath);
+  console.log('  ✓ getSetting/setSetting correctly toggle audit_mode');
 }
 
-// Test 3: Audit ON forces needs_review
-function testAuditOnForcesReview() {
-  const db = setupDb();
-  const capperId = uid();
-  db.prepare('INSERT INTO cappers (id, discord_id, display_name) VALUES (?, ?, ?)').run(capperId, 'disc_1', 'Tester');
+// ═══════════════════════════════════════════════════════════
+// TEST 3: Audit mode ON — bets saved as needs_review
+// ═══════════════════════════════════════════════════════════
+function testAuditModeOnForcesReview() {
+  const { db, dbPath } = freshDb();
 
-  const auditMode = db.prepare('SELECT value FROM settings WHERE key = ?').get('audit_mode').value;
-  assert.strictEqual(auditMode, 'on');
+  // Confirm audit mode is on
+  const mode = db.prepare("SELECT value FROM settings WHERE key = 'audit_mode'").get();
+  assert.strictEqual(mode.value, 'on');
 
-  const betId = uid();
-  const reviewStatus = auditMode === 'on' ? 'needs_review' : 'confirmed';
-  db.prepare('INSERT INTO bets (id, capper_id, description, review_status) VALUES (?, ?, ?, ?)').run(betId, capperId, 'Lakers -3.5', reviewStatus);
+  // Insert a capper
+  db.prepare("INSERT INTO cappers (id, discord_id, display_name) VALUES ('c1', 'd1', 'TestCapper')").run();
 
-  const bet = db.prepare('SELECT * FROM bets WHERE id = ?').get(betId);
-  assert.strictEqual(bet.review_status, 'needs_review', 'audit ON should route to needs_review');
+  // Simulate saving a bet with needs_review (as messageHandler would when audit_mode is on)
+  db.prepare(`INSERT INTO bets (id, capper_id, sport, description, odds, units, source, review_status)
+    VALUES ('b1', 'c1', 'NBA', 'Lakers -3.5', -110, 1, 'discord', 'needs_review')`).run();
+
+  const bet = db.prepare("SELECT * FROM bets WHERE id = 'b1'").get();
+  assert.strictEqual(bet.review_status, 'needs_review', 'Bet should be needs_review when audit mode is on');
+
   db.close();
+  cleanup(dbPath);
+  console.log('  ✓ Audit mode ON: bets saved as needs_review');
 }
 
-// Test 4: Audit OFF allows confirmed
-function testAuditOffAllowsConfirmed() {
-  const db = setupDb();
-  db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('audit_mode', 'off');
-  const capperId = uid();
-  db.prepare('INSERT INTO cappers (id, discord_id, display_name) VALUES (?, ?, ?)').run(capperId, 'disc_2', 'Tester2');
+// ═══════════════════════════════════════════════════════════
+// TEST 4: Audit mode OFF — bets saved as confirmed
+// ═══════════════════════════════════════════════════════════
+function testAuditModeOffAllowsConfirmed() {
+  const { db, dbPath } = freshDb();
 
-  const auditMode = db.prepare('SELECT value FROM settings WHERE key = ?').get('audit_mode').value;
-  const betId = uid();
-  const reviewStatus = auditMode === 'on' ? 'needs_review' : 'confirmed';
-  db.prepare('INSERT INTO bets (id, capper_id, description, review_status) VALUES (?, ?, ?, ?)').run(betId, capperId, 'Celtics +5', reviewStatus);
+  // Turn audit mode off
+  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('audit_mode', 'off')").run();
 
-  const bet = db.prepare('SELECT * FROM bets WHERE id = ?').get(betId);
-  assert.strictEqual(bet.review_status, 'confirmed', 'audit OFF should allow confirmed');
+  // Insert a capper
+  db.prepare("INSERT INTO cappers (id, discord_id, display_name) VALUES ('c1', 'd1', 'TestCapper')").run();
+
+  // Simulate saving a bet with confirmed (as messageHandler would when audit_mode is off)
+  db.prepare(`INSERT INTO bets (id, capper_id, sport, description, odds, units, source, review_status)
+    VALUES ('b1', 'c1', 'NBA', 'Celtics ML', -150, 1, 'discord', 'confirmed')`).run();
+
+  const bet = db.prepare("SELECT * FROM bets WHERE id = 'b1'").get();
+  assert.strictEqual(bet.review_status, 'confirmed', 'Bet should be confirmed when audit mode is off');
+
   db.close();
+  cleanup(dbPath);
+  console.log('  ✓ Audit mode OFF: bets saved as confirmed');
 }
 
-// Test 5: Approve bet changes review_status
-function testApproveBet() {
-  const db = setupDb();
-  const capperId = uid();
-  db.prepare('INSERT INTO cappers (id, discord_id, display_name) VALUES (?, ?, ?)').run(capperId, 'disc_3', 'Tester3');
-  const betId = uid();
-  db.prepare('INSERT INTO bets (id, capper_id, description, review_status) VALUES (?, ?, ?, ?)').run(betId, capperId, 'Heat ML', 'needs_review');
+// ═══════════════════════════════════════════════════════════
+// TEST 5: Migration is idempotent
+// ═══════════════════════════════════════════════════════════
+function testMigrationIdempotent() {
+  const { db, dbPath } = freshDb();
 
-  const info = db.prepare("UPDATE bets SET review_status = 'confirmed' WHERE id = ? AND review_status = 'needs_review'").run(betId);
-  assert.strictEqual(info.changes, 1, 'approve should update one row');
-  const bet = db.prepare('SELECT * FROM bets WHERE id = ?').get(betId);
+  // Run migrations again — should not error or duplicate rows
+  runMigrations(db);
+
+  const rows = db.prepare("SELECT * FROM settings WHERE key = 'audit_mode'").all();
+  assert.strictEqual(rows.length, 1, 'Should have exactly one audit_mode row');
+  assert.strictEqual(rows[0].value, 'on');
+
+  db.close();
+  cleanup(dbPath);
+  console.log('  ✓ Migration is idempotent (no duplicate settings rows)');
+}
+
+// ═══════════════════════════════════════════════════════════
+// TEST 6: Staging workflow — on -> save review -> approve -> off -> save confirmed
+// ═══════════════════════════════════════════════════════════
+function testStagingWorkflow() {
+  const { db, dbPath } = freshDb();
+
+  db.prepare("INSERT INTO cappers (id, discord_id, display_name) VALUES ('c1', 'd1', 'TestCapper')").run();
+
+  // Step 1: audit mode ON — bet goes to review
+  let mode = db.prepare("SELECT value FROM settings WHERE key = 'audit_mode'").get();
+  assert.strictEqual(mode.value, 'on');
+
+  db.prepare(`INSERT INTO bets (id, capper_id, sport, description, odds, units, source, review_status)
+    VALUES ('b1', 'c1', 'NFL', 'Chiefs -7', -110, 1, 'discord', 'needs_review')`).run();
+
+  let bet = db.prepare("SELECT * FROM bets WHERE id = 'b1'").get();
+  assert.strictEqual(bet.review_status, 'needs_review');
+
+  // Step 2: Admin approves the bet
+  db.prepare("UPDATE bets SET review_status = 'confirmed' WHERE id = 'b1'").run();
+  bet = db.prepare("SELECT * FROM bets WHERE id = 'b1'").get();
   assert.strictEqual(bet.review_status, 'confirmed');
+
+  // Step 3: Turn audit mode OFF
+  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('audit_mode', 'off')").run();
+  mode = db.prepare("SELECT value FROM settings WHERE key = 'audit_mode'").get();
+  assert.strictEqual(mode.value, 'off');
+
+  // Step 4: New bet goes straight to confirmed
+  db.prepare(`INSERT INTO bets (id, capper_id, sport, description, odds, units, source, review_status)
+    VALUES ('b2', 'c1', 'NBA', 'Lakers ML', -130, 2, 'discord', 'confirmed')`).run();
+  bet = db.prepare("SELECT * FROM bets WHERE id = 'b2'").get();
+  assert.strictEqual(bet.review_status, 'confirmed');
+
   db.close();
+  cleanup(dbPath);
+  console.log('  ✓ Full staging workflow: audit ON → review → approve → audit OFF → auto-confirm');
 }
 
-// Test 6: Reject bet deletes it
-function testRejectBet() {
-  const db = setupDb();
-  const capperId = uid();
-  db.prepare('INSERT INTO cappers (id, discord_id, display_name) VALUES (?, ?, ?)').run(capperId, 'disc_4', 'Tester4');
-  const betId = uid();
-  db.prepare('INSERT INTO bets (id, capper_id, description, review_status) VALUES (?, ?, ?, ?)').run(betId, capperId, 'Knicks -2', 'needs_review');
-
-  db.prepare("DELETE FROM bets WHERE id = ? AND review_status = 'needs_review'").run(betId);
-  const bet = db.prepare('SELECT * FROM bets WHERE id = ?').get(betId);
-  assert.strictEqual(bet, undefined, 'rejected bet should be deleted');
-  db.close();
-}
-
-// Cleanup and run
-const fs = require('fs');
-try {
-  testSettingsTableCreated();
-  testSettingToggle();
-  testAuditOnForcesReview();
-  testAuditOffAllowsConfirmed();
-  testApproveBet();
-  testRejectBet();
-  console.log('audit-mode validation passed (6/6 tests).');
-} finally {
-  // Clean up test DBs
-  const dir = __dirname;
-  for (const f of fs.readdirSync(dir)) {
-    if (f.startsWith('test-audit-') && (f.endsWith('.db') || f.endsWith('.db-wal') || f.endsWith('.db-shm'))) {
-      fs.unlinkSync(path.join(dir, f));
-    }
-  }
-}
+// ═══════════════════════════════════════════════════════════
+// RUN ALL
+// ═══════════════════════════════════════════════════════════
+console.log('Audit mode validation:');
+testMigrationCreatesSettings();
+testGetSetSetting();
+testAuditModeOnForcesReview();
+testAuditModeOffAllowsConfirmed();
+testMigrationIdempotent();
+testStagingWorkflow();
+console.log('Audit mode validation passed.');

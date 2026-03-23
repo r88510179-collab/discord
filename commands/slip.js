@@ -1,8 +1,7 @@
-const { SlashCommandBuilder } = require('discord.js');
-const { parseBetSlipImage } = require('../services/ai');
-const { getOrCreateCapper, createBetWithLegs } = require('../services/database');
-const { betEmbed, COLORS } = require('../utils/embeds');
-const { EmbedBuilder } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const { getOrCreateCapper } = require('../services/database');
+const { COLORS } = require('../utils/embeds');
+const { processSlipImage } = require('../handlers/messageHandler');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -18,60 +17,48 @@ module.exports = {
 
     const attachment = interaction.options.getAttachment('image');
 
-    // Validate it's an image
     if (!attachment.contentType?.startsWith('image/')) {
-      return interaction.editReply('❌ Please upload an image file (PNG, JPG, etc.).');
+      return interaction.editReply('Please upload an image file (PNG, JPG, etc.).');
     }
 
-    // Size check (Claude max ~20MB but let's be reasonable)
     if (attachment.size > 10 * 1024 * 1024) {
-      return interaction.editReply('❌ Image too large. Keep it under 10MB.');
+      return interaction.editReply('Image too large. Keep it under 10MB.');
     }
 
-    // Download and convert to base64
-    const res = await fetch(attachment.url);
-    const buffer = Buffer.from(await res.arrayBuffer());
-    const base64 = buffer.toString('base64');
+    try {
+      const user = interaction.user;
+      const capper = await getOrCreateCapper(user.id, user.displayName, user.displayAvatarURL());
 
-    // Determine media type
-    const mediaType = attachment.contentType || 'image/png';
+      const result = await processSlipImage(interaction.client, attachment.url, capper.id, user.displayName, {
+        channelId: interaction.channel?.id,
+      });
 
-    // AI-parse the slip
-    const parsed = await parseBetSlipImage(base64, mediaType);
+      if (!result || !result.ocrText) {
+        return interaction.editReply('OCR could not read any text from that image. Try a clearer photo.');
+      }
 
-    if (!parsed.bets || parsed.bets.length === 0) {
-      return interaction.editReply('❌ Couldn\'t read any bets from that slip. Try a clearer photo.');
+      if (result.bets.length === 0) {
+        return interaction.editReply(`No bets detected. Raw OCR text:\n\`\`\`\n${result.ocrText.slice(0, 1500)}\n\`\`\``);
+      }
+
+      const embed = new EmbedBuilder()
+        .setColor(COLORS.info)
+        .setTitle('Bet Slip Scanned')
+        .setDescription(`Detected **${result.bets.length}** bet(s) — sent to War Room for review.`)
+        .setThumbnail(attachment.url)
+        .addFields(
+          result.bets.slice(0, 5).map(b => ({
+            name: b.sport || 'Unknown',
+            value: `${b.description} (${b.odds > 0 ? '+' : ''}${b.odds || 'N/A'})`,
+            inline: true,
+          })),
+        )
+        .setTimestamp();
+
+      await interaction.editReply({ embeds: [embed] });
+    } catch (err) {
+      console.error('[Slip Command]', err.message);
+      await interaction.editReply('Something went wrong scanning that slip. Check the bot logs.').catch(() => {});
     }
-
-    const user = interaction.user;
-    const capper = await getOrCreateCapper(user.id, user.displayName, user.displayAvatarURL());
-
-    // Header embed
-    const headerEmbed = new EmbedBuilder()
-      .setColor(COLORS.info)
-      .setTitle('📸 Bet Slip Scanned')
-      .setDescription(`Detected **${parsed.bets.length}** bet(s) from **${parsed.sportsbook || 'Unknown Sportsbook'}**`)
-      .setThumbnail(attachment.url);
-
-    const embeds = [headerEmbed];
-
-    for (const bet of parsed.bets) {
-      const saved = await createBetWithLegs({
-        capper_id: capper.id,
-        sport: bet.sport,
-        league: bet.league,
-        bet_type: bet.bet_type,
-        description: bet.description,
-        odds: bet.odds,
-        units: bet.units || (bet.stake_amount ? Math.round(bet.stake_amount / 25 * 10) / 10 : 1),
-        event_date: bet.event_date,
-        source: 'slip',
-        raw_text: JSON.stringify(bet),
-      }, bet.legs || []);
-
-      embeds.push(betEmbed(saved, user.displayName));
-    }
-
-    await interaction.editReply({ embeds: embeds.slice(0, 10) }); // Discord max 10 embeds
   },
 };

@@ -1,30 +1,28 @@
+// ═══════════════════════════════════════════════════════════
 // War Room — Staging UI for audit mode
 // Sends review embeds with Approve/Edit/Reject buttons to
 // ADMIN_LOG_CHANNEL_ID. Handles button clicks and edit modals.
+// ═══════════════════════════════════════════════════════════
 
 const {
   EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
   ModalBuilder, TextInputBuilder, TextInputStyle,
 } = require('discord.js');
-const { approveBet, rejectBet, updateBetFields, getBetProps } = require('./database');
+const { approveBet, rejectBet, updateBetFields, getBetLegs } = require('./database');
 const { postPickTracked } = require('./dashboard');
 const { COLORS } = require('../utils/embeds');
 
-// Format structured props for embed display
-function formatPropsForEmbed(props) {
-  if (!props || props.length === 0) return null;
-  return props.map(p => {
-    const dir = p.direction === 'over' ? 'O' : 'U';
-    const odds = p.odds ? ` (${p.odds > 0 ? '+' : ''}${p.odds})` : '';
-    const cat = p.stat_category.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-    return `\u{1F464} ${p.player_name} | \u{1F4CA} ${cat} | ${dir === 'O' ? '\u{1F4C8}' : '\u{1F4C9}'} ${dir} ${p.line}${odds}`;
-  }).join('\n');
-}
-
+/**
+ * Send a staging embed with Approve/Edit/Reject buttons to the admin log channel.
+ *
+ * @param {import('discord.js').Client} client
+ * @param {object} bet — saved bet row from DB
+ * @param {string} capperName
+ */
 async function sendStagingEmbed(client, bet, capperName) {
-  const channelId = process.env.ADMIN_LOG_CHANNEL_ID;
+  const channelId = process.env.WAR_ROOM_CHANNEL_ID || process.env.ADMIN_LOG_CHANNEL_ID;
   if (!channelId) {
-    console.log('[WarRoom] ADMIN_LOG_CHANNEL_ID not set — skipping staging embed.');
+    console.log('[WarRoom] WAR_ROOM_CHANNEL_ID not set — skipping staging embed.');
     return;
   }
 
@@ -34,9 +32,8 @@ async function sendStagingEmbed(client, bet, capperName) {
     return;
   }
 
-  // Fetch structured props for this bet
-  const props = getBetProps(bet.id);
-  const propsDisplay = formatPropsForEmbed(props);
+  // Fetch parlay legs from DB
+  const legs = getBetLegs(bet.id);
 
   const embed = new EmbedBuilder()
     .setTitle('Bet Pending Review')
@@ -44,14 +41,27 @@ async function sendStagingEmbed(client, bet, capperName) {
     .addFields(
       { name: 'Capper', value: capperName || 'Unknown', inline: true },
       { name: 'Sport', value: bet.sport || 'Unknown', inline: true },
-      { name: 'Type', value: bet.bet_type || 'straight', inline: true },
+      { name: 'Type', value: (bet.bet_type || 'straight').toUpperCase(), inline: true },
       { name: 'Description', value: bet.description || 'N/A' },
       { name: 'Odds', value: String(bet.odds ?? 'N/A'), inline: true },
       { name: 'Units', value: String(bet.units ?? 1), inline: true },
     );
 
-  if (propsDisplay) {
-    embed.addFields({ name: 'Props', value: propsDisplay });
+  // Display individual parlay legs
+  if (legs && legs.length > 0) {
+    const legLines = legs.map((leg, i) => {
+      const odds = leg.odds ? ` (${leg.odds > 0 ? '+' : ''}${leg.odds})` : '';
+      return `**Leg ${i + 1}:** ${leg.description}${odds}`;
+    });
+    embed.addFields({ name: `Legs (${legs.length})`, value: legLines.join('\n') });
+  }
+
+  // Display financials if available
+  if (bet.wager || bet.payout) {
+    const parts = [];
+    if (bet.wager) parts.push(`**Wager:** $${Number(bet.wager).toFixed(2)}`);
+    if (bet.payout) parts.push(`**To Pay:** $${Number(bet.payout).toFixed(2)}`);
+    embed.addFields({ name: 'Financials', value: parts.join('  |  '), inline: false });
   }
 
   embed.addFields({ name: 'Bet ID', value: `\`${bet.id}\``, inline: false })
@@ -75,7 +85,15 @@ async function sendStagingEmbed(client, bet, capperName) {
   await channel.send({ embeds: [embed], components: [row] });
 }
 
+/**
+ * Handle button interactions from staging embeds.
+ * Call this from your interactionCreate event handler.
+ *
+ * @param {import('discord.js').Interaction} interaction
+ * @returns {boolean} true if this interaction was handled
+ */
 async function handleWarRoomInteraction(interaction) {
+  // Handle buttons
   if (interaction.isButton()) {
     const [action, betId] = interaction.customId.split(':');
 
@@ -85,11 +103,13 @@ async function handleWarRoomInteraction(interaction) {
         return interaction.reply({ content: 'Bet not found or already confirmed.', ephemeral: true });
       }
 
+      // Update the staging embed to show approved
       const approvedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
-        .setTitle('Bet Approved')
+        .setTitle('✅ Bet Approved')
         .setColor(COLORS.success);
       await interaction.update({ embeds: [approvedEmbed], components: [] });
 
+      // Forward to public dashboard
       await postPickTracked(
         interaction.client, bet, bet.capper_name || 'Unknown',
         'war-room', 'discord',
@@ -140,19 +160,21 @@ async function handleWarRoomInteraction(interaction) {
       }
 
       const rejectedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
-        .setTitle('Bet Rejected')
+        .setTitle('❌ Bet Rejected')
         .setColor(COLORS.danger);
       await interaction.update({ embeds: [rejectedEmbed], components: [] });
       return true;
     }
   }
 
+  // Handle modal submissions
   if (interaction.isModalSubmit() && interaction.customId.startsWith('war_modal:')) {
     const betId = interaction.customId.split(':')[1];
     const teamName = interaction.fields.getTextInputValue('team_name').trim();
     const bettingLine = interaction.fields.getTextInputValue('betting_line').trim();
     const oddsStr = interaction.fields.getTextInputValue('odds').trim();
 
+    // Build updated description from inputs
     const parts = [teamName, bettingLine].filter(Boolean);
     const newDesc = parts.length > 0 ? parts.join(' ') : null;
     const newOdds = oddsStr ? parseInt(oddsStr, 10) : null;
@@ -165,8 +187,9 @@ async function handleWarRoomInteraction(interaction) {
       );
 
       if (current) {
+        // Refresh the staging embed with updated data
         const refreshedEmbed = new EmbedBuilder()
-          .setTitle('Bet Pending Review (Edited)')
+          .setTitle('🔒 Bet Pending Review (Edited)')
           .setColor(COLORS.info)
           .addFields(
             { name: 'Description', value: current.description || 'N/A' },

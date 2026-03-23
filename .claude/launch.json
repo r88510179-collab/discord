@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "bot-dev",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["--watch", "bot.js"],
+      "port": 0
+    },
+    {
+      "name": "deploy-commands",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["scripts/deploy-commands.js"],
+      "port": 0
+    }
+  ]
+}

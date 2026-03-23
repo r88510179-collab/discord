@@ -1,4 +1,4 @@
-# 🎰 BetTracker Pro — Discord Bot
+# 🎰 ZoneTracker — Discord Bot
 
 **AI-powered betting hub** that tracks, analyzes, grades, and ranks bets automatically.
 Uses **SQLite** (zero-config, free) — migrates to Supabase when you're ready.
@@ -28,7 +28,7 @@ Uses **SQLite** (zero-config, free) — migrates to Supabase when you're ready.
 ### 1. Create a Discord Bot
 
 1. Go to [discord.com/developers/applications](https://discord.com/developers/applications)
-2. Click **"New Application"** → name it (e.g. `BetTracker Pro`)
+2. Click **"New Application"** → name it (e.g. `ZoneTracker`)
 3. **Bot** tab → click **"Reset Token"** → copy it → this is your `DISCORD_TOKEN`
 4. Same page → enable **Message Content Intent**
 5. **OAuth2 → URL Generator**:
@@ -76,7 +76,7 @@ Set `PICKS_CHANNEL_ID` in `.env`. Any message in that channel that looks like a 
 
 ## Migrating to Supabase (Later)
 
-When BetTracker Pro is ready:
+When ZoneTracker is ready:
 
 1. `npm install @supabase/supabase-js`
 2. Add `SUPABASE_URL` and `SUPABASE_KEY` to `.env`

@@ -27,9 +27,6 @@ function loadHandlerWithMocks({ parseBetText, parseBetSlipImage, createBetWithLe
   const warRoomPath = path.resolve(__dirname, '../services/warRoom.js');
   require.cache[warRoomPath] = { id: warRoomPath, filename: warRoomPath, loaded: true, exports: { sendStagingEmbed: async () => {} } };
 
-  const ocrPath = path.resolve(__dirname, '../services/ocr.js');
-  require.cache[ocrPath] = { id: ocrPath, filename: ocrPath, loaded: true, exports: { extractTextFromImage: async () => null } };
-
   // eslint-disable-next-line global-require
   return require(handlerPath);
 }

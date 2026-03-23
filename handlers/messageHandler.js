@@ -12,6 +12,9 @@ const PICK_SIGNALS = [
   /\b(ml|moneyline|spread|over|under|o\/u|rl|pk)\b/i,
   /\b(parlay|teaser|prop)\b/i,
   /🔒|🔥|💰|🎯|⚡/,
+  /[+-]\d+\.?\d*/,                           // any +/- number (spreads, lines)
+  /\b\d+\.5\b/,                              // half-point lines (22.5, 3.5)
+  /\b(unit|units)\b/i,                       // "2 units" without the 'u' shorthand
 ];
 
 // ── Celebration / Result patterns — these are NOT new picks ──
@@ -123,6 +126,56 @@ async function scanImage(imageUrl, mediaType) {
   }
 }
 
+// ── Shared OCR slip processing pipeline ──────────────────────
+// Used by both the /slip command and the slip feed channel listener.
+// Returns { bets: [...saved], ocrText } or null on failure.
+async function processSlipImage(client, imageUrl, capperId, capperName, opts = {}) {
+  const { channelId, messageId } = opts;
+
+  // Step 1: OCR
+  const ocrText = await extractTextFromImage(imageUrl);
+  if (!ocrText) {
+    console.log('[SlipPipeline] OCR returned no text.');
+    return null;
+  }
+
+  console.log(`[SlipPipeline] OCR extracted ${ocrText.length} chars.`);
+
+  // Step 2: AI parse
+  const parsed = await parseBetText(ocrText);
+  if (!parsed.bets || parsed.bets.length === 0) {
+    console.log('[SlipPipeline] No bets found in OCR text.');
+    return { bets: [], ocrText };
+  }
+
+  // Step 3: Save bets + send to War Room
+  const saved = [];
+  for (const bet of parsed.bets) {
+    if (isDuplicateBet(capperId, bet.description)) continue;
+
+    const record = await createBetWithLegs({
+      capper_id: capperId,
+      sport: bet.sport, league: bet.league,
+      bet_type: bet.bet_type, description: bet.description,
+      odds: bet.odds, units: Math.min(bet.units || 1, 50),
+      wager: bet.wager || null, payout: bet.payout || null,
+      event_date: bet.event_date, source: 'ocr_slip',
+      source_channel_id: channelId || null,
+      source_message_id: messageId || null,
+      raw_text: ocrText.slice(0, 500),
+      review_status: 'needs_review',
+    }, bet.legs || [], bet.props || []);
+
+    if (!record?._deduped) {
+      saved.push(record);
+      await sendStagingEmbed(client, record, capperName);
+    }
+  }
+
+  console.log(`[SlipPipeline] Processed ${saved.length} bet(s) via OCR.`);
+  return { bets: saved, ocrText };
+}
+
 // ── OCR Slip Feed — dedicated channel for bet slip images ───
 async function handleSlipFeed(message) {
   const slipChannelId = process.env.SLIP_FEED_CHANNEL_ID;
@@ -132,49 +185,19 @@ async function handleSlipFeed(message) {
   if (images.length === 0) return false;
 
   try {
-    const img = images[0];
-    console.log(`[SlipFeed] Processing image from ${message.author.displayName || message.author.username}`);
+    // React immediately so user knows the bot is processing
+    await message.react('🔍').catch(() => {});
 
-    // Extract text via OCR
-    const ocrText = await extractTextFromImage(img.url);
-    if (!ocrText) {
-      console.log('[SlipFeed] OCR returned no text — skipping.');
-      return true; // consumed the message even if OCR failed
-    }
-
-    // Parse the OCR text through the AI bet parser
-    const parsed = await parseBetText(ocrText);
-    if (!parsed.bets || parsed.bets.length === 0) {
-      console.log('[SlipFeed] No bets found in OCR text.');
-      return true;
-    }
-
-    // Resolve capper and save bets
     const capperInfo = resolveCapper(message);
     const capper = await getOrCreateCapper(capperInfo.discordId, capperInfo.name, capperInfo.avatar);
 
-    for (const bet of parsed.bets) {
-      if (isDuplicateBet(capper.id, bet.description)) continue;
+    const result = await processSlipImage(message.client, images[0].url, capper.id, capperInfo.name, {
+      channelId: message.channel.id,
+      messageId: message.id,
+    });
 
-      const saved = await createBetWithLegs({
-        capper_id: capper.id,
-        sport: bet.sport, league: bet.league,
-        bet_type: bet.bet_type, description: bet.description,
-        odds: bet.odds, units: Math.min(bet.units || 1, 50),
-        event_date: bet.event_date, source: 'ocr_slip',
-        source_channel_id: message.channel.id,
-        source_message_id: message.id,
-        raw_text: ocrText.slice(0, 500),
-        review_status: 'needs_review',
-      }, bet.legs || [], bet.props || []);
+    if (!result) return true;
 
-      if (saved && !saved._deduped) {
-        await sendStagingEmbed(message.client, saved, capperInfo.name);
-      }
-    }
-
-    await message.react('🔍');
-    console.log(`[SlipFeed] Processed ${parsed.bets.length} bet(s) from OCR scan.`);
     return true;
   } catch (err) {
     console.error('[SlipFeed] Error:', err.message);
@@ -261,7 +284,10 @@ async function handleMessage(message) {
         .replace(/https?:\/\/\S+/g, '')   // remove URLs
         .trim();
       const parsed = await parseBetText(cleanText);
-      if (parsed.bets?.length > 0) {
+      // Tier 2: AI says this isn't a bet — silently ignore
+      if (parsed.is_bet === false) {
+        console.log(`[Filter] AI rejected as non-bet: ${cleanText.substring(0, 60)}...`);
+      } else if (parsed.bets?.length > 0) {
         for (const bet of parsed.bets) {
           // Skip duplicates (same capper, similar description, last 10 min)
           if (isDuplicateBet(capper.id, bet.description)) continue;
@@ -280,7 +306,7 @@ async function handleMessage(message) {
             source_message_id: message.id,
             raw_text: cleanText,
             review_status: reviewStatus,
-          }, bet.legs || [], bet.props || []);
+          }, bet.legs || []);
           if (!saved?._deduped) {
             if (reviewStatus === 'needs_review') {
               reviewBets.push(saved);
@@ -347,4 +373,4 @@ async function handleMessage(message) {
   }
 }
 
-module.exports = { handleMessage };
+module.exports = { handleMessage, processSlipImage };

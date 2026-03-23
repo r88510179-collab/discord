@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════
 // Multi-LLM AI Service — rotates between providers
-// Priority: Groq (fastest) → Gemini → Mistral → OpenRouter
+// Priority: Groq (fastest/free) → Gemini (fallback) → Mistral → OpenRouter
 // ═══════════════════════════════════════════════════════════
 
 const { normalizeDescription, normalizePlayer } = require('./normalization');
@@ -8,7 +8,7 @@ const { normalizeDescription, normalizePlayer } = require('./normalization');
 const PROVIDERS = {
   groq: {
     url: 'https://api.groq.com/openai/v1/chat/completions',
-    model: 'llama-3.3-70b-versatile',
+    model: 'llama3-70b-8192',
     keyEnv: 'GROQ_API_KEY',
     format: 'openai',
     supportsImages: false,
@@ -74,6 +74,7 @@ async function callOpenAI(provider, prompt, system) {
       ],
       temperature: 0.2,
       max_tokens: 1024,
+      response_format: { type: 'json_object' },
     }),
   });
   if (!res.ok) {
@@ -94,7 +95,7 @@ async function callGemini(provider, prompt, system, imageBase64, mediaType) {
   const body = {
     contents: [{ parts }],
     systemInstruction: system ? { parts: [{ text: system }] } : undefined,
-    generationConfig: { temperature: 0.2, maxOutputTokens: 1024 },
+    generationConfig: { temperature: 0.2, maxOutputTokens: 1024, responseMimeType: 'application/json' },
   };
   const res = await fetch(url, {
     method: 'POST',
@@ -184,28 +185,6 @@ function normalizeBet(bet) {
         .filter(Boolean)
     : [];
 
-  // Normalize structured props if present
-  const props = Array.isArray(bet.props)
-    ? bet.props
-        .map((p) => {
-          if (!p || typeof p !== 'object') return null;
-          const playerName = String(p.player_name || '').trim();
-          const statCategory = String(p.stat_category || '').trim().toLowerCase().replace(/\s+/g, '_');
-          const line = toSafeNumber(p.line, null);
-          const dir = String(p.direction || '').trim().toLowerCase();
-          const propOdds = toSafeNumber(p.odds, null);
-          if (!playerName || !statCategory || line == null || (dir !== 'over' && dir !== 'under')) return null;
-          return {
-            player_name: normalizePlayer ? normalizePlayer(playerName) : playerName,
-            stat_category: statCategory,
-            line,
-            direction: dir,
-            odds: propOdds != null ? Math.trunc(propOdds) : null,
-          };
-        })
-        .filter(Boolean)
-    : [];
-
   return {
     sport: String(bet.sport || 'Unknown').trim().slice(0, 50) || 'Unknown',
     league: bet.league ? String(bet.league).trim().slice(0, 80) : null,
@@ -213,9 +192,11 @@ function normalizeBet(bet) {
     description,
     odds,
     units,
+    wager: toSafeNumber(bet.wager, null),
+    payout: toSafeNumber(bet.payout, null),
     event_date: bet.event_date || null,
     legs,
-    props,
+    props: Array.isArray(bet.props) ? bet.props : [],
   };
 }
 
@@ -360,14 +341,26 @@ async function parseBetText(text) {
     const sourceText = quick._sourceText || text;
     return applyConfidenceGating(normalizeParsedBets(quick), sourceText);
   }
-  const sys = `Sports betting parser. Return ONLY JSON: {"bets":[{"sport":"NBA","league":"NBA","bet_type":"prop","description":"LeBron James Over 22.5 Points","odds":-110,"units":1.0,"event_date":null,"legs":[],"props":[{"player_name":"LeBron James","stat_category":"points","line":22.5,"direction":"over","odds":-110}]}]}
-bet_type: straight, parlay, teaser, prop, future, ladder. Ladder = escalating thresholds on same player.
-IMPORTANT: When a bet is a player prop (over/under on a player stat), set bet_type to "prop" and include a "props" array. Each prop object MUST have: player_name (string), stat_category (snake_case: points, rebounds, assists, steals, blocks, threes, strikeouts, passing_yards, rushing_yards, receiving_yards, home_runs, hits, etc.), line (number), direction ("over" or "under"), odds (integer). A single bet can have multiple props (e.g., a parlay of props).
-Sport: Use specific league — UCL not Soccer, EPL not Soccer, March Madness not NCAAB. If units not specified default 1. Parse ALL bets.`;
+  const sys = `You are a STRICT sports betting parser. Return ONLY valid JSON.
+CRITICAL: If the text is just sports news, commentary, game recaps, scores, opinions, or anything WITHOUT a clear future prediction/wager, you MUST return: {"is_bet":false,"bets":[]}
+Only return {"is_bet":true,"bets":[...]} when there is a clear actionable bet with a team/player, line/odds, and a prediction.
+Example:
+{"is_bet":true,"bets":[{"sport":"NCAAB","league":"March Madness","bet_type":"parlay","description":"Gonzaga -6.5 / Houston ML","odds":180,"units":2.0,"wager":50,"payout":90.06,"event_date":null,"legs":[{"description":"Gonzaga -6.5","odds":-110,"team":"Gonzaga","line":"-6.5","type":"spread"},{"description":"Houston ML","odds":-150,"team":"Houston","line":"ML","type":"moneyline"}],"props":[]}]}
+RULES:
+- bet_type: straight, parlay, teaser, prop, future, ladder.
+- For parlays, ALWAYS populate the "legs" array. Each leg MUST have: description, odds, team (or player name), line (spread/total/ML), type (spread/moneyline/total/prop).
+- If wager amount or payout/to-pay is visible, include "wager" (number) and "payout" (number) on the bet.
+- Sport: Use specific league — UCL not Soccer, EPL not Soccer, March Madness not NCAAB. If units not specified default 1.
+- Parse ALL bets. For player props, include a "props" array: player_name, stat_category (snake_case), line (number), direction ("over"/"under"), odds (integer).
+- You are analyzing raw OCR text from a betting slip. It will contain typos and garbage chars. Do your best (e.g., "0ver"="over", "und3r"="under", "Lebr0n"="LeBron").`;
   const raw = await callLLM(text, sys);
   if (!raw) return { bets: [], error: 'AI unavailable' };
   const parsed = parseJSON(raw);
   if (!parsed) return { bets: [], error: 'Parse failed' };
+  // Respect AI's is_bet verdict — short-circuit if not a bet
+  if (parsed.is_bet === false) {
+    return { is_bet: false, bets: [] };
+  }
   return applyConfidenceGating(normalizeParsedBets(parsed), text);
 }
 
