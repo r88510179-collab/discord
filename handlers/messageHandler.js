@@ -5,6 +5,9 @@ const { postPickTracked } = require('../services/dashboard');
 const { sendStagingEmbed } = require('../services/warRoom');
 const { extractTextFromImage } = require('../services/ocr');
 
+// ── Dedup guard: prevent double-processing of the same Discord message ──
+const processedMessages = new Set();
+
 const PICK_SIGNALS = [
   /\b(pick|lock|potd|play|bet|wager|hammer|tail|fade)\b/i,
   /[+-]\d{3}/,
@@ -276,6 +279,11 @@ async function handleAutoGrade(message, fullText) {
 
 async function handleMessage(message) {
   if (!message.guild) return;
+
+  // ═══ DEDUP GUARD: Skip if we already processed this message ═══
+  if (processedMessages.has(message.id)) return;
+  processedMessages.add(message.id);
+  setTimeout(() => processedMessages.delete(message.id), 10_000);
 
   // ═══ GUARD 1: Never process our own messages (prevents infinite loop) ═══
   if (message.author.id === message.client.user.id) return;
