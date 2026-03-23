@@ -24,6 +24,9 @@ function loadHandlerWithMocks({ parseBetText, parseBetSlipImage, createBetWithLe
   require.cache[embedsPath] = { id: embedsPath, filename: embedsPath, loaded: true, exports: { betEmbed: (b) => ({ title: b.description }) } };
   require.cache[dashboardPath] = { id: dashboardPath, filename: dashboardPath, loaded: true, exports: { postPickTracked } };
 
+  const warRoomPath = path.resolve(__dirname, '../services/warRoom.js');
+  require.cache[warRoomPath] = { id: warRoomPath, filename: warRoomPath, loaded: true, exports: { sendStagingEmbed: async () => {} } };
+
   // eslint-disable-next-line global-require
   return require(handlerPath);
 }

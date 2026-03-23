@@ -2,6 +2,8 @@ const { parseBetText, parseBetSlipImage } = require('../services/ai');
 const { getOrCreateCapper, createBetWithLegs, isDuplicateBet, isAuditMode } = require('../services/database');
 const { betEmbed } = require('../utils/embeds');
 const { postPickTracked } = require('../services/dashboard');
+const { sendStagingEmbed } = require('../services/warRoom');
+const { extractTextFromImage } = require('../services/ocr');
 
 const PICK_SIGNALS = [
   /\b(pick|lock|potd|play|bet|wager|hammer|tail|fade)\b/i,
@@ -121,11 +123,94 @@ async function scanImage(imageUrl, mediaType) {
   }
 }
 
+// ── Shared OCR slip processing pipeline ──────────────────────
+// Used by both the /slip command and the slip feed channel listener.
+// Returns { bets: [...saved], ocrText } or null on failure.
+async function processSlipImage(client, imageUrl, capperId, capperName, opts = {}) {
+  const { channelId, messageId } = opts;
+
+  // Step 1: OCR
+  const ocrText = await extractTextFromImage(imageUrl);
+  if (!ocrText) {
+    console.log('[SlipPipeline] OCR returned no text.');
+    return null;
+  }
+
+  console.log(`[SlipPipeline] OCR extracted ${ocrText.length} chars.`);
+
+  // Step 2: AI parse
+  const parsed = await parseBetText(ocrText);
+  if (!parsed.bets || parsed.bets.length === 0) {
+    console.log('[SlipPipeline] No bets found in OCR text.');
+    return { bets: [], ocrText };
+  }
+
+  // Step 3: Save bets + send to War Room
+  const saved = [];
+  for (const bet of parsed.bets) {
+    if (isDuplicateBet(capperId, bet.description)) continue;
+
+    const record = await createBetWithLegs({
+      capper_id: capperId,
+      sport: bet.sport, league: bet.league,
+      bet_type: bet.bet_type, description: bet.description,
+      odds: bet.odds, units: Math.min(bet.units || 1, 50),
+      wager: bet.wager || null, payout: bet.payout || null,
+      event_date: bet.event_date, source: 'ocr_slip',
+      source_channel_id: channelId || null,
+      source_message_id: messageId || null,
+      raw_text: ocrText.slice(0, 500),
+      review_status: 'needs_review',
+    }, bet.legs || [], bet.props || []);
+
+    if (!record?._deduped) {
+      saved.push(record);
+      await sendStagingEmbed(client, record, capperName);
+    }
+  }
+
+  console.log(`[SlipPipeline] Processed ${saved.length} bet(s) via OCR.`);
+  return { bets: saved, ocrText };
+}
+
+// ── OCR Slip Feed — dedicated channel for bet slip images ───
+async function handleSlipFeed(message) {
+  const slipChannelId = process.env.SLIP_FEED_CHANNEL_ID;
+  if (!slipChannelId || message.channel.id !== slipChannelId) return false;
+
+  const images = getImageAttachments(message);
+  if (images.length === 0) return false;
+
+  try {
+    // React immediately so user knows the bot is processing
+    await message.react('🔍').catch(() => {});
+
+    const capperInfo = resolveCapper(message);
+    const capper = await getOrCreateCapper(capperInfo.discordId, capperInfo.name, capperInfo.avatar);
+
+    const result = await processSlipImage(message.client, images[0].url, capper.id, capperInfo.name, {
+      channelId: message.channel.id,
+      messageId: message.id,
+    });
+
+    if (!result) return true;
+
+    return true;
+  } catch (err) {
+    console.error('[SlipFeed] Error:', err.message);
+    return true;
+  }
+}
+
 async function handleMessage(message) {
   if (!message.guild) return;
 
   // ═══ GUARD 1: Never process our own messages (prevents infinite loop) ═══
   if (message.author.id === message.client.user.id) return;
+
+  // ═══ OCR Slip Feed — check before picks channel guard ═══
+  const slipHandled = await handleSlipFeed(message);
+  if (slipHandled) return;
 
   const picksChannels = getPicksChannels();
   if (picksChannels.length === 0) return;
@@ -264,17 +349,22 @@ async function handleMessage(message) {
       }
     }
 
-    // Bets held for review (audit mode or low confidence) — notify but don't post to dashboard
+    // Bets held for review — send staging embeds to admin war room
     if (reviewBets.length > 0) {
       const ids = reviewBets.map(b => b.id.slice(0, 8)).join(', ');
       console.log(`[Review] Stored ${reviewBets.length} bet(s) for manual review from ${capperInfo.name} [${ids}]`);
       await message.reply({
         content: `🔒 **${reviewBets.length}** bet(s) saved for review. IDs: ${reviewBets.map(b => `\`${b.id.slice(0, 8)}\``).join(', ')}`,
       });
+
+      // Send staging embeds with Approve/Edit/Reject buttons to admin channel
+      for (const bet of reviewBets) {
+        await sendStagingEmbed(message.client, bet, capperInfo.name);
+      }
     }
   } catch (err) {
     console.error('[MessageHandler] Error:', err.message);
   }
 }
 
-module.exports = { handleMessage };
+module.exports = { handleMessage, processSlipImage };

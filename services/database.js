@@ -24,8 +24,8 @@ const stmts = {
   insertCapper:      db.prepare('INSERT INTO cappers (id, discord_id, display_name, avatar_url) VALUES (?, ?, ?, ?)'),
   insertCapperTwitter: db.prepare('INSERT INTO cappers (id, twitter_handle, display_name) VALUES (?, ?, ?)'),
 
-  insertBet: db.prepare(`INSERT INTO bets (id, capper_id, sport, league, bet_type, description, odds, units, event_date, source, source_url, source_channel_id, source_message_id, fingerprint, raw_text, review_status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+  insertBet: db.prepare(`INSERT INTO bets (id, capper_id, sport, league, bet_type, description, odds, units, event_date, source, source_url, source_channel_id, source_message_id, fingerprint, raw_text, review_status, wager, payout)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   insertLeg: db.prepare('INSERT INTO parlay_legs (id, bet_id, description, odds) VALUES (?, ?, ?, ?)'),
   gradeBet:  db.prepare('UPDATE bets SET result = ?, profit_units = ?, grade = ?, grade_reason = ?, graded_at = datetime(\'now\') WHERE id = ?'),
   getBet:    db.prepare('SELECT * FROM bets WHERE id = ?'),
@@ -64,8 +64,12 @@ const stmts = {
   // Review queue management
   approveBet: db.prepare("UPDATE bets SET review_status = 'confirmed' WHERE id = ? AND review_status = 'needs_review'"),
   rejectBet:  db.prepare("DELETE FROM bets WHERE id = ? AND review_status = 'needs_review'"),
+  updateBetFields: db.prepare("UPDATE bets SET description = ?, odds = ? WHERE id = ?"),
   getReviewBetWithCapper: db.prepare(`SELECT b.*, c.display_name AS capper_name, c.discord_id AS capper_discord_id
     FROM bets b LEFT JOIN cappers c ON b.capper_id = c.id WHERE b.id = ?`),
+
+  // Parlay legs
+  getLegsByBetId: db.prepare('SELECT * FROM parlay_legs WHERE bet_id = ? ORDER BY created_at'),
 };
 
 function uid() { return crypto.randomBytes(16).toString('hex'); }
@@ -141,6 +145,7 @@ function createBet(betData) {
       betData.source_url || null, betData.source_channel_id || null,
       betData.source_message_id || null, fingerprint, betData.raw_text || null,
       betData.review_status || 'confirmed',
+      betData.wager || null, betData.payout || null,
     );
   } catch (err) {
     // Concurrent insert race: unique fingerprint already committed by another writer.
@@ -333,6 +338,11 @@ function rejectBet(betId) {
   return info.changes > 0;
 }
 
+function updateBetFields(betId, description, odds) {
+  stmts.updateBetFields.run(description, odds, betId);
+  return stmts.getBet.get(betId);
+}
+
 // ── Settings ──────────────────────────────────────────────
 function getSetting(key) {
   const row = stmts.getSetting.get(key);
@@ -345,6 +355,10 @@ function setSetting(key, value) {
 
 function isAuditMode() {
   return getSetting('audit_mode') === 'on';
+}
+
+function getBetLegs(betId) {
+  return stmts.getLegsByBetId.all(betId);
 }
 
 // ── Export everything (same interface as old supabase.js) ────
@@ -377,4 +391,6 @@ module.exports = {
   getSetting,
   setSetting,
   isAuditMode,
+  updateBetFields,
+  getBetLegs,
 };

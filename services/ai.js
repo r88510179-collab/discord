@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════
 // Multi-LLM AI Service — rotates between providers
-// Priority: Groq (fastest) → Gemini → Mistral → OpenRouter
+// Priority: Groq (fastest/free) → Gemini (fallback) → Mistral → OpenRouter
 // ═══════════════════════════════════════════════════════════
 
 const { normalizeDescription, normalizePlayer } = require('./normalization');
@@ -8,7 +8,7 @@ const { normalizeDescription, normalizePlayer } = require('./normalization');
 const PROVIDERS = {
   groq: {
     url: 'https://api.groq.com/openai/v1/chat/completions',
-    model: 'llama-3.3-70b-versatile',
+    model: 'llama3-70b-8192',
     keyEnv: 'GROQ_API_KEY',
     format: 'openai',
     supportsImages: false,
@@ -74,6 +74,7 @@ async function callOpenAI(provider, prompt, system) {
       ],
       temperature: 0.2,
       max_tokens: 1024,
+      response_format: { type: 'json_object' },
     }),
   });
   if (!res.ok) {
@@ -94,7 +95,7 @@ async function callGemini(provider, prompt, system, imageBase64, mediaType) {
   const body = {
     contents: [{ parts }],
     systemInstruction: system ? { parts: [{ text: system }] } : undefined,
-    generationConfig: { temperature: 0.2, maxOutputTokens: 1024 },
+    generationConfig: { temperature: 0.2, maxOutputTokens: 1024, responseMimeType: 'application/json' },
   };
   const res = await fetch(url, {
     method: 'POST',
@@ -191,8 +192,11 @@ function normalizeBet(bet) {
     description,
     odds,
     units,
+    wager: toSafeNumber(bet.wager, null),
+    payout: toSafeNumber(bet.payout, null),
     event_date: bet.event_date || null,
     legs,
+    props: Array.isArray(bet.props) ? bet.props : [],
   };
 }
 
@@ -337,9 +341,15 @@ async function parseBetText(text) {
     const sourceText = quick._sourceText || text;
     return applyConfidenceGating(normalizeParsedBets(quick), sourceText);
   }
-  const sys = `Sports betting parser. Return ONLY JSON: {"bets":[{"sport":"UCL","league":"Champions League","bet_type":"ladder","description":"Osimhen Shots 2+/4+/6+","odds":950,"units":1.0,"event_date":null,"legs":[{"description":"Osimhen 2+ Shots","odds":-200},{"description":"Osimhen 4+ Shots","odds":170}]}]}
-bet_type: straight, parlay, teaser, prop, future, ladder. Ladder = escalating thresholds on same player.
-Sport: Use specific league — UCL not Soccer, EPL not Soccer, March Madness not NCAAB. If units not specified default 1. Parse ALL bets.`;
+  const sys = `Sports betting parser. Return ONLY valid JSON. Example:
+{"bets":[{"sport":"NCAAB","league":"March Madness","bet_type":"parlay","description":"Gonzaga -6.5 / Houston ML","odds":180,"units":2.0,"wager":50,"payout":90.06,"event_date":null,"legs":[{"description":"Gonzaga -6.5","odds":-110,"team":"Gonzaga","line":"-6.5","type":"spread"},{"description":"Houston ML","odds":-150,"team":"Houston","line":"ML","type":"moneyline"}],"props":[]}]}
+RULES:
+- bet_type: straight, parlay, teaser, prop, future, ladder.
+- For parlays, ALWAYS populate the "legs" array. Each leg MUST have: description, odds, team (or player name), line (spread/total/ML), type (spread/moneyline/total/prop).
+- If wager amount or payout/to-pay is visible, include "wager" (number) and "payout" (number) on the bet.
+- Sport: Use specific league — UCL not Soccer, EPL not Soccer, March Madness not NCAAB. If units not specified default 1.
+- Parse ALL bets. For player props, include a "props" array: player_name, stat_category (snake_case), line (number), direction ("over"/"under"), odds (integer).
+- You are analyzing raw OCR text from a betting slip. It will contain typos and garbage chars. Do your best (e.g., "0ver"="over", "und3r"="under", "Lebr0n"="LeBron").`;
   const raw = await callLLM(text, sys);
   if (!raw) return { bets: [], error: 'AI unavailable' };
   const parsed = parseJSON(raw);
