@@ -12,7 +12,9 @@ CREATE TABLE IF NOT EXISTS bet_props (
   created_at    TEXT DEFAULT (datetime('now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_bet_props_bet_id ON bet_props(bet_id);
+CREATE INDEX IF NOT EXISTS idx_bet_props_bet_id   ON bet_props(bet_id);
+CREATE INDEX IF NOT EXISTS idx_bet_props_player   ON bet_props(player_name);
+CREATE INDEX IF NOT EXISTS idx_bet_props_category ON bet_props(stat_category);
 
 -- Add wager/payout columns to bets table
 ALTER TABLE bets ADD COLUMN wager REAL;
