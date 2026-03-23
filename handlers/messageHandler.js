@@ -8,6 +8,61 @@ const { extractTextFromImage } = require('../services/ocr');
 // ── Dedup guard: prevent double-processing of the same Discord message ──
 const processedMessages = new Set();
 
+// ── Message Aggregation Buffer ──────────────────────────────────
+// TweetShift sends text + image as separate messages a split-second apart.
+// We buffer messages by user+channel for 4 seconds, then process as one.
+const BUFFER_DELAY_MS = 4000;
+const messageBuffer = new Map(); // key: `${userId}:${channelId}` → { texts, images, messages, timer }
+
+function bufferMessage(message) {
+  const key = `${message.author.id}:${message.channel.id}`;
+  const images = getImageAttachments(message);
+
+  if (messageBuffer.has(key)) {
+    // Append to existing buffer
+    const entry = messageBuffer.get(key);
+    if (message.content?.trim()) entry.texts.push(message.content.trim());
+    entry.images.push(...images);
+    entry.messages.push(message);
+    for (const embed of message.embeds) {
+      if (embed.description) entry.texts.push(embed.description);
+      if (embed.title) entry.texts.push(embed.title);
+    }
+    // Reset the timer — wait another 4s for more messages
+    clearTimeout(entry.timer);
+    entry.timer = setTimeout(() => flushBuffer(key), BUFFER_DELAY_MS);
+    return;
+  }
+
+  // Create new buffer entry
+  const texts = [];
+  if (message.content?.trim()) texts.push(message.content.trim());
+  for (const embed of message.embeds) {
+    if (embed.description) texts.push(embed.description);
+    if (embed.title) texts.push(embed.title);
+  }
+
+  const entry = { texts, images: [...images], messages: [message], timer: null };
+  entry.timer = setTimeout(() => flushBuffer(key), BUFFER_DELAY_MS);
+  messageBuffer.set(key, entry);
+}
+
+async function flushBuffer(key) {
+  const entry = messageBuffer.get(key);
+  messageBuffer.delete(key);
+  if (!entry || entry.messages.length === 0) return;
+
+  const primaryMessage = entry.messages[0]; // use first message for reply/react
+  const combinedText = entry.texts.join('\n');
+  const combinedImages = entry.images;
+
+  try {
+    await processAggregatedMessage(primaryMessage, combinedText, combinedImages);
+  } catch (err) {
+    console.error('[Buffer] Error processing aggregated message:', err.message);
+  }
+}
+
 // ── Hard Scrub: strip TweetShift markdown and junk before AI parsing ──
 function hardScrub(text) {
   return text
@@ -346,7 +401,7 @@ async function handleMessage(message) {
   }
   const fullText = (message.content || '') + embedText;
 
-  // ═══ GUARD 5: Celebration / result tweets → route to auto-grader ═══
+  // ═══ GUARD 5: Celebration / result tweets → route to auto-grader (no buffer needed) ═══
   if (looksLikeCelebration(fullText)) {
     console.log(`[AutoGrade] Detected celebration: ${fullText.substring(0, 80)}...`);
     try {
@@ -359,7 +414,6 @@ async function handleMessage(message) {
 
   // ═══ GUARD 6: Must look like a pick — require 2+ signals for text, or have images ═══
   const textIsPick = looksLikePick(fullText);
-  // For mapped channels (Twitter/capper), require stronger signal (3+) since lots of noise
   if (isMappedChannel && !hasImages) {
     let signals = 0;
     for (const p of PICK_SIGNALS) { if (p.test(fullText)) signals++; }
@@ -368,79 +422,55 @@ async function handleMessage(message) {
     return;
   }
 
+  // ═══ BUFFER: Aggregate text + image from split TweetShift messages ═══
+  bufferMessage(message);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// processAggregatedMessage — runs after the 4-second buffer flushes
+// Receives the combined text + images from all buffered messages.
+// ═══════════════════════════════════════════════════════════════
+async function processAggregatedMessage(message, combinedRawText, combinedImages) {
+  const hasImages = combinedImages.length > 0;
+  const fullText = combinedRawText;
+
   try {
-    // Resolve who the capper is (handles Twitter feed attribution)
     const capperInfo = resolveCapper(message);
     const capper = await getOrCreateCapper(capperInfo.discordId, capperInfo.name, capperInfo.avatar);
     const source = capperInfo.source;
     const allBets = [];
-
-    // Parse text picks
     const reviewBets = [];
-    if (fullText.trim() && looksLikePick(fullText)) {
-      // Hard Scrub: strip TweetShift markdown, retweet metadata, URLs, dollar amounts
-      let cleanText = hardScrub(fullText);
+
+    // OCR any images and combine with text
+    let ocrText = '';
+    if (hasImages) {
+      try {
+        ocrText = await extractTextFromImage(combinedImages[0].url) || '';
+      } catch (err) {
+        console.log(`[OCR] Failed for buffered image: ${err.message}`);
+      }
+    }
+
+    // Hard Scrub the combined text + OCR
+    const cleanText = hardScrub([fullText, ocrText].filter(Boolean).join('\n'));
+
+    if (cleanText.length > 5) {
       const parsed = await parseBetText(cleanText);
-      // Tier 2a: AI detected a result/grading event — auto-grade
+
+      // Auto-grade detection
       if (parsed.type === 'result') {
         console.log(`[AutoGrade] AI detected result: ${parsed.outcome} for ${parsed.subject?.join(', ')}`);
         await autoGradeBet(message.client, parsed.outcome, parsed.subject || []);
         return;
       }
-      // Tier 2b: AI says this isn't a bet — silently ignore
+
+      // Not a bet — silently ignore
       if (parsed.is_bet === false) {
         console.log(`[Filter] AI rejected as non-bet: ${cleanText.substring(0, 60)}...`);
-      } else if (parsed.bets?.length > 0) {
-        for (const bet of parsed.bets) {
-          // Skip duplicates (same capper, similar description, last 10 min)
-          if (isDuplicateBet(capper.id, bet.description)) continue;
-
-          // Determine review_status: audit mode overrides confidence
-          const auditOn = isAuditMode();
-          const reviewStatus = (auditOn || bet._confidence === 'low') ? 'needs_review' : 'confirmed';
-
-          const saved = await createBetWithLegs({
-            capper_id: capper.id,
-            sport: bet.sport, league: bet.league,
-            bet_type: bet.bet_type, description: bet.description,
-            odds: bet.odds, units: Math.min(bet.units || 1, 50),
-            event_date: bet.event_date, source,
-            source_channel_id: message.channel.id,
-            source_message_id: message.id,
-            raw_text: cleanText,
-            review_status: reviewStatus,
-          }, bet.legs || []);
-          if (!saved?._deduped) {
-            if (reviewStatus === 'needs_review') {
-              reviewBets.push(saved);
-            } else {
-              allBets.push(saved);
-            }
-          }
-        }
-      }
-    }
-
-    // Scan images for bet slips — OCR first, then pass combined text to AI
-    if (hasImages) {
-      const img = images[0]; // only scan first image
-      let ocrText = '';
-      try {
-        ocrText = await extractTextFromImage(img.url) || '';
-      } catch (err) {
-        console.log(`[OCR] Failed for picks channel image: ${err.message}`);
+        return;
       }
 
-      // Combine message text + OCR text so the AI sees everything
-      const combinedText = hardScrub([cleanText || fullText, ocrText].filter(Boolean).join('\n'));
-      let parsed;
-      if (combinedText.length > 10) {
-        parsed = await parseBetText(combinedText);
-      } else {
-        parsed = await scanImage(img.url, img.type);
-      }
-
-      if (parsed?.bets?.length > 0 && parsed.is_bet !== false) {
+      if (parsed.bets?.length > 0) {
         for (const bet of parsed.bets) {
           if (isDuplicateBet(capper.id, bet.description)) continue;
 
@@ -453,10 +483,11 @@ async function handleMessage(message) {
             bet_type: bet.bet_type, description: bet.description,
             odds: bet.odds, units: Math.min(bet.units || 1, 50),
             wager: bet.wager || null, payout: bet.payout || null,
-            event_date: bet.event_date, source: ocrText ? 'ocr_slip' : 'slip',
+            event_date: bet.event_date,
+            source: ocrText ? 'ocr_slip' : source,
             source_channel_id: message.channel.id,
             source_message_id: message.id,
-            raw_text: (ocrText || `Image: ${capperInfo.name}`).slice(0, 500),
+            raw_text: cleanText.slice(0, 500),
             review_status: reviewStatus,
           }, bet.legs || []);
           if (!saved?._deduped) {
@@ -465,6 +496,32 @@ async function handleMessage(message) {
             } else {
               allBets.push(saved);
             }
+          }
+        }
+      }
+    } else if (hasImages) {
+      // Fallback: if no useful text, try vision-based slip scan
+      const parsed = await scanImage(combinedImages[0].url, combinedImages[0].type);
+      if (parsed?.bets?.length > 0 && parsed.is_bet !== false) {
+        for (const bet of parsed.bets) {
+          if (isDuplicateBet(capper.id, bet.description)) continue;
+          const auditOn = isAuditMode();
+          const reviewStatus = (auditOn || bet._confidence === 'low') ? 'needs_review' : 'confirmed';
+          const saved = await createBetWithLegs({
+            capper_id: capper.id,
+            sport: bet.sport, league: bet.league,
+            bet_type: bet.bet_type, description: bet.description,
+            odds: bet.odds, units: Math.min(bet.units || 1, 50),
+            wager: bet.wager || null, payout: bet.payout || null,
+            event_date: bet.event_date, source: 'slip',
+            source_channel_id: message.channel.id,
+            source_message_id: message.id,
+            raw_text: `Image: ${capperInfo.name}`,
+            review_status: reviewStatus,
+          }, bet.legs || []);
+          if (!saved?._deduped) {
+            if (reviewStatus === 'needs_review') reviewBets.push(saved);
+            else allBets.push(saved);
           }
         }
       }
@@ -477,22 +534,17 @@ async function handleMessage(message) {
         content: `🤖 **${capperInfo.name}** — tracked **${allBets.length}** pick(s):`,
         embeds: embeds.slice(0, 5),
       });
-
-      // Post each pick to the dashboard channel
       for (const bet of allBets) {
         await postPickTracked(message.client, bet, capperInfo.name, message.channel.name, capperInfo.source);
       }
     }
 
-    // Bets held for review — send staging embeds to admin war room
     if (reviewBets.length > 0) {
       const ids = reviewBets.map(b => b.id.slice(0, 8)).join(', ');
       console.log(`[Review] Stored ${reviewBets.length} bet(s) for manual review from ${capperInfo.name} [${ids}]`);
       await message.reply({
         content: `🔒 **${reviewBets.length}** bet(s) saved for review. IDs: ${reviewBets.map(b => `\`${b.id.slice(0, 8)}\``).join(', ')}`,
       });
-
-      // Send staging embeds with Approve/Edit/Reject buttons to admin channel
       for (const bet of reviewBets) {
         await sendStagingEmbed(message.client, bet, capperInfo.name);
       }
