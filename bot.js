@@ -6,6 +6,7 @@ const path = require('path');
 
 const { handleMessage } = require('./handlers/messageHandler');
 const { handleWarRoomInteraction } = require('./services/warRoom');
+const { handleGradeInteraction } = require('./handlers/gradeButtons');
 const { runAutoGrade } = require('./services/grading');
 const { pollTwitterPicks } = require('./services/twitter');
 const { postGradeSummary, postDailyLeaderboard } = require('./services/dashboard');
@@ -41,6 +42,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await handleWarRoomInteraction(interaction);
       } catch (err) {
         console.error('[WarRoom] Interaction error:', err.message);
+      }
+      return;
+    }
+    if (interaction.customId.startsWith('grade_')) {
+      try {
+        await handleGradeInteraction(interaction);
+      } catch (err) {
+        console.error('[GradeBtn] Interaction error:', err.message);
       }
       return;
     }
