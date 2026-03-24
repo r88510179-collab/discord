@@ -52,9 +52,31 @@ async function flushBuffer(key) {
   messageBuffer.delete(key);
   if (!entry || entry.messages.length === 0) return;
 
-  const primaryMessage = entry.messages[0]; // use first message for reply/react
-  const combinedText = entry.texts.join('\n');
-  const combinedImages = entry.images;
+  const primaryMessage = entry.messages[0];
+
+  // Re-fetch all messages to pick up late-loading FxTwitter/vxtwitter embeds
+  const texts = [];
+  let allImages = [...entry.images];
+  for (const msg of entry.messages) {
+    try {
+      const fresh = await msg.channel.messages.fetch(msg.id);
+      if (fresh.content?.trim()) texts.push(fresh.content.trim());
+      for (const embed of fresh.embeds) {
+        if (embed.description) texts.push(embed.description);
+        if (embed.title) texts.push(embed.title);
+      }
+      // Pick up any images from embeds that loaded late (e.g., Twitter card images)
+      const freshImages = getImageAttachments(fresh);
+      if (freshImages.length > allImages.length) allImages = freshImages;
+    } catch (err) {
+      // Fallback: use original cached text if re-fetch fails
+      console.log(`[Buffer] Re-fetch failed for ${msg.id}: ${err.message}`);
+      if (msg.content?.trim()) texts.push(msg.content.trim());
+    }
+  }
+
+  const combinedText = texts.join('\n');
+  const combinedImages = allImages;
 
   try {
     await processAggregatedMessage(primaryMessage, combinedText, combinedImages);
