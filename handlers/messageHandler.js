@@ -357,11 +357,15 @@ async function handleMessage(message) {
   // ═══ GUARD 1: Never process our own messages (prevents infinite loop) ═══
   if (message.author.id === message.client.user.id) return;
 
-  // ═══ HARD FILTER: Reject retweets and fan replies instantly ═══
+  // ═══ Combine message content + embed text (FixTwitter puts tweet text in embeds) ═══
   const rawContent = message.content || '';
-  if (/^RT\s/i.test(rawContent)) return;
-  if (/\breplying\s+to\b/i.test(rawContent)) return;
-  if (/vxtwitter\.com|fixupx\.com/i.test(rawContent) && !/\b(pick|lock|play|bet)\b/i.test(rawContent)) return;
+  const embedText = message.embeds.map(e => [e.description, e.title].filter(Boolean).join(' ')).join(' ');
+  const fullContent = (rawContent + ' ' + embedText).trim();
+
+  // ═══ HARD FILTER: Reject retweets and fan replies instantly ═══
+  if (/^RT\s/i.test(fullContent)) return;
+  if (/\breplying\s+to\b/i.test(fullContent)) return;
+  if (/vxtwitter\.com|fixupx\.com/i.test(rawContent) && !/\b(pick|lock|play|bet)\b/i.test(fullContent)) return;
 
   // ═══ OCR Slip Feed — check before picks channel guard ═══
   const slipHandled = await handleSlipFeed(message);
@@ -389,17 +393,12 @@ async function handleMessage(message) {
   const msgAge = Date.now() - message.createdTimestamp;
   if (msgAge > 2 * 60 * 1000) return;
 
-  const hasText = message.content?.trim().length > 0;
+  const hasText = fullContent.length > 0;
   const images = getImageAttachments(message);
   const hasImages = images.length > 0;
 
-  // Build full text including embed content (Twitter bots post via embeds)
-  let embedText = '';
-  for (const embed of message.embeds) {
-    if (embed.description) embedText += ' ' + embed.description;
-    if (embed.title) embedText += ' ' + embed.title;
-  }
-  const fullText = (message.content || '') + embedText;
+  // fullText = message.content + embed descriptions (already built above as fullContent)
+  const fullText = fullContent;
 
   // ═══ GUARD 5: Celebration / result tweets → route to auto-grader (no buffer needed) ═══
   if (looksLikeCelebration(fullText)) {
