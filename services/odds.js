@@ -85,22 +85,59 @@ async function fetchOdds(apiSport) {
  */
 async function shopLine(teamName, sport) {
   const apiSport = resolveApiSport(sport);
-  if (!apiSport) return null;
+  if (!apiSport) {
+    console.log(`[Odds] No API sport mapping for: "${sport}"`);
+    return null;
+  }
 
   const events = await fetchOdds(apiSport);
-  if (!events || events.length === 0) return null;
+  if (!events || events.length === 0) {
+    console.log(`[Odds] API returned 0 events for ${apiSport}`);
+    return null;
+  }
 
-  const searchTerm = teamName.toLowerCase();
+  console.log(`[Odds] Searching for: "${teamName}" in ${apiSport} (${events.length} events)`);
+
+  const searchTerm = teamName.toLowerCase().trim();
+
+  // Fuzzy match: check both directions (our term in API name, or API name words in our term)
+  function fuzzyMatch(apiName) {
+    const api = apiName.toLowerCase();
+    // Direct substring match either direction
+    if (api.includes(searchTerm) || searchTerm.includes(api)) return true;
+    // Split both into words and check if any significant word matches
+    const apiWords = api.split(/\s+/);
+    const searchWords = searchTerm.split(/\s+/);
+    // Check if any search word (3+ chars) matches any API word
+    for (const sw of searchWords) {
+      if (sw.length < 3) continue;
+      for (const aw of apiWords) {
+        if (aw.length < 3) continue;
+        if (aw.includes(sw) || sw.includes(aw)) return true;
+      }
+    }
+    return false;
+  }
 
   // Find matching event
-  const event = events.find(e =>
-    e.home_team.toLowerCase().includes(searchTerm) ||
-    e.away_team.toLowerCase().includes(searchTerm),
-  );
-  if (!event) return null;
+  const event = events.find(e => fuzzyMatch(e.home_team) || fuzzyMatch(e.away_team));
+  if (!event) {
+    const teamList = events.slice(0, 5).map(e => `${e.away_team} @ ${e.home_team}`).join(', ');
+    console.log(`[Odds] No match for "${searchTerm}". Sample events: ${teamList}`);
+    return null;
+  }
+
+  console.log(`[Odds] Matched: ${event.away_team} @ ${event.home_team} (bookmakers: ${event.bookmakers?.length || 0})`);
+
+  // Note: player props (player_points etc.) require separate API markets.
+  // Current setup only checks h2h, spreads, totals.
+  if (!event.bookmakers || event.bookmakers.length === 0) {
+    console.log('[Odds] No bookmaker data for this event.');
+    return null;
+  }
 
   // Determine which side is "our" team
-  const isHome = event.home_team.toLowerCase().includes(searchTerm);
+  const isHome = fuzzyMatch(event.home_team);
   const ourTeam = isHome ? event.home_team : event.away_team;
 
   let bestOffer = null;
@@ -133,6 +170,12 @@ async function shopLine(teamName, sport) {
     }
   }
 
+  if (!bestOffer) {
+    console.log(`[Odds] No matching outcome for "${ourTeam}" across ${TARGET_BOOKS.join(', ')}`);
+  } else {
+    console.log(`[Odds] Best offer: ${bestOffer.book} ${bestOffer.market} ${bestOffer.price}`);
+  }
+
   return bestOffer;
 }
 
@@ -157,13 +200,19 @@ function formatLineShop(offer) {
  */
 function extractTeamFromDescription(description) {
   if (!description) return null;
-  // Remove common betting suffixes
-  const cleaned = description
-    .replace(/\s*(ML|moneyline|spread|over|under|[+-]\d+\.?\d*)\s*/gi, ' ')
+  // For bulleted parlays, take the first leg
+  const firstLine = description.split('\n')[0].replace(/^[•\-*]\s*/, '');
+  // Remove common betting suffixes, numbers, and odds
+  const cleaned = firstLine
+    .replace(/\s*(ML|moneyline|spread|over|under|o\d|u\d)\b/gi, ' ')
+    .replace(/[+-]\d+\.?\d*/g, ' ')           // spreads/odds like -3.5, +150
+    .replace(/\b\d+\.?\d*\s*(pts?|reb|ast|stl|blk|yds|tds?|ks?|hits?|runs?)\b/gi, ' ') // stat lines
+    .replace(/\b(points|rebounds|assists|strikeouts|passing_yards)\b/gi, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-  // Take the first 2-3 words as the team name
-  const words = cleaned.split(' ');
+  if (!cleaned) return null;
+  // Take up to 3 words as the team/player name
+  const words = cleaned.split(' ').filter(w => w.length > 1);
   return words.slice(0, Math.min(words.length, 3)).join(' ');
 }
 
