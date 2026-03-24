@@ -15,7 +15,7 @@ module.exports = {
             .setRequired(true))),
 
   async execute(interaction) {
-    await interaction.deferReply();
+    await interaction.deferReply({ ephemeral: true });
 
     const sub = interaction.options.getSubcommand();
 

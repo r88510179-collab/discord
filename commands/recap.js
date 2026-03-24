@@ -9,7 +9,7 @@ module.exports = {
     .setDescription('Get an AI-generated recap of your betting performance'),
 
   async execute(interaction) {
-    await interaction.deferReply();
+    await interaction.deferReply({ ephemeral: true });
 
     const capper = await getOrCreateCapper(
       interaction.user.id,

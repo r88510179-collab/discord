@@ -232,23 +232,16 @@ async function scanImage(imageUrl, mediaType) {
 async function processSlipImage(client, imageUrl, capperId, capperName, opts = {}) {
   const { channelId, messageId } = opts;
 
-  // Step 1: OCR
-  const ocrText = await extractTextFromImage(imageUrl);
-  if (!ocrText) {
-    console.log('[SlipPipeline] OCR returned no text.');
-    return null;
-  }
+  // Gemini Vision: pass image directly to AI — no OCR needed
+  console.log(`[SlipPipeline] Sending image to Gemini Vision: ${imageUrl.substring(0, 80)}...`);
+  const parsed = await parseBetText('Read the attached betting slip image and extract all bets, players, lines, and odds.', imageUrl);
 
-  console.log(`[SlipPipeline] OCR extracted ${ocrText.length} chars.`);
-
-  // Step 2: AI parse
-  const parsed = await parseBetText(ocrText);
   if (!parsed.bets || parsed.bets.length === 0) {
-    console.log('[SlipPipeline] No bets found in OCR text.');
-    return { bets: [], ocrText };
+    console.log('[SlipPipeline] No bets found in image.');
+    return { bets: [] };
   }
 
-  // Step 3: Save bets + send to War Room
+  // Save bets + send to War Room
   const saved = [];
   for (const bet of parsed.bets) {
     if (isDuplicateBet(capperId, bet.description)) continue;
@@ -259,10 +252,10 @@ async function processSlipImage(client, imageUrl, capperId, capperName, opts = {
       bet_type: bet.bet_type, description: bet.description,
       odds: bet.odds, units: Math.min(bet.units || 1, 50),
       wager: bet.wager || null, payout: bet.payout || null,
-      event_date: bet.event_date, source: 'ocr_slip',
+      event_date: bet.event_date, source: 'vision_slip',
       source_channel_id: channelId || null,
       source_message_id: messageId || null,
-      raw_text: ocrText.slice(0, 500),
+      raw_text: (bet.description || '').slice(0, 500),
       review_status: 'needs_review',
     }, bet.legs || [], bet.props || []);
 
@@ -272,8 +265,8 @@ async function processSlipImage(client, imageUrl, capperId, capperName, opts = {
     }
   }
 
-  console.log(`[SlipPipeline] Processed ${saved.length} bet(s) via OCR.`);
-  return { bets: saved, ocrText };
+  console.log(`[SlipPipeline] Processed ${saved.length} bet(s) via Gemini Vision.`);
+  return { bets: saved };
 }
 
 // ── OCR Slip Feed — dedicated channel for bet slip images ───
@@ -394,9 +387,7 @@ async function handleMessage(message, { isUpdate = false } = {}) {
 
   console.log(`[DEBUG] handleMessage | embeds: ${message.embeds.length} | isUpdate: ${isUpdate} | fullContent(${fullContent.length}): "${fullContent.slice(0, 80)}"`);
 
-  // ═══ HARD FILTER: Reject retweets and fan replies instantly ═══
-  if (/^RT\s/i.test(fullContent)) { console.log('[DEBUG] Rejected by Hard Filter: RT'); return; }
-  if (/Retweeted @/i.test(fullContent)) { console.log('[DEBUG] Rejected by Hard Filter: Retweeted @'); return; }
+  // ═══ HARD FILTER: Reject fan replies (RT filter removed — cappers retweet their own slips) ═══
   if (/\breplying\s+to\b/i.test(fullContent)) { console.log('[DEBUG] Rejected by Hard Filter: replying to'); return; }
   if (/vxtwitter\.com|fixupx\.com/i.test(rawContent) && !/\b(pick|lock|play|bet)\b/i.test(fullContent)) { console.log('[DEBUG] Rejected by Hard Filter: vxtwitter without pick signal'); return; }
 
@@ -472,22 +463,15 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
     const allBets = [];
     const reviewBets = [];
 
-    // OCR any images and combine with text
-    let ocrText = '';
-    if (hasImages) {
-      try {
-        ocrText = await extractTextFromImage(combinedImages[0].url) || '';
-      } catch (err) {
-        console.log(`[OCR] Failed for buffered image: ${err.message}`);
-      }
-    }
+    // Hard Scrub the text
+    const cleanText = hardScrub(fullText);
 
-    // Hard Scrub the combined text + OCR
-    const cleanText = hardScrub([fullText, ocrText].filter(Boolean).join('\n'));
+    // Get image URL for Gemini Vision (bypasses OCR entirely)
+    const imageUrl = hasImages ? combinedImages[0].url : null;
 
-    if (cleanText.length > 5) {
-      console.log(`[DEBUG] Sending to AI. Text length: ${cleanText.length} | preview: "${cleanText.slice(0, 100)}"`);
-      const parsed = await parseBetText(cleanText);
+    if (cleanText.length > 5 || imageUrl) {
+      console.log(`[DEBUG] Sending to AI. Text length: ${cleanText.length} | hasImage: ${!!imageUrl} | preview: "${cleanText.slice(0, 100)}"`);
+      const parsed = await parseBetText(cleanText || 'Read the attached betting slip image and extract all bets.', imageUrl);
       console.log(`[DEBUG] AI Response: type=${parsed.type || 'bet'} is_bet=${parsed.is_bet} bets=${parsed.bets?.length || 0}`);
 
       // Auto-grade detection
@@ -531,7 +515,7 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
             odds: bet.odds, units: Math.min(bet.units || 1, 50),
             wager: bet.wager || null, payout: bet.payout || null,
             event_date: bet.event_date,
-            source: ocrText ? 'ocr_slip' : source,
+            source: imageUrl ? 'vision_slip' : source,
             source_channel_id: message.channel.id,
             source_message_id: message.id,
             raw_text: cleanText.slice(0, 500),
@@ -543,32 +527,6 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
             } else {
               allBets.push(saved);
             }
-          }
-        }
-      }
-    } else if (hasImages) {
-      // Fallback: if no useful text, try vision-based slip scan
-      const parsed = await scanImage(combinedImages[0].url, combinedImages[0].type);
-      if (parsed?.bets?.length > 0 && parsed.is_bet !== false) {
-        for (const bet of parsed.bets) {
-          if (isDuplicateBet(capper.id, bet.description)) continue;
-          const auditOn = isAuditMode();
-          const reviewStatus = (auditOn || bet._confidence === 'low') ? 'needs_review' : 'confirmed';
-          const saved = await createBetWithLegs({
-            capper_id: capper.id,
-            sport: bet.sport, league: bet.league,
-            bet_type: bet.bet_type, description: bet.description,
-            odds: bet.odds, units: Math.min(bet.units || 1, 50),
-            wager: bet.wager || null, payout: bet.payout || null,
-            event_date: bet.event_date, source: 'slip',
-            source_channel_id: message.channel.id,
-            source_message_id: message.id,
-            raw_text: `Image: ${capperInfo.name}`,
-            review_status: reviewStatus,
-          }, bet.legs || []);
-          if (!saved?._deduped) {
-            if (reviewStatus === 'needs_review') reviewBets.push(saved);
-            else allBets.push(saved);
           }
         }
       }

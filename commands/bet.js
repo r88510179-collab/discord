@@ -14,7 +14,7 @@ module.exports = {
         .setRequired(true)),
 
   async execute(interaction) {
-    await interaction.deferReply();
+    await interaction.deferReply({ ephemeral: true });
 
     const pickText = interaction.options.getString('pick');
     const user = interaction.user;

@@ -25,7 +25,7 @@ module.exports = {
         .addChoices(...SPORT_CHOICES)),
 
   async execute(interaction) {
-    await interaction.deferReply();
+    await interaction.deferReply({ ephemeral: true });
 
     const sport = interaction.options.getString('sport');
     const games = await getLiveScores(sport);

@@ -28,7 +28,7 @@ module.exports = {
             ))),
 
   async execute(interaction) {
-    await interaction.deferReply();
+    await interaction.deferReply({ ephemeral: true });
 
     const subcommand = interaction.options.getSubcommand();
 

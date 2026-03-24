@@ -139,6 +139,31 @@ async function callLLM(prompt, system, imageBase64, mediaType) {
   return null;
 }
 
+/**
+ * Download an image URL and return { base64, mediaType }.
+ * Used to pass Discord attachment images directly to Gemini Vision.
+ */
+async function downloadImageAsBase64(imageUrl) {
+  try {
+    const res = await fetch(imageUrl);
+    if (!res.ok) {
+      console.log(`[AI] Image download failed: ${res.status}`);
+      return null;
+    }
+    const contentType = res.headers.get('content-type') || 'image/png';
+    const buffer = Buffer.from(await res.arrayBuffer());
+    // Gemini has a ~4MB inline limit; skip oversized images
+    if (buffer.length > 4 * 1024 * 1024) {
+      console.log(`[AI] Image too large for Gemini Vision: ${(buffer.length / 1024 / 1024).toFixed(1)}MB`);
+      return null;
+    }
+    return { base64: buffer.toString('base64'), mediaType: contentType };
+  } catch (err) {
+    console.log(`[AI] Image download error: ${err.message}`);
+    return null;
+  }
+}
+
 function parseJSON(t) {
   if (!t || typeof t !== 'string') return null;
   const cleaned = t.replace(/```json|```/gi, '').trim();
@@ -335,13 +360,30 @@ function applyConfidenceGating(result, sourceText) {
   return result;
 }
 
-async function parseBetText(text) {
-  const quick = regexParseBet(text);
-  if (quick?.bets?.length > 0) {
-    const sourceText = quick._sourceText || text;
-    return applyConfidenceGating(normalizeParsedBets(quick), sourceText);
+async function parseBetText(text, imageUrl) {
+  // If no image, try regex fast-path first
+  if (!imageUrl) {
+    const quick = regexParseBet(text);
+    if (quick?.bets?.length > 0) {
+      const sourceText = quick._sourceText || text;
+      return applyConfidenceGating(normalizeParsedBets(quick), sourceText);
+    }
   }
+
+  // Download image for Gemini Vision if provided
+  let imageBase64 = null;
+  let mediaType = null;
+  if (imageUrl) {
+    const img = await downloadImageAsBase64(imageUrl);
+    if (img) {
+      imageBase64 = img.base64;
+      mediaType = img.mediaType;
+      console.log(`[AI] Image downloaded for Gemini Vision (${(Buffer.from(imageBase64, 'base64').length / 1024).toFixed(0)}KB)`);
+    }
+  }
+
   const sys = `You are a STRICT sports betting parser. Return ONLY valid JSON.
+${imageBase64 ? '\nIMPORTANT: An image of a betting slip has been attached. You MUST read the image directly to extract exact player names, props, lines, and odds. Combine the image data with any tweet text provided to build a perfectly accurate, bulleted parlay list. The image is the primary source of truth — the text is supplementary context.' : ''}
 
 RESPONSE TYPE 1 — New Bet:
 If the text contains a clear actionable bet (team/player + line/odds + prediction):
@@ -377,7 +419,7 @@ STRICT RULES:
 - Sport: Use specific league — UCL not Soccer, EPL not Soccer, March Madness not NCAAB. If units not specified default 1.
 - Parse ALL bets. For player props, include a "props" array: player_name, stat_category (snake_case), line (number), direction ("over"/"under"), odds (integer or null).
 - Raw OCR text may contain typos and garbage chars. Do your best (e.g., "0ver"="over", "und3r"="under", "Lebr0n"="LeBron").`;
-  const raw = await callLLM(text, sys);
+  const raw = await callLLM(text, sys, imageBase64, mediaType);
   if (!raw) return { bets: [], error: 'AI unavailable' };
   const parsed = parseJSON(raw);
   if (!parsed) return { bets: [], error: 'Parse failed' };

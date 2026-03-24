@@ -18,7 +18,7 @@ module.exports = {
         )),
 
   async execute(interaction) {
-    await interaction.deferReply();
+    await interaction.deferReply({ ephemeral: true });
 
     const sortBy = interaction.options.getString('sort') || 'total_profit_units';
     const labels = {

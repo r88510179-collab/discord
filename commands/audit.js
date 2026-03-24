@@ -17,7 +17,7 @@ module.exports = {
     const sub = interaction.options.getSubcommand();
 
     if (sub === 'clv') {
-      await interaction.deferReply();
+      await interaction.deferReply({ ephemeral: true });
 
       const pending = getPendingBets().filter(b => b.review_status === 'confirmed');
       if (pending.length === 0) {

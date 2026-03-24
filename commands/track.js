@@ -22,7 +22,7 @@ module.exports = {
         .setDescription('List all tracked Twitter accounts')),
 
   async execute(interaction) {
-    await interaction.deferReply();
+    await interaction.deferReply({ ephemeral: true });
 
     const subcommand = interaction.options.getSubcommand();
 

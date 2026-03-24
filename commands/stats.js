@@ -13,7 +13,7 @@ module.exports = {
         .setRequired(false)),
 
   async execute(interaction) {
-    await interaction.deferReply();
+    await interaction.deferReply({ ephemeral: true });
 
     const targetUser = interaction.options.getUser('user') || interaction.user;
     const capper = await getOrCreateCapper(targetUser.id, targetUser.displayName, targetUser.displayAvatarURL());
