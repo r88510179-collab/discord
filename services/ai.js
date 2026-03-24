@@ -357,6 +357,7 @@ If the text is sports news, commentary, game recaps, opinions, retweets, fan rep
 {"type":"ignore","is_bet":false,"bets":[]}
 
 STRICT RULES:
+- CRITICAL: If the text contains ANY actionable betting lines, spreads, odds, or totals (e.g., "Lakers -2", "Dodgers -140", "O229.5", "+150"), you MUST classify it as type "bet" and extract ALL the picks. Do NOT classify it as "ignore" or "result" just because the capper is also complaining about previous losses, venting, or adding commentary in the same message. The presence of betting lines ALWAYS overrides recap/complaining text.
 - If the text is a retweet (starts with "RT"), a reply to a fan, or a capper celebrating someone else's win, return type "ignore".
 - If you see "[Quoted]" or "Quoted @", you MUST ignore the quoted text entirely. Only evaluate the capper's original text above it.
 - bet_type: straight, parlay, teaser, prop, future, ladder.
