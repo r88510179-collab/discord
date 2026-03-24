@@ -146,4 +146,43 @@ function extractTeamFromDescription(description) {
   return words.slice(0, Math.min(words.length, 3)).join(' ');
 }
 
-module.exports = { shopLine, formatLineShop, extractTeamFromDescription };
+/**
+ * Fetch live scores for a sport from The Odds API.
+ * Returns an array of { home, away, homeScore, awayScore, completed, commenceTime }.
+ */
+async function getLiveScores(sport) {
+  const apiKey = process.env.ODDS_API_KEY;
+  if (!apiKey) return null;
+
+  const apiSport = resolveApiSport(sport);
+  if (!apiSport) return null;
+
+  const url = `${ODDS_API_BASE}/${apiSport}/scores/?apiKey=${apiKey}&daysFrom=1`;
+
+  try {
+    const res = await fetch(url);
+    if (!res.ok) {
+      console.log(`[Odds] Scores API error: ${res.status} ${res.statusText}`);
+      return null;
+    }
+    const data = await res.json();
+
+    return data.map(game => {
+      const homeScore = game.scores?.find(s => s.name === game.home_team);
+      const awayScore = game.scores?.find(s => s.name === game.away_team);
+      return {
+        home: game.home_team,
+        away: game.away_team,
+        homeScore: homeScore?.score ?? null,
+        awayScore: awayScore?.score ?? null,
+        completed: game.completed || false,
+        commenceTime: game.commence_time || null,
+      };
+    });
+  } catch (err) {
+    console.log(`[Odds] Scores fetch failed: ${err.message}`);
+    return null;
+  }
+}
+
+module.exports = { shopLine, formatLineShop, extractTeamFromDescription, getLiveScores };
