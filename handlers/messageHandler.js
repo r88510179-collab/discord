@@ -69,9 +69,15 @@ async function flushBuffer(key) {
       const freshImages = getImageAttachments(fresh);
       if (freshImages.length > allImages.length) allImages = freshImages;
     } catch (err) {
-      // Fallback: use original cached text if re-fetch fails
-      console.log(`[Buffer] Re-fetch failed for ${msg.id}: ${err.message}`);
+      // Fallback: use original cached message object (link fixer may have deleted it)
+      console.log(`[Buffer] Re-fetch failed for ${msg.id}: ${err.message} — using cached data`);
       if (msg.content?.trim()) texts.push(msg.content.trim());
+      for (const embed of (msg.embeds || [])) {
+        if (embed.description) texts.push(embed.description);
+        if (embed.title) texts.push(embed.title);
+      }
+      const cachedImages = getImageAttachments(msg);
+      if (cachedImages.length > allImages.length) allImages = cachedImages;
     }
   }
 
