@@ -423,24 +423,11 @@ async function handleMessage(message, { isUpdate = false } = {}) {
   // fullText = message.content + embed descriptions (already built above as fullContent)
   const fullText = fullContent;
 
-  // ═══ GUARD 5: Celebration / result tweets → route to auto-grader (no buffer needed) ═══
-  if (looksLikeCelebration(fullText)) {
-    console.log(`[AutoGrade] Detected celebration: ${fullText.substring(0, 80)}...`);
-    try {
-      await handleAutoGrade(message, fullText);
-    } catch (err) {
-      console.error('[AutoGrade] Error:', err.message);
-    }
-    return;
-  }
-
-  // ═══ GUARD 6: Must look like a pick — require 2+ signals for text, or have images ═══
+  // ═══ GUARD 5: Must have SOME signal — text signals, images, or celebration keywords ═══
+  // All messages go to the buffer. The AI decides type (bet, result, untracked_win, ignore).
   const textIsPick = looksLikePick(fullText);
-  if (isMappedChannel && !hasImages) {
-    let signals = 0;
-    for (const p of PICK_SIGNALS) { if (p.test(fullText)) signals++; }
-    if (signals < 3) return;
-  } else if (!textIsPick && !hasImages) {
+  const textIsCelebration = looksLikeCelebration(fullText);
+  if (!textIsPick && !textIsCelebration && !hasImages) {
     return;
   }
 
