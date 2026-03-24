@@ -26,13 +26,39 @@ module.exports = {
 
       const results = [];
 
+      // Player prop / parlay keywords that indicate CLV is unsupported
+      const PROP_KEYWORDS = /\b(pts|points|reb|rebounds|ast|assists|stl|steals|blk|blocks|yds|yards|tds|touchdowns|strikeouts|hits|runs|sacks|receptions)\b/i;
+
       for (const bet of pending.slice(0, 15)) {
-        const teamSearch = extractTeamFromDescription(bet.description);
+        const betType = (bet.bet_type || 'straight').toLowerCase();
+        const desc = bet.description || '';
+
+        // Skip parlays — CLV requires individual team moneyline comparison
+        if (betType === 'parlay' || betType === 'teaser' || betType === 'ladder') {
+          results.push({
+            bet,
+            status: 'skip',
+            label: '⚪ Parlay (CLV unsupported)',
+          });
+          continue;
+        }
+
+        // Skip player props — Odds API basic endpoint only has team-level markets
+        if (betType === 'prop' || PROP_KEYWORDS.test(desc)) {
+          results.push({
+            bet,
+            status: 'skip',
+            label: '⚪ Player Prop (CLV unsupported)',
+          });
+          continue;
+        }
+
+        const teamSearch = extractTeamFromDescription(desc);
         if (!teamSearch || !bet.odds) {
           results.push({
             bet,
             status: 'skip',
-            label: '⚪ No odds data',
+            label: '⚪ No odds/team data',
           });
           continue;
         }
@@ -86,6 +112,7 @@ module.exports = {
       // Build the embed
       const positiveCount = results.filter(r => r.status === 'positive').length;
       const negativeCount = results.filter(r => r.status === 'negative').length;
+      const skippedCount = results.filter(r => r.status === 'skip').length;
       const color = positiveCount >= negativeCount ? COLORS.success : COLORS.danger;
 
       const lines = results.map(r => {
@@ -103,7 +130,7 @@ module.exports = {
         .addFields(
           { name: 'Positive CLV', value: `${positiveCount}`, inline: true },
           { name: 'Negative CLV', value: `${negativeCount}`, inline: true },
-          { name: 'Audited', value: `${results.length} / ${pending.length}`, inline: true },
+          { name: 'Skipped', value: `${skippedCount} (props/parlays)`, inline: true },
         )
         .setFooter({ text: 'CLV = Closing Line Value. Positive means capper beat the market.' })
         .setTimestamp();
