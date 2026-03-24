@@ -368,13 +368,15 @@ async function handleAutoGrade(message, fullText) {
   }
 }
 
-async function handleMessage(message) {
+async function handleMessage(message, { isUpdate = false } = {}) {
   if (!message.guild) return;
 
-  // ═══ DEDUP GUARD: Skip if we already processed this message ═══
-  if (processedMessages.has(message.id)) return;
-  processedMessages.add(message.id);
-  setTimeout(() => processedMessages.delete(message.id), 10_000);
+  // ═══ DEDUP GUARD ═══
+  // For MessageUpdate (embed unfurl), use a separate key so it bypasses the Create dedup
+  const dedupKey = isUpdate ? `update:${message.id}` : message.id;
+  if (processedMessages.has(dedupKey)) return;
+  processedMessages.add(dedupKey);
+  setTimeout(() => processedMessages.delete(dedupKey), 10_000);
 
   // ═══ GUARD 1: Never process our own messages (prevents infinite loop) ═══
   if (message.author.id === message.client.user.id) return;
@@ -384,10 +386,12 @@ async function handleMessage(message) {
   const embedText = message.embeds.map(e => [e.description, e.title].filter(Boolean).join(' ')).join(' ');
   const fullContent = (rawContent + ' ' + embedText).trim();
 
+  console.log(`[DEBUG] handleMessage | embeds: ${message.embeds.length} | isUpdate: ${isUpdate} | fullContent(${fullContent.length}): "${fullContent.slice(0, 80)}"`);
+
   // ═══ HARD FILTER: Reject retweets and fan replies instantly ═══
-  if (/^RT\s/i.test(fullContent)) return;
-  if (/\breplying\s+to\b/i.test(fullContent)) return;
-  if (/vxtwitter\.com|fixupx\.com/i.test(rawContent) && !/\b(pick|lock|play|bet)\b/i.test(fullContent)) return;
+  if (/^RT\s/i.test(fullContent)) { console.log('[DEBUG] Rejected by Hard Filter: RT'); return; }
+  if (/\breplying\s+to\b/i.test(fullContent)) { console.log('[DEBUG] Rejected by Hard Filter: replying to'); return; }
+  if (/vxtwitter\.com|fixupx\.com/i.test(rawContent) && !/\b(pick|lock|play|bet)\b/i.test(fullContent)) { console.log('[DEBUG] Rejected by Hard Filter: vxtwitter without pick signal'); return; }
 
   // ═══ OCR Slip Feed — check before picks channel guard ═══
   const slipHandled = await handleSlipFeed(message);
@@ -476,7 +480,9 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
     const cleanText = hardScrub([fullText, ocrText].filter(Boolean).join('\n'));
 
     if (cleanText.length > 5) {
+      console.log(`[DEBUG] Sending to AI. Text length: ${cleanText.length} | preview: "${cleanText.slice(0, 100)}"`);
       const parsed = await parseBetText(cleanText);
+      console.log(`[DEBUG] AI Response: type=${parsed.type || 'bet'} is_bet=${parsed.is_bet} bets=${parsed.bets?.length || 0}`);
 
       // Auto-grade detection
       if (parsed.type === 'result') {

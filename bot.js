@@ -80,8 +80,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
 // ── Handle messages (auto-parse picks channel) ──────────────
 client.on(Events.MessageCreate, (message) => {
-  console.log(`[DEBUG] Message received in channel: ${message.channel.id} from: ${message.author.tag} content: "${message.content.slice(0, 50)}" attachments: ${message.attachments.size}`);
+  console.log(`[DEBUG] MessageCreate in #${message.channel.name} (${message.channel.id}) from: ${message.author.tag} | embeds: ${message.embeds.length} | attachments: ${message.attachments.size} | content: "${(message.content || '').slice(0, 60)}"`);
   handleMessage(message);
+});
+
+// ── Handle message updates (FxTwitter embed unfurling) ──────
+client.on(Events.MessageUpdate, (oldMsg, newMsg) => {
+  // Only care if embeds were added (0 → N) — this is Discord unfurling a link
+  if (oldMsg.embeds.length === 0 && newMsg.embeds.length > 0) {
+    console.log(`[DEBUG] MessageUpdate in #${newMsg.channel.name} (${newMsg.channel.id}) | new embeds: ${newMsg.embeds.length} | content: "${(newMsg.content || '').slice(0, 60)}"`);
+    handleMessage(newMsg, { isUpdate: true });
+  }
 });
 
 // ── Bot ready ───────────────────────────────────────────────
