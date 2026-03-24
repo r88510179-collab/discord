@@ -390,6 +390,7 @@ async function handleMessage(message, { isUpdate = false } = {}) {
 
   // ═══ HARD FILTER: Reject retweets and fan replies instantly ═══
   if (/^RT\s/i.test(fullContent)) { console.log('[DEBUG] Rejected by Hard Filter: RT'); return; }
+  if (/Retweeted @/i.test(fullContent)) { console.log('[DEBUG] Rejected by Hard Filter: Retweeted @'); return; }
   if (/\breplying\s+to\b/i.test(fullContent)) { console.log('[DEBUG] Rejected by Hard Filter: replying to'); return; }
   if (/vxtwitter\.com|fixupx\.com/i.test(rawContent) && !/\b(pick|lock|play|bet)\b/i.test(fullContent)) { console.log('[DEBUG] Rejected by Hard Filter: vxtwitter without pick signal'); return; }
 
@@ -488,6 +489,20 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
       if (parsed.type === 'result') {
         console.log(`[AutoGrade] AI detected result: ${parsed.outcome} for ${parsed.subject?.join(', ')}`);
         await autoGradeBet(message.client, parsed.outcome, parsed.subject || []);
+        return;
+      }
+
+      // Untracked winner — send yellow embed to War Room
+      if (parsed.type === 'untracked_win') {
+        console.log(`[UntrackedWin] Detected: ${parsed.description}`);
+        const { sendUntrackedWinEmbed } = require('../services/warRoom');
+        await sendUntrackedWinEmbed(message.client, {
+          description: parsed.description,
+          outcome: parsed.outcome || 'win',
+          subject: parsed.subject || [],
+          capperName: capperInfo.name,
+          capperId: capper.id,
+        });
         return;
       }
 

@@ -352,13 +352,20 @@ If the text celebrates a WIN or reports a LOSS (e.g., "WINNER", "CASHED", "CASH 
 {"type":"result","is_bet":false,"outcome":"win","subject":["Real Madrid","Gonzaga"]}
 The "subject" array should contain the team names or player names mentioned. "outcome" must be "win" or "loss".
 
-RESPONSE TYPE 3 — Not a Bet:
+RESPONSE TYPE 3 — Untracked Winner:
+If the capper is celebrating their OWN winning bet (e.g., "BOOM", "Cash it!", green checkmarks, "another W") AND you can identify what team/player/event they won on, but it looks like a result not a new pick:
+{"type":"untracked_win","is_bet":false,"description":"Lakers ML","outcome":"win","subject":["Lakers"]}
+Use this ONLY when the capper is clearly celebrating their own win with identifiable details. If you can't identify the bet, use "result" instead.
+
+RESPONSE TYPE 4 — Not a Bet:
 If the text is sports news, commentary, game recaps, opinions, retweets, fan replies, or celebrating someone ELSE's win (e.g., "Look at this hit!", "Great call by @someone"):
 {"type":"ignore","is_bet":false,"bets":[]}
 
 STRICT RULES:
 - CRITICAL: If the text contains ANY actionable betting lines, spreads, odds, or totals (e.g., "Lakers -2", "Dodgers -140", "O229.5", "+150"), you MUST classify it as type "bet" and extract ALL the picks. Do NOT classify it as "ignore" or "result" just because the capper is also complaining about previous losses, venting, or adding commentary in the same message. The presence of betting lines ALWAYS overrides recap/complaining text.
-- If the text is a retweet (starts with "RT"), a reply to a fan, or a capper celebrating someone else's win, return type "ignore".
+- ANTI-PROMO / ANTI-SPAM: If the text is promoting a tool, software, VIP group, Discord server, algorithm, "AI agent", "private beta", "link in bio", subscription service, or discussing general betting strategy without a specific actionable pick, you MUST return {"type":"ignore"}. Words like "EV props" or "sharp lines" alone do NOT make it a bet.
+- STRICT ENTITY REQUIREMENT: Do NOT hallucinate odds or units. To classify as a bet, there MUST be a clear, specific team name, player name, or betting line being backed. If you cannot confidently identify WHO or WHAT is being bet on, you MUST return {"type":"ignore"}.
+- If the text is a retweet (starts with "RT" or contains "Retweeted @"), a reply to a fan, or a capper celebrating someone else's win, return type "ignore".
 - If you see "[Quoted]" or "Quoted @", you MUST ignore the quoted text entirely. Only evaluate the capper's original text above it.
 - bet_type: straight, parlay, teaser, prop, future, ladder.
 - For parlays, ALWAYS populate the "legs" array. Each leg MUST have: description, odds, team (or player name), line (spread/total/ML), type (spread/moneyline/total/prop).
@@ -384,7 +391,19 @@ STRICT RULES:
     };
   }
 
-  // Type 3: Ignore (not a bet)
+  // Type 3: Untracked winner
+  if (parsed.type === 'untracked_win') {
+    return {
+      type: 'untracked_win',
+      is_bet: false,
+      description: parsed.description || 'Unknown bet',
+      outcome: parsed.outcome || 'win',
+      subject: Array.isArray(parsed.subject) ? parsed.subject : [parsed.subject].filter(Boolean),
+      bets: [],
+    };
+  }
+
+  // Type 4: Ignore (not a bet)
   if (parsed.is_bet === false || parsed.type === 'ignore') {
     return { type: 'ignore', is_bet: false, bets: [] };
   }

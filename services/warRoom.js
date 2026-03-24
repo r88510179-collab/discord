@@ -8,7 +8,7 @@ const {
   EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
   ModalBuilder, TextInputBuilder, TextInputStyle,
 } = require('discord.js');
-const { approveBet, rejectBet, updateBetFields, getBetLegs, getCapperStats, getBankroll, db } = require('./database');
+const { approveBet, rejectBet, updateBetFields, getBetLegs, getCapperStats, getBankroll, db, createBet, updateBankroll } = require('./database');
 const { postPickTracked } = require('./dashboard');
 const { shopLine, formatLineShop, extractTeamFromDescription } = require('./odds');
 const { calculateOptimalBet } = require('./bankroll');
@@ -214,6 +214,46 @@ async function handleWarRoomInteraction(interaction) {
       await interaction.message.delete().catch(() => {});
       return true;
     }
+
+    // Untracked winner — Log as Win
+    if (action === 'war_logwin') {
+      try {
+        const payload = JSON.parse(Buffer.from(betId, 'base64').toString());
+        const saved = createBet({
+          capper_id: payload.cid,
+          sport: 'Unknown', description: payload.desc,
+          odds: -110, units: 1,
+          source: 'untracked_win',
+          review_status: 'confirmed',
+        });
+        if (saved && !saved._deduped) {
+          // Grade immediately as win
+          const profitUnits = 0.91; // -110 odds → ~0.91u profit
+          db.prepare("UPDATE bets SET result = 'win', profit_units = ? WHERE id = ?").run(profitUnits, saved.id);
+          // Update bankroll
+          const bankroll = getBankroll(payload.cid);
+          if (bankroll) {
+            const unitSize = bankroll.unit_size || 25;
+            updateBankroll(payload.cid, profitUnits * unitSize);
+          }
+        }
+        const loggedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
+          .setTitle('Logged as Win')
+          .setColor(COLORS.success);
+        await interaction.update({ embeds: [loggedEmbed], components: [] });
+      } catch (err) {
+        console.error('[WarRoom] Log win error:', err.message);
+        await interaction.reply({ content: 'Failed to log win.', ephemeral: true });
+      }
+      return true;
+    }
+
+    // Untracked winner — Reject
+    if (action === 'war_rejectwin') {
+      await interaction.reply({ content: '❌ Untracked winner dismissed.', ephemeral: true });
+      await interaction.message.delete().catch(() => {});
+      return true;
+    }
   }
 
   // Handle modal submissions
@@ -275,4 +315,49 @@ async function handleWarRoomInteraction(interaction) {
   return false;
 }
 
-module.exports = { sendStagingEmbed, handleWarRoomInteraction };
+/**
+ * Send a yellow "Untracked Winner" embed to the War Room.
+ * Provides [Log as Win] and [Reject] buttons.
+ */
+async function sendUntrackedWinEmbed(client, data) {
+  const channelId = process.env.WAR_ROOM_CHANNEL_ID || process.env.ADMIN_LOG_CHANNEL_ID;
+  if (!channelId) return;
+
+  const channel = await client.channels.fetch(channelId).catch(() => null);
+  if (!channel) return;
+
+  const embed = new EmbedBuilder()
+    .setTitle('Untracked Winner Detected')
+    .setColor(COLORS.warning)
+    .addFields(
+      { name: 'Capper', value: data.capperName || 'Unknown', inline: true },
+      { name: 'Outcome', value: (data.outcome || 'win').toUpperCase(), inline: true },
+      { name: 'Description', value: data.description || 'Unknown bet' },
+    )
+    .setTimestamp();
+
+  if (data.subject?.length > 0) {
+    embed.addFields({ name: 'Subjects', value: data.subject.join(', '), inline: false });
+  }
+
+  // Encode capper ID and description in the button customId
+  const payload = Buffer.from(JSON.stringify({
+    cid: data.capperId,
+    desc: (data.description || '').slice(0, 80),
+  })).toString('base64').slice(0, 80);
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`war_logwin:${payload}`)
+      .setLabel('Log as Win')
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`war_rejectwin:${payload}`)
+      .setLabel('Reject')
+      .setStyle(ButtonStyle.Danger),
+  );
+
+  await channel.send({ embeds: [embed], components: [row] });
+}
+
+module.exports = { sendStagingEmbed, handleWarRoomInteraction, sendUntrackedWinEmbed };
