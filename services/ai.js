@@ -368,12 +368,14 @@ STRICT RULES:
 - If the text is a retweet (starts with "RT" or contains "Retweeted @"), a reply to a fan, or a capper celebrating someone else's win, return type "ignore".
 - If you see "[Quoted]" or "Quoted @", you MUST ignore the quoted text entirely. Only evaluate the capper's original text above it.
 - bet_type: straight, parlay, teaser, prop, future, ladder.
-- For parlays, ALWAYS populate the "legs" array. Each leg MUST have: description, odds, team (or player name), line (spread/total/ML), type (spread/moneyline/total/prop).
-- For parlays, the description MUST list the actual legs/players involved (e.g., "Donovan Clingan 11+ Reb, Jalen Duren 10+ Pts"). Do NOT just name it "3 Pick Parlay" or "4 Leg Parlay" — specify what the legs ARE.
+- PARLAY / DFS DETECTION: If the text mentions multiple legs, multiple player props, "X-Pick", "Power Play", "Flex Play", "PrizePicks", "Underdog Fantasy", "Sleeper", or lists 2+ distinct player stats, you MUST classify bet_type as "parlay" — NEVER "straight". A slip with 6 players is a 6-leg parlay.
+- BULLET POINT FORMATTING: For parlays, the description MUST be a clean bulleted list using newlines (one line per leg), e.g.: "• LeBron James O 22.5 Pts\\n• Steph Curry O 5.5 Ast\\n• Jokic O 11.5 Reb". Do NOT mash multiple legs into a single paragraph.
+- For parlays, ALWAYS populate the "legs" array. Each leg MUST have: description, odds (or null), team (or player name), line (spread/total/stat line), type (spread/moneyline/total/prop).
 - If the capper mentions a parlay or multiple legs but does NOT list the actual teams/players in the text or OCR data (e.g., they just say "Tap link to load", "Link in bio", or the picks are hidden behind a URL), you MUST set the description to: "MISSING LEGS: Capper hid the picks in a link or missing image." Do NOT fabricate leg details.
+- NO HALLUCINATIONS: If it is a DFS slip (PrizePicks, Underdog, Sleeper) or the specific moneyline/spread odds are missing from the text/OCR, do NOT invent -110 or any default odds. Set odds to null. If units/wager are not visible, set units to 1 but do NOT fabricate a wager amount. For DFS slips, set the sport to the primary league of the players involved.
 - If wager amount or payout/to-pay is visible, include "wager" (number) and "payout" (number) on the bet.
 - Sport: Use specific league — UCL not Soccer, EPL not Soccer, March Madness not NCAAB. If units not specified default 1.
-- Parse ALL bets. For player props, include a "props" array: player_name, stat_category (snake_case), line (number), direction ("over"/"under"), odds (integer).
+- Parse ALL bets. For player props, include a "props" array: player_name, stat_category (snake_case), line (number), direction ("over"/"under"), odds (integer or null).
 - Raw OCR text may contain typos and garbage chars. Do your best (e.g., "0ver"="over", "und3r"="under", "Lebr0n"="LeBron").`;
   const raw = await callLLM(text, sys);
   if (!raw) return { bets: [], error: 'AI unavailable' };
