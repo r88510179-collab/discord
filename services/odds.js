@@ -33,26 +33,47 @@ function resolveApiSport(sport) {
 }
 
 /**
+ * Fetch from The Odds API with automatic key rotation.
+ * Tries primary key first; on 401/429, retries with backup key.
+ */
+async function fetchWithKeyRotation(urlTemplate) {
+  const primaryKey = process.env.ODDS_API_KEY;
+  const backupKey = process.env.ODDS_API_KEY_BACKUP;
+  if (!primaryKey && !backupKey) return null;
+
+  const keys = [primaryKey, backupKey].filter(Boolean);
+
+  for (let i = 0; i < keys.length; i++) {
+    const url = urlTemplate.replace('{API_KEY}', keys[i]);
+    try {
+      const res = await fetch(url);
+      if (res.ok) return await res.json();
+
+      if ((res.status === 401 || res.status === 429) && i < keys.length - 1) {
+        console.log(`[Odds] Primary key failed (${res.status}), trying backup...`);
+        continue;
+      }
+      console.log(`[Odds] API error: ${res.status} ${res.statusText}`);
+      return null;
+    } catch (err) {
+      if (i < keys.length - 1) {
+        console.log(`[Odds] Primary key fetch failed: ${err.message}, trying backup...`);
+        continue;
+      }
+      console.log(`[Odds] Fetch failed: ${err.message}`);
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
  * Fetch odds for a given sport from The Odds API.
  * Returns raw bookmaker data for all upcoming events.
  */
 async function fetchOdds(apiSport) {
-  const apiKey = process.env.ODDS_API_KEY;
-  if (!apiKey) return null;
-
-  const url = `${ODDS_API_BASE}/${apiSport}/odds/?apiKey=${apiKey}&regions=us&markets=h2h,spreads,totals&bookmakers=${TARGET_BOOKS.join(',')}`;
-
-  try {
-    const res = await fetch(url);
-    if (!res.ok) {
-      console.log(`[Odds] API error: ${res.status} ${res.statusText}`);
-      return null;
-    }
-    return await res.json();
-  } catch (err) {
-    console.log(`[Odds] Fetch failed: ${err.message}`);
-    return null;
-  }
+  const urlTemplate = `${ODDS_API_BASE}/${apiSport}/odds/?apiKey={API_KEY}&regions=us&markets=h2h,spreads,totals&bookmakers=${TARGET_BOOKS.join(',')}`;
+  return fetchWithKeyRotation(urlTemplate);
 }
 
 /**
@@ -151,38 +172,25 @@ function extractTeamFromDescription(description) {
  * Returns an array of { home, away, homeScore, awayScore, completed, commenceTime }.
  */
 async function getLiveScores(sport) {
-  const apiKey = process.env.ODDS_API_KEY;
-  if (!apiKey) return null;
-
   const apiSport = resolveApiSport(sport);
   if (!apiSport) return null;
 
-  const url = `${ODDS_API_BASE}/${apiSport}/scores/?apiKey=${apiKey}&daysFrom=1`;
+  const urlTemplate = `${ODDS_API_BASE}/${apiSport}/scores/?apiKey={API_KEY}&daysFrom=1`;
+  const data = await fetchWithKeyRotation(urlTemplate);
+  if (!data) return null;
 
-  try {
-    const res = await fetch(url);
-    if (!res.ok) {
-      console.log(`[Odds] Scores API error: ${res.status} ${res.statusText}`);
-      return null;
-    }
-    const data = await res.json();
-
-    return data.map(game => {
-      const homeScore = game.scores?.find(s => s.name === game.home_team);
-      const awayScore = game.scores?.find(s => s.name === game.away_team);
-      return {
-        home: game.home_team,
-        away: game.away_team,
-        homeScore: homeScore?.score ?? null,
-        awayScore: awayScore?.score ?? null,
-        completed: game.completed || false,
-        commenceTime: game.commence_time || null,
-      };
-    });
-  } catch (err) {
-    console.log(`[Odds] Scores fetch failed: ${err.message}`);
-    return null;
-  }
+  return data.map(game => {
+    const homeScore = game.scores?.find(s => s.name === game.home_team);
+    const awayScore = game.scores?.find(s => s.name === game.away_team);
+    return {
+      home: game.home_team,
+      away: game.away_team,
+      homeScore: homeScore?.score ?? null,
+      awayScore: awayScore?.score ?? null,
+      completed: game.completed || false,
+      commenceTime: game.commence_time || null,
+    };
+  });
 }
 
 module.exports = { shopLine, formatLineShop, extractTeamFromDescription, getLiveScores };
