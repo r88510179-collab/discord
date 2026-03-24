@@ -8,9 +8,10 @@ const {
   EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
   ModalBuilder, TextInputBuilder, TextInputStyle,
 } = require('discord.js');
-const { approveBet, rejectBet, updateBetFields, getBetLegs } = require('./database');
+const { approveBet, rejectBet, updateBetFields, getBetLegs, getCapperStats, getBankroll, db } = require('./database');
 const { postPickTracked } = require('./dashboard');
 const { shopLine, formatLineShop, extractTeamFromDescription } = require('./odds');
+const { calculateOptimalBet } = require('./bankroll');
 const { COLORS } = require('../utils/embeds');
 
 /**
@@ -77,6 +78,41 @@ async function sendStagingEmbed(client, bet, capperName) {
     }
   } catch (err) {
     console.log(`[WarRoom] Line shop error: ${err.message}`);
+  }
+
+  // Bankroll Guardian — Quarter Kelly recommendation
+  try {
+    if (bet.capper_id && bet.odds) {
+      const stats = getCapperStats(bet.capper_id);
+      const bankroll = getBankroll(bet.capper_id);
+      const starting = bankroll?.starting || parseFloat(process.env.DEFAULT_BANKROLL || 1000);
+      const current = bankroll?.current || starting;
+
+      // Available cash = current bankroll - capital risked on pending bets
+      const risked = db.prepare(
+        "SELECT COALESCE(SUM(units), 0) AS total FROM bets WHERE capper_id = ? AND result = 'pending' AND review_status = 'confirmed'",
+      ).get(bet.capper_id);
+      const unitSize = bankroll?.unit_size || parseFloat(process.env.DEFAULT_UNIT_SIZE || 25);
+      const riskedCash = (risked?.total || 0) * unitSize;
+      const availableCash = Math.max(current - riskedCash, 0);
+
+      const gradedBets = (stats?.wins || 0) + (stats?.losses || 0);
+      const winRate = gradedBets > 0 ? (stats.wins / gradedBets) : null;
+
+      const kelly = calculateOptimalBet(bet.odds, availableCash, winRate, gradedBets);
+
+      if (kelly.isNegativeEV) {
+        embed.addFields({ name: 'Guardian', value: '$0 (Negative EV / Fade)', inline: false });
+      } else {
+        embed.addFields({
+          name: 'Guardian',
+          value: `$${kelly.amount.toFixed(2)} (Quarter Kelly)`,
+          inline: false,
+        });
+      }
+    }
+  } catch (err) {
+    console.log(`[WarRoom] Guardian error: ${err.message}`);
   }
 
   embed.addFields({ name: 'Bet ID', value: `\`${bet.id}\``, inline: false })
