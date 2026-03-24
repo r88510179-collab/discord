@@ -402,19 +402,18 @@ async function handleMessage(message, { isUpdate = false } = {}) {
   if (picksChannels.length === 0) return;
   if (!picksChannels.includes(message.channel.id)) return;
 
-  // ═══ GUARD 2: For non-mapped channels, skip all bot messages ═══
+  // ═══ GUARD 2: Resolve channel mapping (for capper attribution) ═══
   const twitterMap = getTwitterCapperMap();
   const capperMap = getCapperChannelMap();
   const isTwitterFeed = !!twitterMap[message.channel.id];
   const isMappedCapper = !!capperMap[message.channel.id];
   const isMappedChannel = isTwitterFeed || isMappedCapper;
-  if (message.author.bot && !isMappedChannel) return;
+  // NOTE: We allow ALL bots/webhooks (TweetShift, custom webhooks) in picks channels.
+  // The only bot we skip is ourselves to prevent infinite loops.
 
-  // ═══ GUARD 3: For mapped channels, skip our own replies ═══
-  if (isMappedChannel) {
-    if (message.author.id === message.client.user.id) return;
-    if (message.reference) return;
-  }
+  // ═══ GUARD 3: Skip our own replies (prevent loops) ═══
+  if (message.author.id === message.client.user.id) return;
+  if (isMappedChannel && message.reference) return;
 
   // ═══ GUARD 4: Skip old messages (only process last 2 min) ═══
   const msgAge = Date.now() - message.createdTimestamp;
