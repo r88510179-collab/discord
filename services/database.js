@@ -61,6 +61,9 @@ const stmts = {
   getSetting: db.prepare('SELECT value FROM settings WHERE key = ?'),
   setSetting: db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)'),
 
+  // Bet deletion (hard delete any bet by ID)
+  deleteBet: db.prepare('DELETE FROM bets WHERE id = ?'),
+
   // Review queue management
   approveBet: db.prepare("UPDATE bets SET review_status = 'confirmed' WHERE id = ? AND review_status = 'needs_review'"),
   rejectBet:  db.prepare("DELETE FROM bets WHERE id = ? AND review_status = 'needs_review'"),
@@ -401,6 +404,13 @@ function getBetLegs(betId) {
   return stmts.getLegsByBetId.all(betId);
 }
 
+function deleteBetById(betId) {
+  const bet = stmts.getBet.get(betId);
+  if (!bet) return null;
+  stmts.deleteBet.run(betId);
+  return bet;
+}
+
 function findPendingBetBySubject(searchTerms) {
   for (const term of searchTerms) {
     const match = stmts.findPendingBySubject.get(`%${term}%`);
@@ -507,6 +517,7 @@ module.exports = {
   isAuditMode,
   updateBetFields,
   getBetLegs,
+  deleteBetById,
   getDashboardSummary,
   getRecentPendingBets,
   getTotalBankroll,
