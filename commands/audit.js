@@ -92,21 +92,13 @@ module.exports = {
         const capperStr = bet.odds > 0 ? `+${bet.odds}` : `${bet.odds}`;
         const marketStr = marketOffer.price > 0 ? `+${marketOffer.price}` : `${marketOffer.price}`;
 
-        if (isPositive) {
-          results.push({
-            bet,
-            status: 'positive',
-            label: `+EV | Capper: ${capperStr} → Market: ${marketStr} (${clvPct}%)`,
-            book: marketOffer.book,
-          });
-        } else {
-          results.push({
-            bet,
-            status: 'negative',
-            label: `-EV | Capper: ${capperStr} → Market: ${marketStr} (${clvPct}%)`,
-            book: marketOffer.book,
-          });
-        }
+        results.push({
+          bet,
+          status: isPositive ? 'positive' : 'negative',
+          marketPrice: marketOffer.price,
+          clvPct,
+          book: marketOffer.book,
+        });
       }
 
       // Build the embed
@@ -118,9 +110,17 @@ module.exports = {
       const lines = results.map(r => {
         const desc = (r.bet.description || 'Unknown').slice(0, 40);
         const capper = r.bet.capper_name || 'Unknown';
-        const icon = r.status === 'positive' ? '📈' : r.status === 'negative' ? '📉' : '⚪';
-        const bookTag = r.book ? ` @ ${r.book}` : '';
-        return `${icon} **${desc}**\n└ ${capper} | ${r.label}${bookTag}`;
+
+        if (r.status === 'positive' || r.status === 'negative') {
+          const icon = r.status === 'positive' ? '📈' : '📉';
+          const tag = r.status === 'positive' ? '+EV' : '-EV';
+          const capperOdds = r.bet.odds != null ? (r.bet.odds > 0 ? `+${r.bet.odds}` : `${r.bet.odds}`) : '??';
+          const marketOdds = r.marketPrice != null ? (r.marketPrice > 0 ? `+${r.marketPrice}` : `${r.marketPrice}`) : '??';
+          const bookTag = r.book ? ` @ ${r.book}` : '';
+          return `${icon} **${desc}**\n└ ${capper} | **${capperOdds}** -> **${marketOdds}** ${tag} (${r.clvPct}%)${bookTag}`;
+        }
+
+        return `⚪ **${desc}**\n└ ${capper} | ${r.label}`;
       });
 
       const embed = new EmbedBuilder()

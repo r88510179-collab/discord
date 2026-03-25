@@ -1,4 +1,4 @@
-const { getPendingBets, gradeBet, updateBankroll, saveDailySnapshot } = require('./database');
+const { getPendingBets, gradeBet, updateBankroll, saveDailySnapshot, getBankroll, db } = require('./database');
 const { gradeBetAI } = require('./ai');
 
 const ODDS_API_BASE = 'https://api.the-odds-api.com/v4';
@@ -330,12 +330,119 @@ async function runAutoGrade(client) {
     }
   }
 
-  console.log(`[AutoGrade] Graded ${gradedCount} bets.`);
+  // ── 48-Hour Sweeper: auto-grade expired pending bets as loss ──
+  const SWEEP_HOURS = 48;
+  const expiredBets = pending.filter(bet => {
+    const age = Date.now() - new Date(bet.created_at).getTime();
+    return age > SWEEP_HOURS * 60 * 60 * 1000;
+  });
+
+  for (const bet of expiredBets) {
+    // Skip if already graded in this cycle
+    if (gradedBets.some(g => g.bet.id === bet.id)) continue;
+
+    const profitUnits = calcProfit(bet.odds || -110, bet.units || 1, 'loss');
+    await gradeBet(bet.id, 'loss', profitUnits, 'F', `Auto-swept: pending >${SWEEP_HOURS}h with no score/confirmation`);
+
+    if (bet.capper_id) {
+      const bankroll = getBankroll(bet.capper_id);
+      if (bankroll) {
+        const dollarAmount = profitUnits * parseFloat(bankroll.unit_size);
+        updateBankroll(bet.capper_id, dollarAmount);
+      }
+      saveDailySnapshot(bet.capper_id);
+    }
+
+    gradedBets.push({ bet, result: 'loss', profitUnits, grade: { grade: 'F', reason: 'Expired (48h sweep)' } });
+    gradedCount++;
+    console.log(`[Sweeper] Auto-graded as loss: "${bet.description?.slice(0, 40)}" (${SWEEP_HOURS}h expired)`);
+  }
+
+  console.log(`[AutoGrade] Graded ${gradedCount} bets (incl. ${expiredBets.length > gradedBets.length ? 0 : expiredBets.filter(e => !gradedBets.some(g => g.bet.id === e.id && g.grade.reason !== 'Expired (48h sweep)')).length} sweeps).`);
   return { graded: gradedCount, bets: gradedBets };
+}
+
+// ── Contextual Victory Grading ──────────────────────────────
+// Called by the message handler when AI detects a celebration.
+// Matches celebration subject to pending bets from the same capper.
+async function gradeFromCelebration(client, capperId, outcome, subjects) {
+  if (!capperId || !subjects || subjects.length === 0) return null;
+
+  // Find oldest pending bet from this capper that matches any subject
+  const pendingBets = db.prepare(
+    "SELECT * FROM bets WHERE capper_id = ? AND result = 'pending' AND review_status = 'confirmed' ORDER BY created_at ASC",
+  ).all(capperId);
+
+  if (pendingBets.length === 0) return null;
+
+  const result = outcome === 'win' ? 'win' : outcome === 'loss' ? 'loss' : null;
+  if (!result) return null;
+
+  for (const bet of pendingBets) {
+    const desc = (bet.description || '').toLowerCase();
+
+    for (const subject of subjects) {
+      const term = subject.toLowerCase().trim();
+      if (!term || term.length < 3) continue;
+
+      // Fuzzy match: subject words appear in description
+      const words = term.split(/\s+/);
+      const match = words.some(w => w.length >= 3 && desc.includes(w));
+
+      if (match) {
+        const profitUnits = calcProfit(bet.odds || -110, bet.units || 1, result);
+        await gradeBet(bet.id, result, profitUnits, result === 'win' ? 'B' : 'D', `Auto-graded from capper celebration: ${subject}`);
+
+        if (bet.capper_id) {
+          const bankroll = getBankroll(bet.capper_id);
+          if (bankroll) {
+            const dollarAmount = profitUnits * parseFloat(bankroll.unit_size);
+            updateBankroll(bet.capper_id, dollarAmount);
+          }
+          saveDailySnapshot(bet.capper_id);
+        }
+
+        console.log(`[ContextGrade] ${result.toUpperCase()}: "${bet.description?.slice(0, 40)}" matched "${subject}"`);
+
+        // Send War Room notification
+        try {
+          const { sendStagingEmbed } = require('./warRoom');
+          const channelId = process.env.WAR_ROOM_CHANNEL_ID;
+          if (client && channelId) {
+            const { EmbedBuilder } = require('discord.js');
+            const { COLORS } = require('../utils/embeds');
+            const channel = await client.channels.fetch(channelId).catch(() => null);
+            if (channel) {
+              const color = result === 'win' ? COLORS.success : COLORS.danger;
+              const icon = result === 'win' ? '✅' : '❌';
+              const embed = new EmbedBuilder()
+                .setTitle(`${icon} Auto-Graded ${result.toUpperCase()}`)
+                .setColor(color)
+                .setDescription(`**${bet.description}**`)
+                .addFields(
+                  { name: 'Capper', value: bet.capper_name || 'Unknown', inline: true },
+                  { name: 'P/L', value: `${profitUnits >= 0 ? '+' : ''}${profitUnits.toFixed(2)}u`, inline: true },
+                  { name: 'Source', value: `Celebration matched: "${subject}"`, inline: false },
+                )
+                .setTimestamp();
+              await channel.send({ embeds: [embed] });
+            }
+          }
+        } catch (err) {
+          console.log(`[ContextGrade] War Room notification error: ${err.message}`);
+        }
+
+        return { bet, result, profitUnits };
+      }
+    }
+  }
+
+  return null; // No matching bet found
 }
 
 module.exports = {
   runAutoGrade,
+  gradeFromCelebration,
   calcProfit,
   fetchScores,
   determineResult,

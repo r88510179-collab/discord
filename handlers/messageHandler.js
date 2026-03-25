@@ -4,6 +4,7 @@ const { betEmbed } = require('../utils/embeds');
 const { postPickTracked } = require('../services/dashboard');
 const { sendStagingEmbed } = require('../services/warRoom');
 const { extractTextFromImage } = require('../services/ocr');
+const { gradeFromCelebration } = require('../services/grading');
 
 // ── Dedup guard: prevent double-processing of the same Discord message ──
 const processedMessages = new Set();
@@ -361,6 +362,17 @@ async function handleAutoGrade(message, fullText) {
 
   const parsed = await parseBetText(cleanText);
   if (parsed.type === 'result' && parsed.outcome && parsed.subject?.length > 0) {
+    // Try capper-specific matching first (more accurate)
+    const capperInfo = resolveCapper(message);
+    const capper = await getOrCreateCapper(capperInfo.discordId, capperInfo.name, capperInfo.avatar);
+    const contextResult = await gradeFromCelebration(message.client, capper.id, parsed.outcome, parsed.subject);
+
+    if (contextResult) {
+      console.log(`[ContextGrade] Successfully graded bet from capper ${capperInfo.name}`);
+      return;
+    }
+
+    // Fallback: global search across all cappers
     await autoGradeBet(message.client, parsed.outcome, parsed.subject);
   } else {
     console.log(`[AutoGrade] AI could not extract result from celebration text.`);
