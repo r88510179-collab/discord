@@ -389,6 +389,12 @@ async function handleMessage(message, { isUpdate = false } = {}) {
   processedMessages.add(dedupKey);
   setTimeout(() => processedMessages.delete(dedupKey), 10_000);
 
+  // ═══ GUARD 0: Strict Channel Lock — bot is deaf outside allowed channels ═══
+  const slipFeedId = process.env.SLIP_FEED_CHANNEL_ID;
+  const allowedChannels = getPicksChannels();
+  if (slipFeedId) allowedChannels.push(slipFeedId);
+  if (!allowedChannels.includes(message.channel.id)) return;
+
   // ═══ GUARD 1: Never process our own messages (prevents infinite loop) ═══
   if (message.author.id === message.client.user.id) return;
 

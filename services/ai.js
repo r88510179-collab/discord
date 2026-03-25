@@ -6,13 +6,6 @@
 const { normalizeDescription, normalizePlayer } = require('./normalization');
 
 const PROVIDERS = {
-  groq: {
-    url: 'https://api.groq.com/openai/v1/chat/completions',
-    model: 'llama3-70b-8192',
-    keyEnv: 'GROQ_API_KEY',
-    format: 'openai',
-    supportsImages: false,
-  },
   gemini: {
     url: 'https://generativelanguage.googleapis.com/v1beta/models',
     model: 'gemini-2.5-flash-lite',
@@ -20,17 +13,25 @@ const PROVIDERS = {
     format: 'gemini',
     supportsImages: true,
   },
+  openrouter: {
+    url: 'https://openrouter.ai/api/v1/chat/completions',
+    model: 'meta-llama/llama-3.3-70b-instruct:free',
+    visionModel: 'openai/gpt-4o-mini',
+    keyEnv: 'OPENROUTER_API_KEY',
+    format: 'openai',
+    supportsImages: true,
+  },
+  groq: {
+    url: 'https://api.groq.com/openai/v1/chat/completions',
+    model: 'llama3-70b-8192',
+    keyEnv: 'GROQ_API_KEY',
+    format: 'openai',
+    supportsImages: false,
+  },
   mistral: {
     url: 'https://api.mistral.ai/v1/chat/completions',
     model: 'mistral-small-latest',
     keyEnv: 'MISTRAL_API_KEY',
-    format: 'openai',
-    supportsImages: false,
-  },
-  openrouter: {
-    url: 'https://openrouter.ai/api/v1/chat/completions',
-    model: 'meta-llama/llama-3.3-70b-instruct:free',
-    keyEnv: 'OPENROUTER_API_KEY',
     format: 'openai',
     supportsImages: false,
   },
@@ -58,8 +59,25 @@ async function waitSlot(provider) {
 }
 
 // ── OpenAI-format call (Groq, Mistral, OpenRouter) ──────────
-async function callOpenAI(provider, prompt, system) {
+// Supports multimodal for OpenRouter when imageBase64 + visionModel are available
+async function callOpenAI(provider, prompt, system, imageBase64, mediaType) {
   await waitSlot(provider.name);
+
+  // Build user content: multimodal array for vision, plain string for text-only
+  let userContent;
+  const useVision = imageBase64 && provider.supportsImages && provider.visionModel;
+  const model = useVision ? provider.visionModel : provider.model;
+
+  if (useVision) {
+    userContent = [
+      { type: 'image_url', image_url: { url: `data:${mediaType || 'image/png'};base64,${imageBase64}` } },
+      { type: 'text', text: prompt },
+    ];
+    console.log(`[${provider.name}] Using vision model: ${model}`);
+  } else {
+    userContent = prompt;
+  }
+
   const res = await fetch(provider.url, {
     method: 'POST',
     headers: {
@@ -67,10 +85,10 @@ async function callOpenAI(provider, prompt, system) {
       'Authorization': `Bearer ${provider.key}`,
     },
     body: JSON.stringify({
-      model: provider.model,
+      model,
       messages: [
         ...(system ? [{ role: 'system', content: system }] : []),
-        { role: 'user', content: prompt },
+        { role: 'user', content: userContent },
       ],
       temperature: 0.2,
       max_tokens: 1024,
@@ -111,24 +129,38 @@ async function callGemini(provider, prompt, system, imageBase64, mediaType) {
 }
 
 // ── Universal call — tries providers in order ───────────────
+// Vision-aware: tries image-capable providers first, then falls back to text-only
 async function callLLM(prompt, system, imageBase64, mediaType) {
-  const needsImages = !!imageBase64;
-  const providers = getProviders(needsImages);
-  if (providers.length === 0) {
+  const hasImage = !!imageBase64;
+
+  // Get ALL providers (not just image-capable ones) so we can fall back to text-only
+  const allProviders = getProviders(false);
+  if (allProviders.length === 0) {
     console.error('[AI] No providers configured!');
     return null;
   }
 
-  for (const provider of providers) {
+  // Sort: image-capable providers first when we have an image
+  const sorted = hasImage
+    ? [...allProviders].sort((a, b) => (b.supportsImages ? 1 : 0) - (a.supportsImages ? 1 : 0))
+    : allProviders;
+
+  for (const provider of sorted) {
     try {
       let result;
+      // Determine if this provider can handle the image
+      const canDoImage = hasImage && provider.supportsImages;
+
       if (provider.format === 'gemini') {
-        result = await callGemini(provider, prompt, system, imageBase64, mediaType);
+        result = await callGemini(provider, prompt, system, canDoImage ? imageBase64 : null, mediaType);
       } else {
-        result = await callOpenAI(provider, prompt, system);
+        // OpenRouter gets image if it has a visionModel; Groq/Mistral get text-only
+        result = await callOpenAI(provider, prompt, system, canDoImage ? imageBase64 : null, mediaType);
       }
+
       if (result) {
-        console.log(`[AI] Used ${provider.name}`);
+        const mode = canDoImage ? 'vision' : 'text-only';
+        console.log(`[AI] Used ${provider.name} (${mode})`);
         return result;
       }
     } catch (err) {
