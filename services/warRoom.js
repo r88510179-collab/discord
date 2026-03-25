@@ -119,7 +119,8 @@ async function sendStagingEmbed(client, bet, capperName, sourceUrl) {
   embed.addFields({ name: 'Bet ID', value: `\`${bet.id}\``, inline: false })
     .setTimestamp();
 
-  const actionButtons = [
+  // Row 1: Admin actions
+  const adminButtons = [
     new ButtonBuilder()
       .setCustomId(`war_approve:${bet.id}`)
       .setLabel('Approve')
@@ -134,19 +135,36 @@ async function sendStagingEmbed(client, bet, capperName, sourceUrl) {
       .setStyle(ButtonStyle.Danger),
   ];
 
-  // Add source link button if we have the original message URL
-  if (sourceUrl) {
-    actionButtons.push(
+  // Construct source URL fallback from bet metadata if not provided
+  const resolvedUrl = sourceUrl
+    || (bet.source_channel_id && bet.source_message_id
+      ? `https://discord.com/channels/${process.env.DISCORD_GUILD_ID || '_'}/${bet.source_channel_id}/${bet.source_message_id}`
+      : null);
+
+  if (resolvedUrl && resolvedUrl.startsWith('https://')) {
+    adminButtons.push(
       new ButtonBuilder()
         .setLabel('View Original')
         .setStyle(ButtonStyle.Link)
-        .setURL(sourceUrl),
+        .setURL(resolvedUrl),
     );
   }
 
-  const row = new ActionRowBuilder().addComponents(actionButtons);
+  const adminRow = new ActionRowBuilder().addComponents(adminButtons);
 
-  await channel.send({ embeds: [embed], components: [row] });
+  // Row 2: Tail / Fade sentiment buttons
+  const sentimentRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`war_tail:${bet.id}`)
+      .setLabel('Tail')
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`war_fade:${bet.id}`)
+      .setLabel('Fade')
+      .setStyle(ButtonStyle.Danger),
+  );
+
+  await channel.send({ embeds: [embed], components: [adminRow, sentimentRow] });
 }
 
 /**
@@ -225,6 +243,17 @@ async function handleWarRoomInteraction(interaction) {
 
       await interaction.reply({ content: '❌ Slip rejected and removed from queue.', ephemeral: true });
       await interaction.message.delete().catch(() => {});
+      return true;
+    }
+
+    // Tail / Fade sentiment (placeholder — DB logic coming later)
+    if (action === 'war_tail') {
+      await interaction.reply({ content: `🔥 You're tailing bet \`${betId.slice(0, 8)}\`. (Tracking coming soon!)`, ephemeral: true });
+      return true;
+    }
+
+    if (action === 'war_fade') {
+      await interaction.reply({ content: `🧊 You're fading bet \`${betId.slice(0, 8)}\`. (Tracking coming soon!)`, ephemeral: true });
       return true;
     }
 
