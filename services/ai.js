@@ -383,7 +383,7 @@ async function parseBetText(text, imageUrl) {
   }
 
   const sys = `You are a STRICT sports betting parser. Return ONLY valid JSON.
-${imageBase64 ? '\nIMPORTANT: An image of a betting slip has been attached. You MUST read the image directly to extract exact player names, props, lines, and odds. Combine the image data with any tweet text provided to build a perfectly accurate, bulleted parlay list. The image is the primary source of truth — the text is supplementary context.' : ''}
+${imageBase64 ? '\nVISION MODE ACTIVE: A betting slip image has been attached. You MUST read the attached image to extract the exact player names, props, and lines. Combine this with the tweet text to build a perfectly accurate, bulleted list for multi-leg bets. The image is the PRIMARY source of truth — the text is supplementary context. If the image and text conflict, trust the image.' : ''}
 
 RESPONSE TYPE 1 — New Bet:
 If the text contains a clear actionable bet (team/player + line/odds + prediction):
@@ -405,7 +405,7 @@ If the text is sports news, commentary, game recaps, opinions, retweets, fan rep
 
 STRICT RULES:
 - CRITICAL: If the text contains ANY actionable betting lines, spreads, odds, or totals (e.g., "Lakers -2", "Dodgers -140", "O229.5", "+150"), you MUST classify it as type "bet" and extract ALL the picks. Do NOT classify it as "ignore" or "result" just because the capper is also complaining about previous losses, venting, or adding commentary in the same message. The presence of betting lines ALWAYS overrides recap/complaining text.
-- ANTI-PROMO / ANTI-SPAM: If the text is promoting a tool, software, VIP group, Discord server, algorithm, "AI agent", "private beta", "link in bio", subscription service, or discussing general betting strategy without a specific actionable pick, you MUST return {"type":"ignore"}. Words like "EV props" or "sharp lines" alone do NOT make it a bet.
+- ANTI-PROMO / ANTI-SPAM: If the text OR image contains marketing, promotional, or spam content — including but not limited to: "1 MONTH VIP", "RT & REPLY", "Discount", "Promo", "FREE PICK", "Join VIP", "Giveaway", "Link in bio", "Use code", "Subscribe", "Follow for picks", promoting a tool, software, VIP group, Discord server, algorithm, "AI agent", "private beta", subscription service, or discussing general betting strategy without a specific actionable pick — you MUST return {"type":"ignore"}. Do NOT hallucinate bets from promotional graphics. Words like "EV props" or "sharp lines" alone do NOT make it a bet.
 - STRICT ENTITY REQUIREMENT: Do NOT hallucinate odds or units. To classify as a bet, there MUST be a clear, specific team name, player name, or betting line being backed. If you cannot confidently identify WHO or WHAT is being bet on, you MUST return {"type":"ignore"}.
 - If the text is a retweet (starts with "RT" or contains "Retweeted @"), a reply to a fan, or a capper celebrating someone else's win, return type "ignore".
 - If you see "[Quoted]" or "Quoted @", you MUST ignore the quoted text entirely. Only evaluate the capper's original text above it.
