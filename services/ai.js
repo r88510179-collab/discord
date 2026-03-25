@@ -24,16 +24,18 @@ const PROVIDERS = {
   groq: {
     url: 'https://api.groq.com/openai/v1/chat/completions',
     model: 'llama3-70b-8192',
+    visionModel: 'llama-3.2-90b-vision-preview',
     keyEnv: 'GROQ_API_KEY',
     format: 'openai',
-    supportsImages: false,
+    supportsImages: true,
   },
   mistral: {
     url: 'https://api.mistral.ai/v1/chat/completions',
     model: 'mistral-small-latest',
+    visionModel: 'pixtral-large-latest',
     keyEnv: 'MISTRAL_API_KEY',
     format: 'openai',
-    supportsImages: false,
+    supportsImages: true,
   },
 };
 
