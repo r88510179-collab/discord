@@ -20,8 +20,9 @@ const { COLORS } = require('../utils/embeds');
  * @param {import('discord.js').Client} client
  * @param {object} bet — saved bet row from DB
  * @param {string} capperName
+ * @param {string} [sourceUrl] — direct Discord message URL for source tracking
  */
-async function sendStagingEmbed(client, bet, capperName) {
+async function sendStagingEmbed(client, bet, capperName, sourceUrl) {
   const channelId = process.env.WAR_ROOM_CHANNEL_ID || process.env.ADMIN_LOG_CHANNEL_ID;
   if (!channelId) {
     console.log('[WarRoom] WAR_ROOM_CHANNEL_ID not set — skipping staging embed.');
@@ -118,7 +119,7 @@ async function sendStagingEmbed(client, bet, capperName) {
   embed.addFields({ name: 'Bet ID', value: `\`${bet.id}\``, inline: false })
     .setTimestamp();
 
-  const row = new ActionRowBuilder().addComponents(
+  const actionButtons = [
     new ButtonBuilder()
       .setCustomId(`war_approve:${bet.id}`)
       .setLabel('Approve')
@@ -131,7 +132,19 @@ async function sendStagingEmbed(client, bet, capperName) {
       .setCustomId(`war_reject:${bet.id}`)
       .setLabel('Reject')
       .setStyle(ButtonStyle.Danger),
-  );
+  ];
+
+  // Add source link button if we have the original message URL
+  if (sourceUrl) {
+    actionButtons.push(
+      new ButtonBuilder()
+        .setLabel('View Original')
+        .setStyle(ButtonStyle.Link)
+        .setURL(sourceUrl),
+    );
+  }
+
+  const row = new ActionRowBuilder().addComponents(actionButtons);
 
   await channel.send({ embeds: [embed], components: [row] });
 }

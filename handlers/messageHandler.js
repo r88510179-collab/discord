@@ -262,7 +262,7 @@ async function processSlipImage(client, imageUrl, capperId, capperName, opts = {
 
     if (!record?._deduped) {
       saved.push(record);
-      await sendStagingEmbed(client, record, capperName);
+      await sendStagingEmbed(client, record, capperName, message.url);
     }
   }
 
@@ -550,7 +550,7 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
         content: `🔒 **${reviewBets.length}** bet(s) saved for review. IDs: ${reviewBets.map(b => `\`${b.id.slice(0, 8)}\``).join(', ')}`,
       });
       for (const bet of reviewBets) {
-        await sendStagingEmbed(message.client, bet, capperInfo.name);
+        await sendStagingEmbed(message.client, bet, capperInfo.name, message.url);
       }
     }
   } catch (err) {
