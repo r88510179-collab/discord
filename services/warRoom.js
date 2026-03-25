@@ -8,7 +8,7 @@ const {
   EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
   ModalBuilder, TextInputBuilder, TextInputStyle,
 } = require('discord.js');
-const { approveBet, rejectBet, updateBetFields, getBetLegs, getCapperStats, getBankroll, db, createBet, updateBankroll } = require('./database');
+const { approveBet, rejectBet, updateBetFields, getBetLegs, getCapperStats, getBankroll, db, createBet, updateBankroll, upsertUserBet } = require('./database');
 const { postPickTracked } = require('./dashboard');
 const { shopLine, formatLineShop, extractTeamFromDescription } = require('./odds');
 const { calculateOptimalBet } = require('./bankroll');
@@ -187,15 +187,52 @@ async function handleWarRoomInteraction(interaction) {
 
       // Update the staging embed to show approved
       const approvedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
-        .setTitle('✅ Bet Approved')
+        .setTitle('Bet Approved')
         .setColor(COLORS.success);
       await interaction.update({ embeds: [approvedEmbed], components: [] });
 
-      // Forward to public dashboard
+      // Forward to private dashboard
       await postPickTracked(
         interaction.client, bet, bet.capper_name || 'Unknown',
         'war-room', 'discord',
       );
+
+      // Post to Public Community Feed with Tail/Fade buttons only
+      const publicChannelId = process.env.PUBLIC_CHANNEL_ID || process.env.DASHBOARD_CHANNEL_ID;
+      if (publicChannelId) {
+        try {
+          const pubChannel = await interaction.client.channels.fetch(publicChannelId).catch(() => null);
+          if (pubChannel) {
+            const pubEmbed = new EmbedBuilder()
+              .setTitle('New Pick')
+              .setColor(COLORS.primary)
+              .addFields(
+                { name: 'Capper', value: bet.capper_name || 'Unknown', inline: true },
+                { name: 'Sport', value: bet.sport || 'Unknown', inline: true },
+                { name: 'Type', value: (bet.bet_type || 'straight').toUpperCase(), inline: true },
+                { name: 'Description', value: bet.description || 'N/A' },
+                { name: 'Odds', value: String(bet.odds ?? 'N/A'), inline: true },
+              )
+              .setTimestamp();
+
+            const pubRow = new ActionRowBuilder().addComponents(
+              new ButtonBuilder()
+                .setCustomId(`war_tail:${bet.id}`)
+                .setLabel('Tail')
+                .setStyle(ButtonStyle.Success),
+              new ButtonBuilder()
+                .setCustomId(`war_fade:${bet.id}`)
+                .setLabel('Fade')
+                .setStyle(ButtonStyle.Danger),
+            );
+
+            await pubChannel.send({ embeds: [pubEmbed], components: [pubRow] });
+          }
+        } catch (err) {
+          console.log(`[WarRoom] Public feed error: ${err.message}`);
+        }
+      }
+
       return true;
     }
 
@@ -246,14 +283,16 @@ async function handleWarRoomInteraction(interaction) {
       return true;
     }
 
-    // Tail / Fade sentiment (placeholder — DB logic coming later)
+    // Tail / Fade — save to user_bets table
     if (action === 'war_tail') {
-      await interaction.reply({ content: `🔥 You're tailing bet \`${betId.slice(0, 8)}\`. (Tracking coming soon!)`, ephemeral: true });
+      upsertUserBet(interaction.user.id, betId, 'tail');
+      await interaction.reply({ content: `🔥 Tailing! Use \`/mybets\` to view your active slips.`, ephemeral: true });
       return true;
     }
 
     if (action === 'war_fade') {
-      await interaction.reply({ content: `🧊 You're fading bet \`${betId.slice(0, 8)}\`. (Tracking coming soon!)`, ephemeral: true });
+      upsertUserBet(interaction.user.id, betId, 'fade');
+      await interaction.reply({ content: `🧊 Fading! Use \`/mybets\` to view your active slips.`, ephemeral: true });
       return true;
     }
 

@@ -486,6 +486,24 @@ function getCapperAnalytics(capperId) {
 }
 
 // ── Export everything (same interface as old supabase.js) ────
+// ── User Bets (Tail/Fade tracking) ───────────────────────────
+function upsertUserBet(userId, betId, action) {
+  db.prepare('INSERT OR REPLACE INTO user_bets (user_id, bet_id, action) VALUES (?, ?, ?)').run(userId, betId, action);
+}
+
+function getUserBets(userId) {
+  return db.prepare(`
+    SELECT ub.*, b.description, b.sport, b.odds, b.units, b.result, b.profit_units,
+           c.display_name AS capper_name
+    FROM user_bets ub
+    JOIN bets b ON ub.bet_id = b.id
+    LEFT JOIN cappers c ON b.capper_id = c.id
+    WHERE ub.user_id = ?
+    ORDER BY ub.created_at DESC
+    LIMIT 25
+  `).all(userId);
+}
+
 module.exports = {
   db,
   getOrCreateCapper,
@@ -526,4 +544,6 @@ module.exports = {
   findPendingBetBySubject,
   findCapperByName,
   getCapperAnalytics,
+  upsertUserBet,
+  getUserBets,
 };

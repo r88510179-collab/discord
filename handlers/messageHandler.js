@@ -521,6 +521,7 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
             wager: bet.wager || null, payout: bet.payout || null,
             event_date: bet.event_date,
             source: imageUrl ? 'vision_slip' : source,
+            source_url: message.url || null,
             source_channel_id: message.channel.id,
             source_message_id: message.id,
             raw_text: cleanText.slice(0, 500),
