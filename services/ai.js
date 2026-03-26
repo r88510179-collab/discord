@@ -8,9 +8,17 @@ const { normalizeDescription, normalizePlayer } = require('./normalization');
 const PROVIDERS = {
   gemini: {
     url: 'https://generativelanguage.googleapis.com/v1beta/models',
-    model: 'gemini-2.5-flash-lite',
+    model: 'gemini-2.0-flash',
     keyEnv: 'GEMINI_API_KEY',
     format: 'gemini',
+    supportsImages: true,
+  },
+  groq: {
+    url: 'https://api.groq.com/openai/v1/chat/completions',
+    model: 'llama-3.3-70b-versatile',
+    visionModel: 'llama-3.2-90b-vision-preview',
+    keyEnv: 'GROQ_API_KEY',
+    format: 'openai',
     supportsImages: true,
   },
   openrouter: {
@@ -21,18 +29,10 @@ const PROVIDERS = {
     format: 'openai',
     supportsImages: true,
   },
-  groq: {
-    url: 'https://api.groq.com/openai/v1/chat/completions',
-    model: 'llama3-70b-8192',
-    visionModel: 'meta-llama/llama-4-scout-17b-16e-instruct',
-    keyEnv: 'GROQ_API_KEY',
-    format: 'openai',
-    supportsImages: true,
-  },
   mistral: {
     url: 'https://api.mistral.ai/v1/chat/completions',
     model: 'mistral-small-latest',
-    visionModel: 'mistral-large-latest',
+    visionModel: 'pixtral-12b-2409',
     keyEnv: 'MISTRAL_API_KEY',
     format: 'openai',
     supportsImages: true,
@@ -161,22 +161,24 @@ async function callLLM(prompt, system, imageBase64, mediaType) {
     ? [...allProviders].sort((a, b) => (b.supportsImages ? 1 : 0) - (a.supportsImages ? 1 : 0))
     : allProviders;
 
-  for (const provider of sorted) {
+  for (let i = 0; i < sorted.length; i++) {
+    const provider = sorted[i];
     try {
-      let result;
       // Determine if this provider can handle the image
       const canDoImage = hasImage && provider.supportsImages;
+      const targetModel = canDoImage && provider.visionModel ? provider.visionModel : provider.model;
+      console.log(`[AI] Trying ${provider.name} (${i + 1}/${sorted.length}) model=${targetModel} hasImage=${hasImage} canDoImage=${canDoImage}`);
 
+      let result;
       if (provider.format === 'gemini') {
         result = await callGemini(provider, prompt, system, canDoImage ? imageBase64 : null, mediaType);
       } else {
-        // OpenRouter gets image if it has a visionModel; Groq/Mistral get text-only
         result = await callOpenAI(provider, prompt, system, canDoImage ? imageBase64 : null, mediaType);
       }
 
       if (result) {
         const mode = canDoImage ? 'vision' : 'text-only';
-        console.log(`[AI] Used ${provider.name} (${mode})`);
+        console.log(`[AI] Success: ${provider.name} (${mode})`);
         return result;
       }
     } catch (err) {
