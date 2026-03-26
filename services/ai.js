@@ -149,6 +149,27 @@ async function callGemini(provider, prompt, system, imageBase64, mediaType) {
 
 // ── Universal call — tries providers in order ───────────────
 // Vision-aware: tries image-capable providers first, then falls back to text-only
+/**
+ * withRetry — wraps an async fn with exponential backoff for transient errors.
+ */
+async function withRetry(fn, label, retries = 2) {
+  for (let i = 0; i <= retries; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const status = err.status || err.response?.status;
+      const isTransient = err.code === 'ETIMEDOUT' || status === 408 || status === 429;
+      if (isTransient && i < retries) {
+        const delay = Math.pow(2, i) * 1000;
+        console.log(`[RETRY] ${label} attempt ${i + 1} failed (${status || err.code}). Retrying in ${delay}ms...`);
+        await new Promise(res => setTimeout(res, delay));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 async function callLLM(prompt, system, imageBase64, mediaType) {
   const hasImage = !!imageBase64;
 
@@ -172,12 +193,12 @@ async function callLLM(prompt, system, imageBase64, mediaType) {
       const targetModel = canDoImage && provider.visionModel ? provider.visionModel : provider.model;
       console.log(`[AI] Trying ${provider.name} (${i + 1}/${sorted.length}) model=${targetModel} hasImage=${hasImage} canDoImage=${canDoImage}`);
 
-      let result;
-      if (provider.format === 'gemini') {
-        result = await callGemini(provider, prompt, system, canDoImage ? imageBase64 : null, mediaType);
-      } else {
-        result = await callOpenAI(provider, prompt, system, canDoImage ? imageBase64 : null, mediaType);
-      }
+      const result = await withRetry(async () => {
+        if (provider.format === 'gemini') {
+          return await callGemini(provider, prompt, system, canDoImage ? imageBase64 : null, mediaType);
+        }
+        return await callOpenAI(provider, prompt, system, canDoImage ? imageBase64 : null, mediaType);
+      }, provider.name);
 
       if (result) {
         const mode = canDoImage ? 'vision' : 'text-only';
