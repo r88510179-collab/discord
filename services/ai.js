@@ -5,34 +5,36 @@
 
 const { normalizeDescription, normalizePlayer } = require('./normalization');
 
+// Models are read from env vars so they can be hot-swapped via `fly secrets set`
+// without redeploying. Falls back to sensible defaults.
 const PROVIDERS = {
   gemini: {
     url: 'https://generativelanguage.googleapis.com/v1beta/models',
-    model: 'gemini-2.0-flash',
+    get model() { return process.env.GEMINI_MODEL || 'gemini-2.0-flash'; },
     keyEnv: 'GEMINI_API_KEY',
     format: 'gemini',
     supportsImages: true,
   },
   groq: {
     url: 'https://api.groq.com/openai/v1/chat/completions',
-    model: 'llama-3.3-70b-versatile',
-    visionModel: 'llama-3.2-90b-vision-preview',
+    get model() { return process.env.GROQ_TEXT_MODEL || 'llama-3.3-70b-versatile'; },
+    get visionModel() { return process.env.GROQ_MODEL || 'llama-3.2-90b-vision-preview'; },
     keyEnv: 'GROQ_API_KEY',
     format: 'openai',
     supportsImages: true,
   },
   openrouter: {
     url: 'https://openrouter.ai/api/v1/chat/completions',
-    model: 'meta-llama/llama-3.3-70b-instruct:free',
-    visionModel: 'google/gemini-2.0-flash:free',
+    get model() { return process.env.OPENROUTER_TEXT_MODEL || 'meta-llama/llama-3.3-70b-instruct:free'; },
+    get visionModel() { return process.env.OPENROUTER_MODEL || 'google/gemini-2.0-flash-001'; },
     keyEnv: 'OPENROUTER_API_KEY',
     format: 'openai',
     supportsImages: true,
   },
   mistral: {
     url: 'https://api.mistral.ai/v1/chat/completions',
-    model: 'mistral-small-latest',
-    visionModel: 'pixtral-12b-2409',
+    get model() { return process.env.MISTRAL_TEXT_MODEL || 'mistral-small-latest'; },
+    get visionModel() { return process.env.MISTRAL_MODEL || 'pixtral-12b-2409'; },
     keyEnv: 'MISTRAL_API_KEY',
     format: 'openai',
     supportsImages: true,
@@ -137,7 +139,8 @@ async function callGemini(provider, prompt, system, imageBase64, mediaType) {
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    console.error(`[gemini] ${res.status}: ${(await res.text()).substring(0, 100)}`);
+    const errText = (await res.text()).substring(0, 200);
+    console.error(`[gemini] HTTP ${res.status} (model: ${provider.model}): ${errText}`);
     return null;
   }
   const data = await res.json();
