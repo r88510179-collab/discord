@@ -273,12 +273,14 @@ async function handleWarRoomInteraction(interaction) {
     }
 
     if (action === 'war_reject') {
-      const deleted = rejectBet(betId);
-      if (!deleted) {
-        return interaction.reply({ content: 'Bet not found or already processed.', ephemeral: true });
+      // Force Cleanup — always clear the embed even if bet is already gone
+      try {
+        rejectBet(betId);
+      } catch (e) {
+        console.warn(`[WarRoom] Bet ${betId} not found in DB, but proceeding with cleanup.`);
       }
 
-      await interaction.reply({ content: '❌ Slip rejected and removed from queue.', ephemeral: true });
+      await interaction.reply({ content: '❌ Slip rejected and cleared.', ephemeral: true });
       await interaction.message.delete().catch(() => {});
       return true;
     }
