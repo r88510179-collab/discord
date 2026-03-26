@@ -9,6 +9,10 @@ const { gradeFromCelebration } = require('../services/grading');
 // ── Dedup guard: prevent double-processing of the same Discord message ──
 const processedMessages = new Set();
 
+// ── Strict Mode alert cooldowns: prevent spamming admin_log ──
+const alertCooldowns = new Map();
+const COOLDOWN_DURATION = 5 * 60 * 1000; // 5 minutes
+
 // ── Message Aggregation Buffer ──────────────────────────────────
 // TweetShift sends text + image as separate messages a split-second apart.
 // We buffer messages by user+channel for 4 seconds, then process as one.
@@ -479,13 +483,17 @@ async function handleMessage(message, { isUpdate = false } = {}) {
   // ═══ GUARD 0: Global Pipeline Guard — single source of truth ═══
   const { authorized, context } = globalPipelineGuard(message);
   if (!authorized) {
-    // Strict Mode: alert admin of unauthorized triggers
+    // Strict Mode: alert admin (rate-limited per channel to prevent spam)
     if (process.env.STRICT_MODE === 'true' && process.env.ADMIN_LOG_CHANNEL_ID) {
-      const adminCh = message.client.channels.cache.get(process.env.ADMIN_LOG_CHANNEL_ID);
-      if (adminCh) {
-        adminCh.send(
-          `⚠️ **Unauthorized Pipeline Trigger**\n**Channel:** #${context.channelName} (\`${context.channelId}\`)\n**User:** ${context.author}\n*Action: Message discarded before AI/OCR.*`
-        ).catch(() => {});
+      const lastAlert = alertCooldowns.get(context.channelId) || 0;
+      if (Date.now() - lastAlert > COOLDOWN_DURATION) {
+        alertCooldowns.set(context.channelId, Date.now());
+        const adminCh = message.client.channels.cache.get(process.env.ADMIN_LOG_CHANNEL_ID);
+        if (adminCh) {
+          adminCh.send(
+            `⚠️ **Unauthorized Pipeline Trigger**\n**Channel:** #${context.channelName} (\`${context.channelId}\`)\n**User:** ${context.author}\n*Action: Message discarded before AI/OCR.*`
+          ).catch(() => {});
+        }
       }
     }
     return; // HARD STOP
