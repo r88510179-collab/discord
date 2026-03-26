@@ -666,6 +666,21 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
     }
   } catch (err) {
     console.error('[MessageHandler] Error:', err.message);
+    await reportErrorToAdmin(err, context, message.client);
+  }
+}
+
+async function reportErrorToAdmin(error, context, client) {
+  if (!client || !process.env.ADMIN_LOG_CHANNEL_ID) return;
+  try {
+    const adminChannel = client.channels.cache.get(process.env.ADMIN_LOG_CHANNEL_ID);
+    if (!adminChannel) return;
+
+    await adminChannel.send(
+      `❌ **Pipeline Error Detected**\n**Channel:** #${context?.channelName || 'unknown'} (\`${context?.channelId || '?'}\`)\n**User:** ${context?.author || 'unknown'}\n**Error Type:** \`${error.name || 'Unknown'}\`\n**Details:** \`${(error.message || '').substring(0, 500)}\`\n*Action: Processing halted for this message.*`
+    );
+  } catch (e) {
+    console.error('[AdminLog] Failed to report error:', e.message);
   }
 }
 
