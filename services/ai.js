@@ -42,10 +42,16 @@ const PROVIDERS = {
 // Get available providers (ones that have API keys set)
 function getProviders(needsImages = false) {
   return Object.entries(PROVIDERS)
-    .filter(([_, p]) => {
+    .filter(([name, p]) => {
       const key = process.env[p.keyEnv];
-      if (!key) return false;
-      if (needsImages && !p.supportsImages) return false;
+      if (!key) {
+        console.log(`[${name}] Skipped: Missing API Key (${p.keyEnv})`);
+        return false;
+      }
+      if (needsImages && !p.supportsImages) {
+        console.log(`[${name}] Skipped: Does not support images`);
+        return false;
+      }
       return true;
     })
     .map(([name, p]) => ({ name, ...p, key: process.env[p.keyEnv] }));
@@ -71,13 +77,29 @@ async function callOpenAI(provider, prompt, system, imageBase64, mediaType) {
   const model = useVision ? provider.visionModel : provider.model;
 
   if (useVision) {
+    // OpenAI-compatible vision format (works for Groq, Mistral, OpenRouter)
     userContent = [
       { type: 'image_url', image_url: { url: `data:${mediaType || 'image/png'};base64,${imageBase64}` } },
       { type: 'text', text: prompt },
     ];
-    console.log(`[${provider.name}] Using vision model: ${model}`);
+    console.log(`[${provider.name}] Using vision model: ${model} (image: ${(imageBase64.length / 1024).toFixed(0)}KB b64)`);
   } else {
     userContent = prompt;
+  }
+
+  // Some vision models (OpenRouter free, Groq Llama 4) don't support response_format
+  // Only include it for text-only calls to avoid 400 errors
+  const bodyPayload = {
+    model,
+    messages: [
+      ...(system ? [{ role: 'system', content: system + '\nYou MUST respond with valid JSON only.' }] : []),
+      { role: 'user', content: userContent },
+    ],
+    temperature: 0.2,
+    max_tokens: 1024,
+  };
+  if (!useVision) {
+    bodyPayload.response_format = { type: 'json_object' };
   }
 
   const res = await fetch(provider.url, {
@@ -86,19 +108,11 @@ async function callOpenAI(provider, prompt, system, imageBase64, mediaType) {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${provider.key}`,
     },
-    body: JSON.stringify({
-      model,
-      messages: [
-        ...(system ? [{ role: 'system', content: system }] : []),
-        { role: 'user', content: userContent },
-      ],
-      temperature: 0.2,
-      max_tokens: 1024,
-      response_format: { type: 'json_object' },
-    }),
+    body: JSON.stringify(bodyPayload),
   });
   if (!res.ok) {
-    console.error(`[${provider.name}] ${res.status}: ${(await res.text()).substring(0, 100)}`);
+    const errBody = (await res.text()).substring(0, 200);
+    console.error(`[${provider.name}] HTTP ${res.status} (model: ${model}): ${errBody}`);
     return null;
   }
   const data = await res.json();
@@ -166,10 +180,11 @@ async function callLLM(prompt, system, imageBase64, mediaType) {
         return result;
       }
     } catch (err) {
-      console.log(`[AI] ${provider.name} failed: ${err.message}, trying next...`);
+      console.error(`[${provider.name}] Error: ${err.message}${err.cause ? ` (cause: ${err.cause})` : ''}`);
+      console.error(`[${provider.name}] Stack: ${err.stack?.split('\n')[1]?.trim() || 'n/a'}`);
     }
   }
-  console.error('[AI] All providers failed');
+  console.error(`[AI] All ${sorted.length} providers failed (hasImage: ${hasImage})`);
   return null;
 }
 
