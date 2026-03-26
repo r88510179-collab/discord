@@ -231,18 +231,40 @@ async function scanImage(imageUrl, mediaType) {
 // Used by both the /slip command and the slip feed channel listener.
 // Returns { bets: [...saved], ocrText } or null on failure.
 async function processSlipImage(client, imageUrl, capperId, capperName, opts = {}) {
-  const { channelId, messageId } = opts;
+  const { channelId, messageId, sourceUrl } = opts;
 
-  // Gemini Vision: pass image directly to AI — no OCR needed
-  console.log(`[SlipPipeline] Sending image to Gemini Vision: ${imageUrl.substring(0, 80)}...`);
-  const parsed = await parseBetText('Read the attached betting slip image and extract all bets, players, lines, and odds.', imageUrl);
+  // ── Stage 1: OCR — extract raw text from image ──
+  let ocrText = '';
+  try {
+    console.log(`[SlipPipeline] Stage 1: OCR extracting text from image...`);
+    ocrText = await extractTextFromImage(imageUrl) || '';
+    console.log(`[SlipPipeline] OCR returned ${ocrText.length} chars: "${ocrText.slice(0, 80)}..."`);
+  } catch (err) {
+    console.log(`[SlipPipeline] OCR failed (${err.message}), falling back to vision-only.`);
+  }
+
+  // ── Stage 2: AI Vision — send image + OCR text to Gemini/fallback ──
+  console.log(`[SlipPipeline] Stage 2: Sending image + OCR text to AI Vision...`);
+  const prompt = ocrText.length > 10
+    ? `Read the attached betting slip image AND the following OCR text to extract all bets:\n\n${ocrText}`
+    : 'Read the attached betting slip image and extract all bets, players, lines, and odds.';
+  const parsed = await parseBetText(prompt, imageUrl);
 
   if (!parsed.bets || parsed.bets.length === 0) {
-    console.log('[SlipPipeline] No bets found in image.');
+    console.log('[SlipPipeline] Stage 2: No bets found in image.');
     return { bets: [] };
   }
 
-  // Save bets + send to War Room
+  console.log(`[SlipPipeline] Stage 2: AI extracted ${parsed.bets.length} bet(s).`);
+
+  // ── Stage 3: Normalize — each bet goes through normalizeBet inside parseBetText ──
+  // normalizeBet runs automatically via normalizeParsedBets() in parseBetText.
+  // Log the normalized output for audit trail.
+  for (const bet of parsed.bets) {
+    console.log(`[SlipPipeline] Stage 3: Normalized → ${bet.sport} | ${bet.bet_type} | "${bet.description?.slice(0, 60)}" | odds:${bet.odds} | units:${bet.units}`);
+  }
+
+  // ── Stage 4: Save to DB + send to War Room ──
   const saved = [];
   for (const bet of parsed.bets) {
     if (isDuplicateBet(capperId, bet.description)) continue;
@@ -256,17 +278,18 @@ async function processSlipImage(client, imageUrl, capperId, capperName, opts = {
       event_date: bet.event_date, source: 'vision_slip',
       source_channel_id: channelId || null,
       source_message_id: messageId || null,
-      raw_text: (bet.description || '').slice(0, 500),
+      source_url: sourceUrl || null,
+      raw_text: (ocrText || bet.description || '').slice(0, 500),
       review_status: 'needs_review',
     }, bet.legs || [], bet.props || []);
 
     if (!record?._deduped) {
       saved.push(record);
-      await sendStagingEmbed(client, record, capperName, message.url);
+      await sendStagingEmbed(client, record, capperName, sourceUrl);
     }
   }
 
-  console.log(`[SlipPipeline] Processed ${saved.length} bet(s) via Gemini Vision.`);
+  console.log(`[SlipPipeline] Stage 4: Saved ${saved.length} bet(s) to DB.`);
   return { bets: saved };
 }
 
@@ -288,6 +311,7 @@ async function handleSlipFeed(message) {
     const result = await processSlipImage(message.client, images[0].url, capper.id, capperInfo.name, {
       channelId: message.channel.id,
       messageId: message.id,
+      sourceUrl: message.url,
     });
 
     if (!result) return true;

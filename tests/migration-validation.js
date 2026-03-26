@@ -28,10 +28,12 @@ function run() {
 
     // Verify schema_migrations table tracks them
     const tracked = db.prepare('SELECT filename FROM schema_migrations ORDER BY filename').all();
-    assert.strictEqual(tracked.length, 3, 'Should track 3 migrations');
+    assert.strictEqual(tracked.length, 5, 'Should track 5 migrations');
     assert.strictEqual(tracked[0].filename, '001_initial_schema.sql');
     assert.strictEqual(tracked[1].filename, '002_add_review_columns.sql');
     assert.strictEqual(tracked[2].filename, '003_add_settings_table.sql');
+    assert.strictEqual(tracked[3].filename, '004_create_props_table.sql');
+    assert.strictEqual(tracked[4].filename, '005_create_user_bets_table.sql');
 
     // Verify tables exist
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map(r => r.name);
@@ -60,11 +62,11 @@ function run() {
     db.pragma('foreign_keys = ON');
 
     const first = runMigrations(db);
-    assert.strictEqual(first.applied.length, 3, 'First run should apply 3');
+    assert.strictEqual(first.applied.length, 5, 'First run should apply 5');
 
     const second = runMigrations(db);
     assert.strictEqual(second.applied.length, 0, 'Second run should apply 0');
-    assert.strictEqual(second.skipped.length, 3, 'Second run should skip 3');
+    assert.strictEqual(second.skipped.length, 5, 'Second run should skip 5');
 
     db.close();
     fs.unlinkSync(dbFile);
