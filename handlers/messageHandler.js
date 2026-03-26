@@ -212,7 +212,44 @@ function getImageAttachments(message) {
     if (embed.image?.url) images.push({ url: embed.image.url, type: 'image/png' });
     if (embed.thumbnail?.url && !embed.image) images.push({ url: embed.thumbnail.url, type: 'image/png' });
   }
+  // Discord Native Forwards: images are in messageSnapshots, not attachments
+  if (message.flags?.has(256) && message.messageSnapshots?.size > 0) {
+    const snapshot = message.messageSnapshots.first();
+    if (snapshot?.attachments) {
+      for (const att of snapshot.attachments.values()) {
+        if (att.contentType?.startsWith('image/')) {
+          images.push({ url: att.url, type: att.contentType });
+          console.log(`[Forward] Found image in forwarded snapshot: ${att.url.slice(0, 60)}...`);
+        }
+      }
+    }
+  }
   return images;
+}
+
+// Safe reply — falls back to channel.send if original message was deleted (FixTwitter/TweetShift)
+async function safeReply(message, payload) {
+  try {
+    await message.reply(payload);
+  } catch (err) {
+    if (err.code === 10008 || (err.message && err.message.includes('Unknown Message'))) {
+      console.log('[Pipeline] Original message deleted (FixTwitter/TweetShift). Sending without reference.');
+      await message.channel.send(payload);
+    } else {
+      throw err;
+    }
+  }
+}
+
+// Safe react — silently fails if message was deleted
+async function safeReact(message, emoji) {
+  try {
+    await message.react(emoji);
+  } catch (err) {
+    if (err.code === 10008 || (err.message && err.message.includes('Unknown Message'))) {
+      console.log(`[Pipeline] Cannot react (message deleted). Skipping ${emoji}.`);
+    }
+  }
 }
 
 async function scanImage(imageUrl, mediaType) {
@@ -563,9 +600,9 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
     }
 
     if (allBets.length > 0) {
-      await message.react('📝');
+      await safeReact(message, '📝');
       const embeds = allBets.map(b => betEmbed(b, capperInfo.name));
-      await message.reply({
+      await safeReply(message, {
         content: `🤖 **${capperInfo.name}** — tracked **${allBets.length}** pick(s):`,
         embeds: embeds.slice(0, 5),
       });
@@ -577,7 +614,7 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
     if (reviewBets.length > 0) {
       const ids = reviewBets.map(b => b.id.slice(0, 8)).join(', ');
       console.log(`[Review] Stored ${reviewBets.length} bet(s) for manual review from ${capperInfo.name} [${ids}]`);
-      await message.reply({
+      await safeReply(message, {
         content: `🔒 **${reviewBets.length}** bet(s) saved for review. IDs: ${reviewBets.map(b => `\`${b.id.slice(0, 8)}\``).join(', ')}`,
       });
       for (const bet of reviewBets) {
