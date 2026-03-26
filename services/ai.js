@@ -16,7 +16,7 @@ const PROVIDERS = {
   openrouter: {
     url: 'https://openrouter.ai/api/v1/chat/completions',
     model: 'meta-llama/llama-3.3-70b-instruct:free',
-    visionModel: 'openai/gpt-4o-mini',
+    visionModel: 'google/gemini-2.0-flash:free',
     keyEnv: 'OPENROUTER_API_KEY',
     format: 'openai',
     supportsImages: true,
@@ -24,7 +24,7 @@ const PROVIDERS = {
   groq: {
     url: 'https://api.groq.com/openai/v1/chat/completions',
     model: 'llama3-70b-8192',
-    visionModel: 'llama-3.2-90b-vision-preview',
+    visionModel: 'meta-llama/llama-4-scout-17b-16e-instruct',
     keyEnv: 'GROQ_API_KEY',
     format: 'openai',
     supportsImages: true,
@@ -32,7 +32,7 @@ const PROVIDERS = {
   mistral: {
     url: 'https://api.mistral.ai/v1/chat/completions',
     model: 'mistral-small-latest',
-    visionModel: 'pixtral-large-latest',
+    visionModel: 'mistral-large-latest',
     keyEnv: 'MISTRAL_API_KEY',
     format: 'openai',
     supportsImages: true,

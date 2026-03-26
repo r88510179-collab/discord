@@ -74,6 +74,9 @@ const stmts = {
   // Parlay legs
   getLegsByBetId: db.prepare('SELECT * FROM parlay_legs WHERE bet_id = ? ORDER BY created_at'),
 
+  // Prop bets
+  getPropsByBetId: db.prepare('SELECT * FROM bet_props WHERE bet_id = ? ORDER BY created_at'),
+
   // Auto-grading: find oldest pending bet matching a search term
   findPendingBySubject: db.prepare(`SELECT b.*, c.display_name AS capper_name
     FROM bets b LEFT JOIN cappers c ON b.capper_id = c.id
@@ -404,6 +407,15 @@ function getBetLegs(betId) {
   return stmts.getLegsByBetId.all(betId);
 }
 
+function getBetProps(betId) {
+  try {
+    return stmts.getPropsByBetId.all(betId);
+  } catch {
+    // bet_props table may not exist yet on older DBs
+    return [];
+  }
+}
+
 function deleteBetById(betId) {
   const bet = stmts.getBet.get(betId);
   if (!bet) return null;
@@ -535,6 +547,7 @@ module.exports = {
   isAuditMode,
   updateBetFields,
   getBetLegs,
+  getBetProps,
   deleteBetById,
   getDashboardSummary,
   getRecentPendingBets,
