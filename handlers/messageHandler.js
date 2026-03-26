@@ -151,6 +151,32 @@ function getPicksChannels() {
   return raw.split(',').map(id => id.trim()).filter(Boolean);
 }
 
+/**
+ * globalPipelineGuard — centralized gatekeeper for channel authorization.
+ * Single source of truth: if this returns authorized:false, nothing runs.
+ */
+function globalPipelineGuard(message) {
+  const picksWhitelist = (process.env.PICKS_CHANNEL_IDS || '')
+    .split(',').map(id => id.trim()).filter(Boolean);
+
+  const isSlipChannel = message.channel.id === process.env.SLIP_FEED_CHANNEL_ID;
+  const isPicksChannel = picksWhitelist.includes(message.channel.id);
+  const isBot = message.author?.bot || !!message.webhookId;
+  const authorized = isSlipChannel || isPicksChannel;
+
+  return {
+    authorized,
+    context: {
+      isPicksChannel,
+      isSlipChannel,
+      isBot,
+      channelName: message.channel?.name || 'unknown',
+      channelId: message.channel.id,
+      author: message.author?.tag || 'Webhook',
+    },
+  };
+}
+
 // Parse the TWITTER_CAPPER_MAP from env (channelID:Name,channelID:Name)
 // Parse capper maps from env
 function getTwitterCapperMap() {
@@ -450,11 +476,20 @@ async function handleMessage(message, { isUpdate = false } = {}) {
   processedMessages.add(dedupKey);
   setTimeout(() => processedMessages.delete(dedupKey), 10_000);
 
-  // ═══ GUARD 0: Strict Channel Lock — bot is deaf outside allowed channels ═══
-  const slipFeedId = process.env.SLIP_FEED_CHANNEL_ID;
-  const allowedChannels = getPicksChannels();
-  if (slipFeedId) allowedChannels.push(slipFeedId);
-  if (!allowedChannels.includes(message.channel.id)) return;
+  // ═══ GUARD 0: Global Pipeline Guard — single source of truth ═══
+  const { authorized, context } = globalPipelineGuard(message);
+  if (!authorized) {
+    // Strict Mode: alert admin of unauthorized triggers
+    if (process.env.STRICT_MODE === 'true' && process.env.ADMIN_LOG_CHANNEL_ID) {
+      const adminCh = message.client.channels.cache.get(process.env.ADMIN_LOG_CHANNEL_ID);
+      if (adminCh) {
+        adminCh.send(
+          `⚠️ **Unauthorized Pipeline Trigger**\n**Channel:** #${context.channelName} (\`${context.channelId}\`)\n**User:** ${context.author}\n*Action: Message discarded before AI/OCR.*`
+        ).catch(() => {});
+      }
+    }
+    return; // HARD STOP
+  }
 
   // ═══ GUARD 1: Never process our own messages (prevents infinite loop) ═══
   if (message.author.id === message.client.user.id) return;
