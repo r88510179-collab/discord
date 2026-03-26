@@ -11,6 +11,32 @@ const { runAutoGrade } = require('./services/grading');
 const { pollTwitterPicks } = require('./services/twitter');
 const { postGradeSummary, postDailyLeaderboard } = require('./services/dashboard');
 
+/**
+ * Utility to extract bet data from a War Room embed.
+ * Parses the Bet ID from footer or fields, plus odds.
+ */
+function getBetProps(embed) {
+  if (!embed) return null;
+
+  // Try footer first (e.g., "ID: 7156c446")
+  let betId = null;
+  if (embed.footer?.text) {
+    const idMatch = embed.footer.text.match(/ID:\s*([a-f0-9]+)/i);
+    if (idMatch) betId = idMatch[1];
+  }
+
+  // Fallback: check fields for "Bet ID"
+  if (!betId && embed.fields) {
+    const idField = embed.fields.find(f => f.name === 'Bet ID');
+    if (idField) betId = idField.value.replace(/`/g, '').trim();
+  }
+
+  const oddsField = embed.fields?.find(f => f.name.includes('Odds'));
+  const odds = oddsField ? oddsField.value : 'N/A';
+
+  return { id: betId, odds, fullEmbed: embed };
+}
+
 // ── Create Discord client ───────────────────────────────────
 const client = new Client({
   intents: [
