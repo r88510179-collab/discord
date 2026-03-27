@@ -92,6 +92,10 @@ async function flushBuffer(key) {
   try {
     await processAggregatedMessage(primaryMessage, combinedText, combinedImages);
   } catch (err) {
+    if (err.message === 'DUPLICATE_IMAGE_DETECTED') {
+      console.log('[Dedup] Duplicate image in buffer — skipping silently.');
+      return;
+    }
     console.error('[Buffer] Error processing aggregated message:', err.message);
   }
 }
@@ -665,6 +669,11 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
       }
     }
   } catch (err) {
+    // Silently ignore duplicate image detections
+    if (err.message === 'DUPLICATE_IMAGE_DETECTED') {
+      console.log('[Dedup] Duplicate image detected — skipping silently.');
+      return;
+    }
     console.error('[MessageHandler] Error:', err.message);
     await reportErrorToAdmin(err, context, message.client);
   }

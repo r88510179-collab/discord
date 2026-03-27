@@ -5,6 +5,11 @@
 
 const { normalizeDescription, normalizePlayer } = require('./normalization');
 const sharp = require('sharp');
+const crypto = require('crypto');
+
+// ── Image dedup cache (SHA-256 hash → timestamp, 12h window) ──
+const imageHashCache = new Map();
+const IMAGE_DEDUP_WINDOW = 12 * 60 * 60 * 1000; // 12 hours
 
 // Models are read from env vars so they can be hot-swapped via `fly secrets set`
 // without redeploying. Falls back to sensible defaults.
@@ -235,6 +240,23 @@ async function processImageForAI(imageUrl) {
       return null;
     }
     const rawBuffer = Buffer.from(await res.arrayBuffer());
+
+    // SHA-256 dedup: reject identical images within 12h window
+    const fileHash = crypto.createHash('sha256').update(rawBuffer).digest('hex');
+    const cached = imageHashCache.get(fileHash);
+    if (cached && (Date.now() - cached) < IMAGE_DEDUP_WINDOW) {
+      throw new Error('DUPLICATE_IMAGE_DETECTED');
+    }
+    imageHashCache.set(fileHash, Date.now());
+
+    // Prune expired entries periodically (every 100 new images)
+    if (imageHashCache.size % 100 === 0) {
+      const now = Date.now();
+      for (const [hash, ts] of imageHashCache) {
+        if (now - ts > IMAGE_DEDUP_WINDOW) imageHashCache.delete(hash);
+      }
+    }
+
     const originalKB = (rawBuffer.length / 1024).toFixed(0);
 
     // Sharp pipeline: resize → grayscale → JPEG compress
