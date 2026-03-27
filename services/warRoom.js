@@ -51,11 +51,12 @@ async function sendStagingEmbed(client, bet, capperName, sourceUrl) {
       { name: 'Type', value: betType, inline: true },
     );
 
-  // Legs-first rendering: always show legs if available
+  // Legs-first rendering: legend-style with bold selections for mobile readability
   if (legs && legs.length > 0) {
     const legLines = legs.map((leg, i) => {
-      const odds = leg.odds != null ? ` (${fmtOdds(leg.odds)})` : '';
-      return `**${i + 1}.** ${leg.description}${odds}`;
+      const odds = leg.odds != null ? `  ${fmtOdds(leg.odds)}` : '';
+      // Bold the selection (description) and dim the odds
+      return `\`${String(i + 1).padStart(2, ' ')}.\` **${leg.description}**${odds}`;
     });
     embed.addFields({ name: isParlay ? `Picks (${legs.length} Legs)` : 'Pick', value: legLines.join('\n') });
     // Show total parlay odds

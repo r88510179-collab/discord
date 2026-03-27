@@ -334,8 +334,14 @@ function normalizeBet(bet) {
     : [];
 
   // Standardize: even straights get a single-entry legs array
+  // Inherit team/line/type from top-level bet when synthesizing
   if (legs.length === 0) {
-    legs = [{ description, odds, team: null, line: null, type: null }];
+    // Try to extract team and line from description (e.g., "Lakers -3.5")
+    const descMatch = description.match(/^(.+?)\s*([+-]\d+\.?\d*|ML|moneyline|over|under)\s*/i);
+    const inheritedTeam = bet.team ? String(bet.team).trim() : (descMatch?.[1]?.trim() || null);
+    const inheritedLine = bet.line ? String(bet.line).trim() : (descMatch?.[2]?.trim() || null);
+    const inheritedType = bet.market_type || bet.type || (inheritedLine?.match(/^[+-]\d/) ? 'spread' : inheritedLine?.match(/^(ML|moneyline)$/i) ? 'moneyline' : null);
+    legs = [{ description, odds, team: inheritedTeam, line: inheritedLine, type: inheritedType }];
   }
 
   return {

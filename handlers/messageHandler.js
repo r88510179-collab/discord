@@ -273,7 +273,14 @@ function getImageAttachments(message) {
     });
   }
 
-  return images;
+  // Deduplicate by URL — forwarded messages can duplicate the same image
+  const seen = new Set();
+  const unique = images.filter(img => {
+    if (seen.has(img.url)) return false;
+    seen.add(img.url);
+    return true;
+  });
+  return unique;
 }
 
 // Safe reply — falls back to channel.send if original message was deleted (FixTwitter/TweetShift)
