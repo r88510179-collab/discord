@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, Collection, Events, Options } = require('discord.js');
+const { Client, GatewayIntentBits, Collection, Events, Options, Partials } = require('discord.js');
 const express = require('express');
 const cron = require('node-cron');
 const fs = require('fs');
@@ -45,6 +45,7 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
   ],
+  partials: [Partials.Message, Partials.Channel],
   // Cache sweeper — prevent OOM on busy servers
   makeCache: Options.cacheWithLimits({
     ...Options.DefaultMakeCacheSettings,

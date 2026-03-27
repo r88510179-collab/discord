@@ -247,15 +247,22 @@ function getImageAttachments(message) {
     if (embed.thumbnail?.url && !embed.image) images.push({ url: embed.thumbnail.url, type: 'image/png' });
   }
   // Discord Native Forwards: images are in messageSnapshots, not attachments
-  if (message.flags?.has(256) && message.messageSnapshots?.size > 0) {
+  if (images.length === 0 && message.messageSnapshots?.size > 0) {
     const snapshot = message.messageSnapshots.first();
-    if (snapshot?.attachments) {
-      for (const att of snapshot.attachments.values()) {
+    // discord.js versions differ: snapshot.attachments or snapshot.message.attachments
+    const snapAtts = snapshot?.message?.attachments || snapshot?.attachments;
+    if (snapAtts?.size > 0) {
+      for (const att of snapAtts.values()) {
         if (att.contentType?.startsWith('image/')) {
           images.push({ url: att.url, type: att.contentType });
           console.log(`[Forward] Found image in forwarded snapshot: ${att.url.slice(0, 60)}...`);
         }
       }
+    }
+    // Also check snapshot embeds
+    const snapEmbeds = snapshot?.message?.embeds || snapshot?.embeds || [];
+    for (const embed of snapEmbeds) {
+      if (embed.image?.url) images.push({ url: embed.image.url, type: 'image/png' });
     }
   }
   return images;
