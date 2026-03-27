@@ -152,8 +152,8 @@ function getOrCreateCapper(discordId, displayName, avatarUrl) {
   const id = uid();
   stmts.insertCapper.run(id, discordId, displayName, avatarUrl || null);
   stmts.insertBankroll.run(uid(), id,
-    parseFloat(process.env.DEFAULT_BANKROLL || 1000),
-    parseFloat(process.env.DEFAULT_BANKROLL || 1000),
+    parseFloat(process.env.DEFAULT_BANKROLL || 0),
+    parseFloat(process.env.DEFAULT_BANKROLL || 0),
     parseFloat(process.env.DEFAULT_UNIT_SIZE || 25),
   );
   return stmts.getCapperById.get(id);
