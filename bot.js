@@ -123,7 +123,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
 // ── Handle messages (auto-parse picks channel) ──────────────
 client.on(Events.MessageCreate, (message) => {
-  console.log(`[DEBUG] MessageCreate in #${message.channel.name} (${message.channel.id}) from: ${message.author.tag} | embeds: ${message.embeds.length} | attachments: ${message.attachments.size} | content: "${(message.content || '').slice(0, 60)}"`);
+  console.log(`[DEAF-TEST] Seen message from ${message.author.tag} in #${message.channel.name} (${message.channel.id})`);
+  console.log(`[DEAF-TEST] Content: ${message.content.length} chars | Attachments: ${message.attachments.size} | Snapshots: ${message.messageSnapshots?.size || 0} | Embeds: ${message.embeds.length}`);
   handleMessage(message);
 });
 
