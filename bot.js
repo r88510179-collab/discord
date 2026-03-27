@@ -191,7 +191,7 @@ client.once(Events.ClientReady, (c) => {
 const app = express();
 app.get('/health', (req, res) => res.status(200).send('OK'));
 const port = process.env.PORT || 8080;
-app.listen(port, () => console.log(`[SYSTEM] Health check server listening on port ${port}`));
+app.listen(port, '0.0.0.0', () => console.log(`[SYSTEM] Health check server listening on 0.0.0.0:${port}`));
 
 // ── Login ───────────────────────────────────────────────────
 client.login(process.env.DISCORD_TOKEN);
