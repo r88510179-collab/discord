@@ -123,9 +123,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 // ── Handle messages (auto-parse picks channel) ──────────────
+// Add your authorized channel IDs here
+const AUTHORIZED_CHANNELS = ['1487115295310217357'];
+
 client.on(Events.MessageCreate, (message) => {
-  console.log(`[DEAF-TEST] Seen message from ${message.author.tag} in #${message.channel.name} (${message.channel.id})`);
-  console.log(`[DEAF-TEST] Content: ${message.content.length} chars | Attachments: ${message.attachments.size} | Snapshots: ${message.messageSnapshots?.size || 0} | Embeds: ${message.embeds.length}`);
+  // 1. IMMEDIATELY ignore bots (prevents infinite loops)
+  if (message.author.bot) return;
+
+  // 2. IMMEDIATELY ignore unauthorized channels
+  if (!AUTHORIZED_CHANNELS.includes(message.channel.id)) return;
+
+  // 3. ONLY THEN do we log and process
+  console.log(`[DEAF-TEST] Seen message in #${message.channel.name}`);
+  console.log(`[DEAF-TEST] Snapshots: ${message.messageSnapshots?.size || 0}`);
+
   handleMessage(message);
 });
 
