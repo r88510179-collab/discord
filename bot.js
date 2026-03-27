@@ -5,6 +5,12 @@ const cron = require('node-cron');
 const fs = require('fs');
 const path = require('path');
 
+// ── Health check server (starts FIRST, before Discord login) ──
+const app = express();
+app.get('/health', (req, res) => res.status(200).send('OK'));
+const port = process.env.PORT || 8080;
+app.listen(port, '0.0.0.0', () => console.log(`[SYSTEM] Health check server listening on 0.0.0.0:${port}`));
+
 const { handleMessage } = require('./handlers/messageHandler');
 const { handleWarRoomInteraction } = require('./services/warRoom');
 const { handleGradeInteraction } = require('./handlers/gradeButtons');
@@ -186,12 +192,6 @@ client.once(Events.ClientReady, (c) => {
   console.log('📊 Daily leaderboard at 11 PM ET');
   console.log('🚀 Bot is ready!\n');
 });
-
-// ── Health check server (for Fly.io / UptimeRobot) ──────────
-const app = express();
-app.get('/health', (req, res) => res.status(200).send('OK'));
-const port = process.env.PORT || 8080;
-app.listen(port, '0.0.0.0', () => console.log(`[SYSTEM] Health check server listening on 0.0.0.0:${port}`));
 
 // ── Login ───────────────────────────────────────────────────
 client.login(process.env.DISCORD_TOKEN);
