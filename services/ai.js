@@ -317,16 +317,26 @@ function normalizeBet(bet) {
   const betType = String(bet.bet_type || 'straight').toLowerCase();
   const allowedTypes = new Set(['straight', 'parlay', 'teaser', 'prop', 'future', 'ladder']);
 
-  const legs = Array.isArray(bet.legs)
+  let legs = Array.isArray(bet.legs)
     ? bet.legs
         .map((leg) => {
           const legDesc = String(leg?.description || '').trim().slice(0, 200);
           if (!legDesc) return null;
-          // Normalize leg descriptions too
-          return { description: normalizeDescription(legDesc), odds: toSafeNumber(leg?.odds, null) };
+          return {
+            description: normalizeDescription(legDesc),
+            odds: toSafeNumber(leg?.odds, null),
+            team: leg?.team ? String(leg.team).trim() : null,
+            line: leg?.line ? String(leg.line).trim() : null,
+            type: leg?.type ? String(leg.type).toLowerCase().trim() : null,
+          };
         })
         .filter(Boolean)
     : [];
+
+  // Standardize: even straights get a single-entry legs array
+  if (legs.length === 0) {
+    legs = [{ description, odds, team: null, line: null, type: null }];
+  }
 
   return {
     sport: String(bet.sport || 'Unknown').trim().slice(0, 50) || 'Unknown',
@@ -505,7 +515,19 @@ ${imageBase64 ? '\nVISION MODE ACTIVE: A betting slip image has been attached. Y
 
 RESPONSE TYPE 1 — New Bet:
 If the text contains a clear actionable bet (team/player + line/odds + prediction):
-{"type":"bet","is_bet":true,"bets":[{"sport":"NCAAB","league":"March Madness","bet_type":"parlay","description":"Gonzaga -6.5 / Houston ML","odds":180,"units":2.0,"wager":50,"payout":90.06,"event_date":null,"legs":[{"description":"Gonzaga -6.5","odds":-110,"team":"Gonzaga","line":"-6.5","type":"spread"},{"description":"Houston ML","odds":-150,"team":"Houston","line":"ML","type":"moneyline"}],"props":[]}]}
+
+PARLAY example (multiple legs):
+{"type":"bet","is_bet":true,"bets":[{"sport":"NCAAB","league":"March Madness","bet_type":"parlay","description":"• Gonzaga -6.5\\n• Houston ML","odds":180,"units":2.0,"wager":50,"payout":90.06,"event_date":null,"legs":[{"description":"Gonzaga -6.5","odds":-110,"team":"Gonzaga","line":"-6.5","type":"spread"},{"description":"Houston ML","odds":-150,"team":"Houston","line":"ML","type":"moneyline"}],"props":[]}]}
+
+STRAIGHT example (single bet — still use legs array with 1 entry):
+{"type":"bet","is_bet":true,"bets":[{"sport":"NBA","league":"NBA","bet_type":"straight","description":"Lakers -3.5","odds":-110,"units":1.0,"wager":null,"payout":null,"event_date":null,"legs":[{"description":"Lakers -3.5","odds":-110,"team":"Lakers","line":"-3.5","type":"spread"}],"props":[]}]}
+
+CRITICAL FORMAT RULES:
+- EVERY bet MUST have a "legs" array, even single straight bets (1 leg).
+- If the slip shows "Parlay", "X Leg", "X Pick", multiple teams/players, or 2+ distinct lines, it is a PARLAY — return ONE bet object with bet_type "parlay" and ALL picks inside the "legs" array. Do NOT split into multiple separate bet objects.
+- Each leg MUST include: description, odds (or null), team (or player name), line, type (spread/moneyline/total/prop).
+- "odds" on the top-level bet = total parlay odds. Individual leg odds go inside each leg.
+- "description" for parlays = bulleted list (one line per leg). For straights = the single pick.
 
 RESPONSE TYPE 2 — Result/Grading Event:
 If the text celebrates a WIN or reports a LOSS (e.g., "WINNER", "CASHED", "CASH IT", "HIT!", "BANG", or loss indicators like "took an L", "tough loss"):

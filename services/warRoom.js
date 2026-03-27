@@ -37,27 +37,38 @@ async function sendStagingEmbed(client, bet, capperName, sourceUrl) {
 
   // Fetch parlay legs from DB
   const legs = getBetLegs(bet.id);
+  const betType = (bet.bet_type || 'straight').toUpperCase();
+  const isParlay = betType === 'PARLAY' || betType === 'TEASER' || (legs && legs.length > 1);
+  const title = isParlay ? `${legs?.length || '?'}-Leg ${betType} Pending Review` : 'Bet Pending Review';
+  const fmtOdds = (o) => o == null ? 'N/A' : (o > 0 ? `+${o}` : `${o}`);
 
   const embed = new EmbedBuilder()
-    .setTitle('Bet Pending Review')
+    .setTitle(title)
     .setColor(COLORS.warning)
     .addFields(
       { name: 'Capper', value: capperName || 'Unknown', inline: true },
       { name: 'Sport', value: bet.sport || 'Unknown', inline: true },
-      { name: 'Type', value: (bet.bet_type || 'straight').toUpperCase(), inline: true },
-      { name: 'Description', value: bet.description || 'N/A' },
-      { name: 'Odds', value: String(bet.odds ?? 'N/A'), inline: true },
-      { name: 'Units', value: String(bet.units ?? 1), inline: true },
+      { name: 'Type', value: betType, inline: true },
     );
 
-  // Display individual parlay legs
+  // Legs-first rendering: always show legs if available
   if (legs && legs.length > 0) {
     const legLines = legs.map((leg, i) => {
-      const odds = leg.odds ? ` (${leg.odds > 0 ? '+' : ''}${leg.odds})` : '';
-      return `**Leg ${i + 1}:** ${leg.description}${odds}`;
+      const odds = leg.odds != null ? ` (${fmtOdds(leg.odds)})` : '';
+      return `**${i + 1}.** ${leg.description}${odds}`;
     });
-    embed.addFields({ name: `Legs (${legs.length})`, value: legLines.join('\n') });
+    embed.addFields({ name: isParlay ? `Picks (${legs.length} Legs)` : 'Pick', value: legLines.join('\n') });
+    // Show total parlay odds
+    if (isParlay && bet.odds) {
+      embed.addFields({ name: 'Total Odds', value: fmtOdds(bet.odds), inline: true });
+    }
+  } else {
+    // Fallback: no legs in DB, show description
+    embed.addFields({ name: 'Description', value: bet.description || 'N/A' });
+    embed.addFields({ name: 'Odds', value: fmtOdds(bet.odds), inline: true });
   }
+
+  embed.addFields({ name: 'Units', value: String(bet.units ?? 1), inline: true });
 
   // Display financials if available
   if (bet.wager || bet.payout) {
