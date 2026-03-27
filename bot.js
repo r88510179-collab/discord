@@ -1,5 +1,6 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, Collection, Events, Options } = require('discord.js');
+const express = require('express');
 const cron = require('node-cron');
 const fs = require('fs');
 const path = require('path');
@@ -184,6 +185,12 @@ client.once(Events.ClientReady, (c) => {
   console.log('📊 Daily leaderboard at 11 PM ET');
   console.log('🚀 Bot is ready!\n');
 });
+
+// ── Health check server (for Fly.io / UptimeRobot) ──────────
+const app = express();
+app.get('/health', (req, res) => res.status(200).send('OK'));
+const port = process.env.PORT || 8080;
+app.listen(port, () => console.log(`[SYSTEM] Health check server listening on port ${port}`));
 
 // ── Login ───────────────────────────────────────────────────
 client.login(process.env.DISCORD_TOKEN);

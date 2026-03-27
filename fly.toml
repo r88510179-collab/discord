@@ -6,6 +6,20 @@ primary_region = 'iad'
 
 [env]
   NODE_ENV = 'production'
+  PORT = '8080'
+
+[[services]]
+  internal_port = 8080
+  protocol = 'tcp'
+
+  [[services.ports]]
+    port = 80
+    handlers = ['http']
+
+  [[services.http_checks]]
+    interval = 30000
+    timeout = 5000
+    path = '/health'
 
 [mounts]
   source = 'bettracker_data'

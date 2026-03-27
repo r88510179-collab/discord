@@ -647,23 +647,15 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
     }
 
     if (allBets.length > 0) {
-      await safeReact(message, '📝');
-      const embeds = allBets.map(b => betEmbed(b, capperInfo.name));
-      await safeReply(message, {
-        content: `🤖 **${capperInfo.name}** — tracked **${allBets.length}** pick(s):`,
-        embeds: embeds.slice(0, 5),
-      });
+      await safeReact(message, '✅');
       for (const bet of allBets) {
         await postPickTracked(message.client, bet, capperInfo.name, message.channel.name, capperInfo.source);
       }
     }
 
     if (reviewBets.length > 0) {
-      const ids = reviewBets.map(b => b.id.slice(0, 8)).join(', ');
-      console.log(`[Review] Stored ${reviewBets.length} bet(s) for manual review from ${capperInfo.name} [${ids}]`);
-      await safeReply(message, {
-        content: `🔒 **${reviewBets.length}** bet(s) saved for review. IDs: ${reviewBets.map(b => `\`${b.id.slice(0, 8)}\``).join(', ')}`,
-      });
+      await safeReact(message, '🔒');
+      console.log(`[Review] Stored ${reviewBets.length} bet(s) for manual review from ${capperInfo.name}`);
       for (const bet of reviewBets) {
         await sendStagingEmbed(message.client, bet, capperInfo.name, message.url);
       }
