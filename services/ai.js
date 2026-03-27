@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════
 // Multi-LLM AI Service — rotates between providers
-// Priority: Groq (fastest/free) → Gemini (fallback) → Mistral → OpenRouter
+// Priority: Gemini → Groq → Mistral → OpenRouter (all free tiers)
 // ═══════════════════════════════════════════════════════════
 
 const { normalizeDescription, normalizePlayer } = require('./normalization');
@@ -29,19 +29,19 @@ const PROVIDERS = {
     format: 'openai',
     supportsImages: true,
   },
-  openrouter: {
-    url: 'https://openrouter.ai/api/v1/chat/completions',
-    get model() { return process.env.OPENROUTER_TEXT_MODEL || 'meta-llama/llama-3.3-70b-instruct:free'; },
-    get visionModel() { return process.env.OPENROUTER_MODEL || 'google/gemini-2.0-flash-001'; },
-    keyEnv: 'OPENROUTER_API_KEY',
-    format: 'openai',
-    supportsImages: true,
-  },
   mistral: {
     url: 'https://api.mistral.ai/v1/chat/completions',
     get model() { return process.env.MISTRAL_TEXT_MODEL || 'mistral-small-latest'; },
     get visionModel() { return process.env.MISTRAL_MODEL || 'pixtral-12b-2409'; },
     keyEnv: 'MISTRAL_API_KEY',
+    format: 'openai',
+    supportsImages: true,
+  },
+  openrouter: {
+    url: 'https://openrouter.ai/api/v1/chat/completions',
+    get model() { return process.env.OPENROUTER_TEXT_MODEL || 'meta-llama/llama-3.3-70b-instruct:free'; },
+    get visionModel() { return process.env.OPENROUTER_MODEL || 'google/gemini-2.0-flash-lite-preview-02-05:free'; },
+    keyEnv: 'OPENROUTER_API_KEY',
     format: 'openai',
     supportsImages: true,
   },
