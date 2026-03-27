@@ -187,6 +187,7 @@ async function callLLM(prompt, system, imageBase64, mediaType) {
 
   for (let i = 0; i < sorted.length; i++) {
     const provider = sorted[i];
+    const startTime = Date.now();
     try {
       // Determine if this provider can handle the image
       const canDoImage = hasImage && provider.supportsImages;
@@ -201,12 +202,19 @@ async function callLLM(prompt, system, imageBase64, mediaType) {
       }, provider.name);
 
       if (result) {
+        const latency = Date.now() - startTime;
         const mode = canDoImage ? 'vision' : 'text-only';
-        console.log(`[AI] Success: ${provider.name} (${mode})`);
+        console.log(`[AI] Winner: ${provider.name} (${mode}) in ${latency}ms`);
+        // Attach metadata to the result string for downstream tracking
+        result._provider = provider.name;
+        result._latency = latency;
+        result._model = targetModel;
+        result._mode = mode;
         return result;
       }
     } catch (err) {
-      console.error(`[${provider.name}] Error: ${err.message}${err.cause ? ` (cause: ${err.cause})` : ''}`);
+      const latency = Date.now() - startTime;
+      console.error(`[${provider.name}] Error (${latency}ms): ${err.message}${err.cause ? ` (cause: ${err.cause})` : ''}`);
       console.error(`[${provider.name}] Stack: ${err.stack?.split('\n')[1]?.trim() || 'n/a'}`);
     }
   }
