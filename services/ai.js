@@ -4,6 +4,7 @@
 // ═══════════════════════════════════════════════════════════
 
 const { normalizeDescription, normalizePlayer } = require('./normalization');
+const sharp = require('sharp');
 
 // Models are read from env vars so they can be hot-swapped via `fly secrets set`
 // without redeploying. Falls back to sensible defaults.
@@ -223,26 +224,38 @@ async function callLLM(prompt, system, imageBase64, mediaType) {
 }
 
 /**
- * Download an image URL and return { base64, mediaType }.
- * Used to pass Discord attachment images directly to Gemini Vision.
+ * processImageForAI — download, resize, grayscale, compress via Sharp.
+ * Returns { base64, mediaType } optimized for AI vision models.
  */
-async function downloadImageAsBase64(imageUrl) {
+async function processImageForAI(imageUrl) {
   try {
     const res = await fetch(imageUrl);
     if (!res.ok) {
       console.log(`[AI] Image download failed: ${res.status}`);
       return null;
     }
-    const contentType = res.headers.get('content-type') || 'image/png';
-    const buffer = Buffer.from(await res.arrayBuffer());
-    // Gemini has a ~4MB inline limit; skip oversized images
-    if (buffer.length > 4 * 1024 * 1024) {
-      console.log(`[AI] Image too large for Gemini Vision: ${(buffer.length / 1024 / 1024).toFixed(1)}MB`);
+    const rawBuffer = Buffer.from(await res.arrayBuffer());
+    const originalKB = (rawBuffer.length / 1024).toFixed(0);
+
+    // Sharp pipeline: resize → grayscale → JPEG compress
+    const optimized = await sharp(rawBuffer)
+      .resize({ width: 1080, withoutEnlargement: true })
+      .grayscale()
+      .jpeg({ quality: 80 })
+      .toBuffer();
+
+    const optimizedKB = (optimized.length / 1024).toFixed(0);
+    console.log(`[AI] Image optimized: ${originalKB}KB → ${optimizedKB}KB (${((1 - optimized.length / rawBuffer.length) * 100).toFixed(0)}% reduction)`);
+
+    // Gemini has a ~4MB inline limit
+    if (optimized.length > 4 * 1024 * 1024) {
+      console.log(`[AI] Image still too large after optimization: ${(optimized.length / 1024 / 1024).toFixed(1)}MB`);
       return null;
     }
-    return { base64: buffer.toString('base64'), mediaType: contentType };
+
+    return { base64: optimized.toString('base64'), mediaType: 'image/jpeg' };
   } catch (err) {
-    console.log(`[AI] Image download error: ${err.message}`);
+    console.log(`[AI] Image processing error: ${err.message}`);
     return null;
   }
 }
@@ -457,7 +470,7 @@ async function parseBetText(text, imageUrl) {
   let imageBase64 = null;
   let mediaType = null;
   if (imageUrl) {
-    const img = await downloadImageAsBase64(imageUrl);
+    const img = await processImageForAI(imageUrl);
     if (img) {
       imageBase64 = img.base64;
       mediaType = img.mediaType;
@@ -501,7 +514,8 @@ STRICT RULES:
 - If wager amount or payout/to-pay is visible, include "wager" (number) and "payout" (number) on the bet.
 - Sport: Use specific league — UCL not Soccer, EPL not Soccer, March Madness not NCAAB. If units not specified default 1.
 - Parse ALL bets. For player props, include a "props" array: player_name, stat_category (snake_case), line (number), direction ("over"/"under"), odds (integer or null).
-- Raw OCR text may contain typos and garbage chars. Do your best (e.g., "0ver"="over", "und3r"="under", "Lebr0n"="LeBron").`;
+- Raw OCR text may contain typos and garbage chars. Do your best (e.g., "0ver"="over", "und3r"="under", "Lebr0n"="LeBron").
+Output strictly valid JSON. Do not include markdown formatting, do not include \`\`\`json backticks, and do not include any conversational text.`;
   const raw = await callLLM(text, sys, imageBase64, mediaType);
   if (!raw) return { bets: [], error: 'AI unavailable' };
   const parsed = parseJSON(raw);
