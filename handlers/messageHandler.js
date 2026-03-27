@@ -249,6 +249,7 @@ function getImageAttachments(message) {
   // Discord Native Forwards: images are in messageSnapshots, not attachments
   if (images.length === 0 && message.messageSnapshots?.size > 0) {
     const snapshot = message.messageSnapshots.first();
+    console.log(`[Forward] Snapshot found. Keys: ${Object.keys(snapshot || {}).join(', ')}. Has .message: ${!!snapshot?.message}. Has .attachments: ${!!snapshot?.attachments}`);
     // discord.js versions differ: snapshot.attachments or snapshot.message.attachments
     const snapAtts = snapshot?.message?.attachments || snapshot?.attachments;
     if (snapAtts?.size > 0) {
@@ -484,6 +485,16 @@ async function handleAutoGrade(message, fullText) {
 async function handleMessage(message, { isUpdate = false } = {}) {
   if (!message.guild) return;
 
+  // ═══ PARTIAL FETCH: ensure forwarded/partial messages are fully loaded ═══
+  if (message.partial) {
+    try {
+      await message.fetch();
+    } catch (err) {
+      console.error('[PARTIAL_FETCH_ERROR]', err.message);
+      return;
+    }
+  }
+
   // ═══ DEDUP GUARD ═══
   // For MessageUpdate (embed unfurl), use a separate key so it bypasses the Create dedup
   const dedupKey = isUpdate ? `update:${message.id}` : message.id;
@@ -552,6 +563,8 @@ async function handleMessage(message, { isUpdate = false } = {}) {
   const hasText = fullContent.length > 0;
   const images = getImageAttachments(message);
   const hasImages = images.length > 0;
+
+  console.log(`[DEBUG] Msg in #${message.channel.name} | Attachments: ${message.attachments.size} | Snapshots: ${message.messageSnapshots?.size || 0} | Images Extracted: ${images.length}`);
 
   // fullText = message.content + embed descriptions (already built above as fullContent)
   const fullText = fullContent;
