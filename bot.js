@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, Collection, Events } = require('discord.js');
+const { Client, GatewayIntentBits, Collection, Events, Options } = require('discord.js');
 const cron = require('node-cron');
 const fs = require('fs');
 const path = require('path');
@@ -44,6 +44,15 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
   ],
+  // Cache sweeper — prevent OOM on busy servers
+  makeCache: Options.cacheWithLimits({
+    ...Options.DefaultMakeCacheSettings,
+    MessageManager: { maxSize: 50 },
+    ThreadManager: { maxSize: 0 },
+    PresenceManager: 0,
+    VoiceStateManager: 0,
+    ReactionManager: 0,
+  }),
 });
 
 // ── Load slash commands ─────────────────────────────────────
