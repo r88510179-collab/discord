@@ -124,7 +124,37 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
 // ── Handle messages (auto-parse picks channel) ──────────────
 // Add your authorized channel IDs here
-const AUTHORIZED_CHANNELS = ['1487115295310217357'];
+const AUTHORIZED_CHANNELS = [
+  // ── Slip channels ──
+  '1487115295310217357', // futbol-slips
+  '1487115407117652170', // cfb-cbb-slips
+  '1487115698206539888', // tennis-slips
+  '1487115746793488424', // ufc-boxing-slips
+  '1487115798831960104', // tt-slips
+  '1487115847527829735', // nfl-slips
+  '1487115893258453142', // nhl-slips
+  '1487115940956082196', // mlb-slips
+  '1487115993938530395', // golf-slips
+  '1487116040348500138', // nba-slips
+  // ── Capper channels ──
+  '1473343783876821198', // LockedIn
+  '1286934932769472646', // GameScript
+  '1282742197460144202', // Boogieman
+  '1473343838587457626', // GNP
+  '1473345468716028044', // Gallery
+  '1473347391284576469', // IgDave
+  '1484572863439704246', // Trent
+  '1473341333325217950', // Smokke
+  '1355182920163262664', // DatDude
+  '1282707049276244029', // Degens
+  '1473341245500690473', // Mez
+  '1473341435351929097', // Zootied
+  '1473341563961606375', // T
+  '1284620792713318472', // Harry
+  '1284613911055695893', // Cody
+  '1284614717071032464', // Gavin
+  '1284613965128925234', // Dan
+];
 
 client.on(Events.MessageCreate, (message) => {
   // 1. IMMEDIATELY ignore bots (prevents infinite loops)
