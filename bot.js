@@ -7,6 +7,7 @@ const path = require('path');
 
 // ── Health check server (starts FIRST, before Discord login) ──
 const app = express();
+app.get('/', (req, res) => res.status(200).send('OK'));
 app.get('/health', (req, res) => res.status(200).send('OK'));
 const port = process.env.PORT || 8080;
 app.listen(port, '0.0.0.0', () => console.log(`[SYSTEM] Health check server listening on 0.0.0.0:${port}`));
