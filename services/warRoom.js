@@ -241,15 +241,28 @@ async function handleWarRoomInteraction(interaction) {
         try {
           const pubChannel = await interaction.client.channels.fetch(publicChannelId).catch(() => null);
           if (pubChannel) {
+            // Build capper stats line
+            let statsText = 'First graded bet!';
+            try {
+              const cs = getCapperStats(bet.capper_id);
+              if (cs && ((cs.wins || 0) + (cs.losses || 0)) > 0) {
+                const w = cs.wins || 0, l = cs.losses || 0, p = cs.pushes || 0;
+                const pct = (w + l) > 0 ? Math.round((w / (w + l)) * 100) : 0;
+                const prof = (cs.total_profit_units || 0).toFixed(2);
+                const hot = pct >= 65 && prof > 0 && (w + l) >= 5;
+                statsText = `${hot ? ' ' : ''}**Record:** ${w}-${l}-${p} (${pct}%) | **Profit:** ${prof > 0 ? '+' : ''}${prof}u`;
+              }
+            } catch (_) { /* silent */ }
+
             const pubEmbed = new EmbedBuilder()
-              .setTitle('New Pick')
-              .setColor(COLORS.primary)
+              .setTitle(`New Play from ${bet.capper_name || 'Unknown'}`)
+              .setColor(COLORS.success)
               .addFields(
-                { name: 'Capper', value: bet.capper_name || 'Unknown', inline: true },
                 { name: 'Sport', value: bet.sport || 'Unknown', inline: true },
                 { name: 'Type', value: (bet.bet_type || 'straight').toUpperCase(), inline: true },
-                { name: 'Description', value: bet.description || 'N/A' },
                 { name: 'Odds', value: String(bet.odds ?? 'N/A'), inline: true },
+                { name: 'Description', value: bet.description || 'N/A' },
+                { name: 'Capper History', value: statsText, inline: false },
               )
               .setTimestamp();
 
