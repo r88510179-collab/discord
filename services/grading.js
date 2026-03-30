@@ -1,8 +1,13 @@
 const { getPendingBets, gradeBet, updateBankroll, saveDailySnapshot, getBankroll, db } = require('./database');
 const { gradeBetAI } = require('./ai');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const ODDS_API_BASE = 'https://api.the-odds-api.com/v4';
 const API_KEY = process.env.ODDS_API_KEY;
+
+// Prop detection keywords
+const PROP_KEYWORDS = /\b(pts|points|reb|rebounds|ast|assists|stl|steals|blk|blocks|yds|yards|tds|touchdowns|strikeouts|hits|runs|sacks|receptions|goals|shots|saves|aces|kills)\b/i;
+const OVER_UNDER_PATTERN = /\b(over|under|o|u)\s*\d+\.?\d*/i;
 
 // Map our sport names to Odds API sport keys
 const SPORT_MAP = {
@@ -308,6 +313,19 @@ async function runAutoGrade(client) {
     if (scores.length === 0) continue;
 
     for (const bet of bets) {
+      // Route player props to AI grader (Odds API doesn't have player stats)
+      const desc = (bet.description || '').toLowerCase();
+      const betType = (bet.bet_type || '').toLowerCase();
+      if (betType === 'prop' || PROP_KEYWORDS.test(desc) || (OVER_UNDER_PATTERN.test(desc) && !desc.includes('spread'))) {
+        console.log(`[AutoGrade] Routing prop to AI: "${bet.description?.slice(0, 50)}"`);
+        const propResult = await gradePropWithAI(bet);
+        if (propResult) {
+          gradedBets.push(propResult);
+          gradedCount++;
+        }
+        continue; // Skip Odds API for this bet
+      }
+
       const matchData = matchBetToGame(bet, scores);
       const result = determineResult(bet, matchData);
 
@@ -445,9 +463,88 @@ async function gradeFromCelebration(client, capperId, outcome, subjects) {
   return null; // No matching bet found
 }
 
+// ── AI Prop Grader (Gemini with Google Search) ──────────────
+async function gradePropWithAI(bet) {
+  if (!process.env.GEMINI_API_KEY) {
+    console.log(`[AI Grader] Skipping prop — no GEMINI_API_KEY`);
+    return null;
+  }
+
+  console.log(`[AI Grader] Attempting to grade prop: "${bet.description?.slice(0, 60)}" (${bet.sport})`);
+
+  try {
+    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+    const model = genAI.getGenerativeModel({
+      model: 'gemini-2.0-flash',
+      tools: [{ googleSearch: {} }],
+    });
+
+    const prompt = `You are an expert sports betting grader.
+Your job is to grade the following player prop bet.
+
+Bet Pick: "${bet.description}"
+Sport: ${bet.sport || 'Unknown'}
+Date Placed: ${bet.created_at}
+
+Instructions:
+1. Search the web for the final box score of the player's game on or immediately after the Date Placed.
+2. Find the exact stat requested (e.g., Assists, Points, Rebounds, Goals, Shots on Target, Strikeouts).
+3. Compare the actual stat to the bet line.
+4. Return STRICTLY valid JSON. No markdown formatting, no backticks.
+
+Format:
+{
+  "status": "WIN" | "LOSS" | "PUSH" | "PENDING",
+  "actual_stat": "number or text",
+  "evidence": "Briefly state the actual stat found and the game date."
+}
+
+If the game has not been played yet or you cannot find the box score, return status "PENDING".`;
+
+    const result = await model.generateContent(prompt);
+    const textResponse = result.response.text();
+
+    // Clean up response in case Gemini adds markdown
+    const cleanJson = textResponse.replace(/```json/g, '').replace(/```/g, '').trim();
+    const aiGrade = JSON.parse(cleanJson);
+
+    console.log(`[AI Grader] Result for "${bet.description?.slice(0, 40)}": ${aiGrade.status}. Evidence: ${aiGrade.evidence}`);
+
+    if (aiGrade.status === 'WIN' || aiGrade.status === 'LOSS' || aiGrade.status === 'PUSH') {
+      const resultLower = aiGrade.status.toLowerCase();
+      const profitUnits = calcProfit(bet.odds || -110, bet.units || 1, resultLower);
+
+      await gradeBet(bet.id, resultLower, profitUnits, resultLower === 'win' ? 'B' : 'D',
+        `AI Grader: ${aiGrade.evidence || 'Graded via Gemini Search'}`);
+
+      // Update bankroll
+      if (bet.capper_id) {
+        const bankroll = getBankroll(bet.capper_id);
+        if (bankroll) {
+          const dollarAmount = profitUnits * parseFloat(bankroll.unit_size);
+          updateBankroll(bet.capper_id, dollarAmount);
+        }
+        saveDailySnapshot(bet.capper_id);
+      }
+
+      console.log(`[AI Grader] ✅ DB updated: ${bet.id.slice(0, 8)} → ${resultLower} (${profitUnits >= 0 ? '+' : ''}${profitUnits.toFixed(2)}u)`);
+      return { bet, result: resultLower, profitUnits, grade: { grade: resultLower === 'win' ? 'B' : 'D', reason: aiGrade.evidence } };
+    }
+
+    // PENDING or unknown — skip for now
+    console.log(`[AI Grader] Bet still pending or unresolvable: ${aiGrade.status}`);
+    return null;
+
+  } catch (error) {
+    console.error(`[AI Grader] Error grading bet ${bet.id?.slice(0, 8)}: ${error.message}`);
+    return null;
+  }
+}
+
 module.exports = {
   runAutoGrade,
   gradeFromCelebration,
+  gradePropWithAI,
   calcProfit,
   fetchScores,
   determineResult,

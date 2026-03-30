@@ -11,6 +11,7 @@
     "test:reliability": "node tests/audit-mode-validation.js && node tests/normalization-validation.js && node tests/player-normalization-validation.js && node tests/migration-validation.js && node tests/confidence-validation.js && node tests/reliability-validation.js && node tests/message-handler.integration.js && node tests/db-concurrency-validation.js && node tests/grading-validation.js && node tests/review-commands-validation.js"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "better-sqlite3": "^11.0.0",
     "discord.js": "^14.16.0",
     "dotenv": "^16.4.0",
