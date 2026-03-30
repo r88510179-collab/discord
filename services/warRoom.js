@@ -313,26 +313,35 @@ async function handleWarRoomInteraction(interaction) {
     // Untracked winner — Log as Win
     if (action === 'war_logwin') {
       try {
-        const payload = JSON.parse(Buffer.from(betId, 'base64').toString());
+        // Extract capper ID and description from the embed (not the button customId)
+        const embed = interaction.message.embeds[0];
+        const footerText = embed?.footer?.text || '';
+        const cidMatch = footerText.match(/^cid:(.+)$/);
+        const capperId = cidMatch ? cidMatch[1] : null;
+        const description = embed?.fields?.find(f => f.name === 'Description')?.value || 'Unknown bet';
+
+        if (!capperId) {
+          await interaction.reply({ content: 'Could not determine capper. Please grade manually.', ephemeral: true });
+          return true;
+        }
+
         const saved = createBet({
-          capper_id: payload.cid,
-          sport: 'Unknown', description: payload.desc,
+          capper_id: capperId,
+          sport: 'Unknown', description,
           odds: -110, units: 1,
           source: 'untracked_win',
           review_status: 'confirmed',
         });
         if (saved && !saved._deduped) {
-          // Grade immediately as win
           const profitUnits = 0.91; // -110 odds → ~0.91u profit
           db.prepare("UPDATE bets SET result = 'win', profit_units = ? WHERE id = ?").run(profitUnits, saved.id);
-          // Update bankroll
-          const bankroll = getBankroll(payload.cid);
+          const bankroll = getBankroll(capperId);
           if (bankroll) {
             const unitSize = bankroll.unit_size || 25;
-            updateBankroll(payload.cid, profitUnits * unitSize);
+            updateBankroll(capperId, profitUnits * unitSize);
           }
         }
-        const loggedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
+        const loggedEmbed = EmbedBuilder.from(embed)
           .setTitle('Logged as Win')
           .setColor(COLORS.success);
         await interaction.update({ embeds: [loggedEmbed], components: [] });
@@ -435,19 +444,18 @@ async function sendUntrackedWinEmbed(client, data) {
     embed.addFields({ name: 'Subjects', value: data.subject.join(', '), inline: false });
   }
 
-  // Encode capper ID and description in the button customId
-  const payload = Buffer.from(JSON.stringify({
-    cid: data.capperId,
-    desc: (data.description || '').slice(0, 80),
-  })).toString('base64').slice(0, 80);
+  // Store capper ID in footer for retrieval on button click (avoids customId length limit)
+  embed.setFooter({ text: `cid:${data.capperId}` });
 
+  // Use short unique suffix to avoid customId collisions
+  const shortId = (data.capperId || '').slice(0, 16);
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId(`war_logwin:${payload}`)
+      .setCustomId(`war_logwin:${shortId}`)
       .setLabel('Log as Win')
       .setStyle(ButtonStyle.Success),
     new ButtonBuilder()
-      .setCustomId(`war_rejectwin:${payload}`)
+      .setCustomId(`war_rejectwin:${shortId}`)
       .setLabel('Reject')
       .setStyle(ButtonStyle.Danger),
   );
