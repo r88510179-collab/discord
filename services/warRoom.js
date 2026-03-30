@@ -71,6 +71,32 @@ async function sendStagingEmbed(client, bet, capperName, sourceUrl) {
 
   embed.addFields({ name: 'Units', value: String(bet.units ?? 1), inline: true });
 
+  // Capper Stats Injector
+  if (bet.capper_id) {
+    try {
+      const stats = getCapperStats(bet.capper_id);
+      if (stats && ((stats.wins || 0) + (stats.losses || 0)) > 0) {
+        const wins = stats.wins || 0;
+        const losses = stats.losses || 0;
+        const pushes = stats.pushes || 0;
+        const totalGames = wins + losses;
+        const winPct = totalGames > 0 ? Math.round((wins / totalGames) * 100) : 0;
+        const profit = (stats.total_profit_units || 0).toFixed(2);
+        const isHot = winPct >= 65 && profit > 0 && totalGames >= 5;
+        const fire = isHot ? ' ' : '';
+        embed.addFields({
+          name: 'Capper Stats',
+          value: `${fire}**Record:** ${wins}-${losses}-${pushes} (${winPct}%) | **Profit:** ${profit > 0 ? '+' : ''}${profit}u`,
+          inline: false,
+        });
+      } else {
+        embed.addFields({ name: 'Capper Stats', value: 'First graded bet!', inline: false });
+      }
+    } catch (e) {
+      // Silent — don't break embed for stats failure
+    }
+  }
+
   // Display financials if available
   if (bet.wager || bet.payout) {
     const parts = [];
