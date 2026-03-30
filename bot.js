@@ -156,9 +156,36 @@ const AUTHORIZED_CHANNELS = [
   '1284613965128925234', // Dan
 ];
 
-client.on(Events.MessageCreate, (message) => {
+client.on(Events.MessageCreate, async (message) => {
   // 1. IMMEDIATELY ignore bots (prevents infinite loops)
   if (message.author.bot) return;
+
+  // 📊 X-RAY COMMAND: Type "!status" in any channel to see pending bets
+  if (message.content.toLowerCase() === '!status') {
+    try {
+      const { db } = require('./services/database');
+      const pendingCount = db.prepare("SELECT COUNT(*) as count FROM bets WHERE result = 'pending'").get().count;
+      const propCount = db.prepare("SELECT COUNT(*) as count FROM bets WHERE result = 'pending' AND bet_type = 'prop'").get().count;
+      const sportsBreakdown = db.prepare("SELECT sport, COUNT(*) as count FROM bets WHERE result = 'pending' GROUP BY sport").all();
+
+      let breakdownText = sportsBreakdown.map(row => `• **${row.sport || 'Unknown'}**: ${row.count}`).join('\n');
+      if (!breakdownText) breakdownText = 'No pending bets.';
+
+      return message.reply({ embeds: [{
+        color: 0x0099ff,
+        title: 'Bot X-Ray Status',
+        fields: [
+          { name: 'Total Pending', value: `${pendingCount}`, inline: true },
+          { name: 'Props (AI)', value: `${propCount}`, inline: true },
+          { name: 'By Sport', value: breakdownText, inline: false },
+        ],
+        timestamp: new Date().toISOString(),
+      }] });
+    } catch (error) {
+      console.error('[X-RAY ERROR]', error);
+      return message.reply('Error fetching database status.');
+    }
+  }
 
   // 2. IMMEDIATELY ignore unauthorized channels
   if (!AUTHORIZED_CHANNELS.includes(message.channel.id)) return;

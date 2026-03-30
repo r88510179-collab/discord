@@ -353,19 +353,24 @@ async function runAutoGrade(client) {
     }
   }
 
-  // ── 48-Hour Sweeper: auto-grade expired pending bets as loss ──
-  const SWEEP_HOURS = 48;
+  // ── 7-Day Smart Sweeper: only sweep standard bets, props handled by AI Grader ──
+  const SWEEP_DAYS = 7;
+  const sweepCutoff = SWEEP_DAYS * 24 * 60 * 60 * 1000;
   const expiredBets = pending.filter(bet => {
     const age = Date.now() - new Date(bet.created_at).getTime();
-    return age > SWEEP_HOURS * 60 * 60 * 1000;
+    if (age <= sweepCutoff) return false;
+    // Skip props — AI Grader handles them independently
+    const betType = (bet.bet_type || '').toLowerCase();
+    const desc = (bet.description || '').toLowerCase();
+    if (betType === 'prop' || PROP_KEYWORDS.test(desc)) return false;
+    return true;
   });
 
   for (const bet of expiredBets) {
-    // Skip if already graded in this cycle
     if (gradedBets.some(g => g.bet.id === bet.id)) continue;
 
     const profitUnits = calcProfit(bet.odds || -110, bet.units || 1, 'loss');
-    await gradeBet(bet.id, 'loss', profitUnits, 'F', `Auto-swept: pending >${SWEEP_HOURS}h with no score/confirmation`);
+    await gradeBet(bet.id, 'loss', profitUnits, 'F', `Auto-swept: pending >${SWEEP_DAYS} days with no score/confirmation`);
 
     if (bet.capper_id) {
       const bankroll = getBankroll(bet.capper_id);
@@ -376,12 +381,12 @@ async function runAutoGrade(client) {
       saveDailySnapshot(bet.capper_id);
     }
 
-    gradedBets.push({ bet, result: 'loss', profitUnits, grade: { grade: 'F', reason: 'Expired (48h sweep)' } });
+    gradedBets.push({ bet, result: 'loss', profitUnits, grade: { grade: 'F', reason: `Expired (${SWEEP_DAYS}-day sweep)` } });
     gradedCount++;
-    console.log(`[Sweeper] Auto-graded as loss: "${bet.description?.slice(0, 40)}" (${SWEEP_HOURS}h expired)`);
+    console.log(`[Sweeper] Auto-graded as loss: "${bet.description?.slice(0, 40)}" (${SWEEP_DAYS} days expired)`);
   }
 
-  console.log(`[AutoGrade] Graded ${gradedCount} bets (incl. ${expiredBets.length > gradedBets.length ? 0 : expiredBets.filter(e => !gradedBets.some(g => g.bet.id === e.id && g.grade.reason !== 'Expired (48h sweep)')).length} sweeps).`);
+  console.log(`[AutoGrade] Graded ${gradedCount} bets total (${expiredBets.length} swept).`);
   return { graded: gradedCount, bets: gradedBets };
 }
 
