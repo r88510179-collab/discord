@@ -8,7 +8,7 @@ const {
   EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
   ModalBuilder, TextInputBuilder, TextInputStyle,
 } = require('discord.js');
-const { approveBet, rejectBet, updateBetFields, getBetLegs, getBetProps, getCapperStats, getBankroll, db, createBet, updateBankroll, upsertUserBet } = require('./database');
+const { approveBet, rejectBet, updateBetFields, getBetLegs, getBetProps, getCapperStats, getBankroll, db, createBet, updateBankroll, upsertUserBet, getSentimentCounts } = require('./database');
 const { postPickTracked } = require('./dashboard');
 const { shopLine, formatLineShop, extractTeamFromDescription } = require('./odds');
 const { calculateOptimalBet } = require('./bankroll');
@@ -336,16 +336,32 @@ async function handleWarRoomInteraction(interaction) {
       return true;
     }
 
-    // Tail / Fade — save to user_bets table
-    if (action === 'war_tail') {
-      upsertUserBet(interaction.user.id, betId, 'tail');
-      await interaction.reply({ content: `🔥 Tailing! Use \`/mybets\` to view your active slips.`, ephemeral: true });
-      return true;
-    }
+    // Tail / Fade — save vote, update embed with live sentiment counts
+    if (action === 'war_tail' || action === 'war_fade') {
+      const sentiment = action === 'war_tail' ? 'tail' : 'fade';
+      try {
+        upsertUserBet(interaction.user.id, betId, sentiment);
+        const { tails, fades } = getSentimentCounts(betId);
+        const sentimentString = `**${tails} Tailing** | **${fades} Fading**`;
 
-    if (action === 'war_fade') {
-      upsertUserBet(interaction.user.id, betId, 'fade');
-      await interaction.reply({ content: `🧊 Fading! Use \`/mybets\` to view your active slips.`, ephemeral: true });
+        // Rebuild embed with updated sentiment field
+        const originalEmbed = EmbedBuilder.from(interaction.message.embeds[0]);
+        const fieldIndex = originalEmbed.data.fields?.findIndex(f => f.name === 'Community Sentiment');
+        if (fieldIndex !== undefined && fieldIndex !== -1) {
+          originalEmbed.data.fields[fieldIndex].value = sentimentString;
+        } else {
+          originalEmbed.addFields({ name: 'Community Sentiment', value: sentimentString, inline: false });
+        }
+
+        await interaction.update({ embeds: [originalEmbed] });
+        await interaction.followUp({
+          content: `${sentiment === 'tail' ? '🔥' : '🧊'} You chose to **${sentiment.toUpperCase()}** this bet!`,
+          ephemeral: true,
+        });
+      } catch (error) {
+        console.error('[Sentiment Error]', error.message);
+        await interaction.reply({ content: 'Something went wrong saving your choice.', ephemeral: true }).catch(() => {});
+      }
       return true;
     }
 

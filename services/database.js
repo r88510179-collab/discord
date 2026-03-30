@@ -503,6 +503,16 @@ function upsertUserBet(userId, betId, action) {
   db.prepare('INSERT OR REPLACE INTO user_bets (user_id, bet_id, action) VALUES (?, ?, ?)').run(userId, betId, action);
 }
 
+function getSentimentCounts(betId) {
+  const row = db.prepare(`
+    SELECT
+      SUM(CASE WHEN action = 'tail' THEN 1 ELSE 0 END) as tails,
+      SUM(CASE WHEN action = 'fade' THEN 1 ELSE 0 END) as fades
+    FROM user_bets WHERE bet_id = ?
+  `).get(betId);
+  return { tails: row?.tails || 0, fades: row?.fades || 0 };
+}
+
 function getUserBets(userId) {
   return db.prepare(`
     SELECT ub.*, b.description, b.sport, b.odds, b.units, b.result, b.profit_units,
@@ -558,5 +568,6 @@ module.exports = {
   findCapperByName,
   getCapperAnalytics,
   upsertUserBet,
+  getSentimentCounts,
   getUserBets,
 };
