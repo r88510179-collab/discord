@@ -199,6 +199,7 @@ function matchBetToGame(bet, scores) {
       const awayScore = game.scores?.find(s => s.name === game.away_team)?.score;
 
       if (homeScore != null && awayScore != null) {
+        console.log(`[AutoGrade] ✅ MATCHED: "${bet.description?.slice(0, 50)}" → ${game.home_team} vs ${game.away_team} (${homeScore}-${awayScore})`);
         return {
           game,
           homeScore: parseFloat(homeScore),
@@ -209,6 +210,10 @@ function matchBetToGame(bet, scores) {
       }
     }
   }
+
+  // No match found — log the failure with available API teams for debugging
+  const availableApiTeams = scores.map(g => `${g.home_team} vs ${g.away_team}`);
+  console.log(`[AutoGrade] ⚠️ FAILED TO MATCH: "${bet.description?.slice(0, 60)}" (sport: ${bet.sport}) | Matched aliases: [${[...findMentionedTeams(bet.description, normalizeSportContext(bet.sport)).matchedTeams].join(', ')}] | API had: ${availableApiTeams.join(', ') || 'NO GAMES'}`);
   return null;
 }
 
