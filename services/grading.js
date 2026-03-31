@@ -308,62 +308,27 @@ async function runAutoGrade(client) {
   let gradedCount = 0;
   const gradedBets = [];
 
-  for (const [sport, bets] of Object.entries(sportGroups)) {
-    const mappedSportKey = SPORT_MAP[sport] || sport;
-    const scores = await fetchScores(sport);
-    console.log(`[Diagnostic] Odds API returned ${scores.length} finished games for ${sport} (key: ${mappedSportKey})`);
-    if (scores.length === 0) continue;
+  // ── Gemini grades EVERYTHING (props, straights, parlays, all sports) ──
+  for (const bet of pending) {
+    // Skip bets placed less than 4 hours ago (games probably still in progress)
+    const betAgeHours = (Date.now() - new Date(bet.created_at).getTime()) / (1000 * 60 * 60);
+    if (betAgeHours < 4) continue;
 
-    for (const bet of bets) {
-      console.log(`\n================================`);
-      console.log(`[Diagnostic] Bet ID: ${bet.id?.slice(0, 12)}`);
-      console.log(`[Diagnostic] Sport: ${bet.sport} | Type: ${bet.bet_type}`);
-      console.log(`[Diagnostic] Description: ${bet.description?.substring(0, 60)}...`);
-      console.log(`[Diagnostic] Created At: ${bet.created_at}`);
+    console.log(`\n================================`);
+    console.log(`[AutoGrade] Bet ID: ${bet.id?.slice(0, 12)} | ${bet.sport} | ${bet.bet_type}`);
+    console.log(`[AutoGrade] Pick: "${bet.description?.substring(0, 60)}..." | Age: ${betAgeHours.toFixed(1)}h`);
 
-      // Route player props to AI grader (Odds API doesn't have player stats)
-      const desc = (bet.description || '').toLowerCase();
-      const betType = (bet.bet_type || '').toLowerCase();
-      if (betType === 'prop' || PROP_KEYWORDS.test(desc) || (OVER_UNDER_PATTERN.test(desc) && !desc.includes('spread'))) {
-        console.log(`[AutoGrade] Routing prop to AI: "${bet.description?.slice(0, 50)}"`);
-        const propResult = await gradePropWithAI(bet);
-        if (propResult) {
-          gradedBets.push(propResult);
-          gradedCount++;
-        }
-        continue; // Skip Odds API for this bet
+    const gradeResult = await gradePropWithAI(bet);
+
+    if (gradeResult) {
+      // Pay out community tailers + announce
+      const tailerCount = payoutTailers(bet.id, bet.odds || -110, gradeResult.result);
+      if (tailerCount > 0 && client) {
+        await postResultTicker(client, bet, gradeResult.result, tailerCount);
       }
 
-      const matchData = matchBetToGame(bet, scores);
-      const result = determineResult(bet, matchData);
-
-      if (result) {
-        const profitUnits = calcProfit(bet.odds || -110, bet.units || 1, result);
-
-        // Get AI grade
-        const aiGrade = await gradeBetAI(bet, result);
-
-        await gradeBet(bet.id, result, profitUnits, aiGrade.grade, aiGrade.reason);
-
-        // Update bankroll
-        if (bet.capper_id) {
-          const bankroll = await require('./database').getBankroll(bet.capper_id);
-          if (bankroll) {
-            const dollarAmount = profitUnits * parseFloat(bankroll.unit_size);
-            await updateBankroll(bet.capper_id, dollarAmount);
-          }
-          await saveDailySnapshot(bet.capper_id);
-        }
-
-        // Pay out community tailers + announce
-        const tailerCount = payoutTailers(bet.id, bet.odds || -110, result);
-        if (tailerCount > 0 && client) {
-          await postResultTicker(client, bet, result, tailerCount);
-        }
-
-        gradedBets.push({ bet, result, profitUnits, grade: aiGrade });
-        gradedCount++;
-      }
+      gradedBets.push(gradeResult);
+      gradedCount++;
     }
   }
 

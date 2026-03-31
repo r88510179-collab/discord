@@ -342,11 +342,19 @@ async function handleWarRoomInteraction(interaction) {
         .setValue(currentBet?.odds != null ? String(currentBet.odds) : '')
         .setRequired(true);
 
+      const unitsInput = new TextInputBuilder()
+        .setCustomId('units')
+        .setLabel('Units Risked (e.g., 1, 2.5)')
+        .setStyle(TextInputStyle.Short)
+        .setValue(currentBet?.units != null ? String(currentBet.units) : '1')
+        .setRequired(true);
+
       modal.addComponents(
         new ActionRowBuilder().addComponents(sportInput),
         new ActionRowBuilder().addComponents(typeInput),
         new ActionRowBuilder().addComponents(descInput),
         new ActionRowBuilder().addComponents(oddsInput),
+        new ActionRowBuilder().addComponents(unitsInput),
       );
 
       await interaction.showModal(modal);
@@ -452,12 +460,14 @@ async function handleWarRoomInteraction(interaction) {
     const newType = interaction.fields.getTextInputValue('bet_type').trim();
     const newDesc = interaction.fields.getTextInputValue('description').trim();
     const oddsStr = interaction.fields.getTextInputValue('odds').trim();
+    const unitsStr = interaction.fields.getTextInputValue('units').trim();
     const newOdds = oddsStr ? parseInt(oddsStr, 10) : null;
+    const newUnits = unitsStr ? parseFloat(unitsStr) : null;
 
     // Update all editable fields
     if (newDesc || newOdds) {
-      db.prepare('UPDATE bets SET sport = ?, bet_type = ?, description = ?, odds = COALESCE(?, odds) WHERE id = ?')
-        .run(newSport || 'Unknown', newType || 'straight', newDesc, newOdds, betId);
+      db.prepare('UPDATE bets SET sport = ?, bet_type = ?, description = ?, odds = COALESCE(?, odds), units = COALESCE(?, units) WHERE id = ?')
+        .run(newSport || 'Unknown', newType || 'straight', newDesc, newOdds, newUnits, betId);
 
       const current = db.prepare('SELECT * FROM bets WHERE id = ?').get(betId);
 
