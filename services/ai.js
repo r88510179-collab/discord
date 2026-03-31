@@ -644,37 +644,43 @@ async function generateRecap(stats, recentBets) {
 
 // ── Tweet Bouncer: extract a pick from raw tweet text or return null ──
 async function extractPickFromTweet(tweetText, capperName) {
-  const prompt = `You are a sports betting parser. Read the following tweet.
-1. If the tweet does NOT contain a clear sports bet or pick, reply exactly with: NULL
-2. If the tweet DOES contain a bet, extract it and return it as clean JSON.
-3. If it's marketing/promo ("VIP", "RT", "Discount", "LIVE NOW"), reply: NULL
-
-Format for valid bets:
-{
-  "sport": "NBA/NFL/MLB/NHL/UFC/Soccer/etc",
-  "type": "straight/parlay/prop",
-  "description": "The actual pick, cleaned up (e.g., 'LeBron James Over 25.5 Pts')",
-  "odds": "-110",
-  "units": 1,
-  "legs": [{"description": "Leg 1 text", "odds": -110}]
-}
-
-For parlays, populate the "legs" array. For straights, use a single-entry legs array.
-If odds/units aren't mentioned, leave odds blank and default units to 1.
-
-Tweet from ${capperName}: "${tweetText}"`;
-
-  const sys = 'You are a strict sports betting parser. Return ONLY the JSON object or the word NULL. No markdown, no backticks, no explanation.';
-  const raw = await callLLM(prompt, sys);
-  if (!raw) return null;
-
-  const cleaned = raw.replace(/```json/g, '').replace(/```/g, '').trim();
-  if (cleaned === 'NULL' || cleaned.toLowerCase() === 'null') return null;
-
   try {
-    return JSON.parse(cleaned);
-  } catch {
-    console.log(`[TweetBouncer] Failed to parse AI response: ${cleaned.slice(0, 80)}`);
+    const Groq = require('groq-sdk');
+    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
+    const prompt = `You are a sports betting parser. Read this tweet from @${capperName}: "${tweetText}"
+
+1. If it does NOT contain a clear sports pick, return exactly: {"status": "NULL"}
+2. If it's marketing/promo ("VIP", "RT", "Discount", "LIVE NOW"), return: {"status": "NULL"}
+3. If it DOES contain a pick, extract it into this JSON format:
+{
+  "status": "VALID",
+  "sport": "NBA/NFL/MLB/etc",
+  "type": "straight/parlay/prop",
+  "description": "Cleaned up pick",
+  "odds": "-110 or N/A",
+  "units": 1,
+  "legs": [{"description": "Leg text", "odds": -110}]
+}
+For parlays, populate legs. For straights, use a single-entry legs array.`;
+
+    const response = await groq.chat.completions.create({
+      messages: [{ role: 'user', content: prompt }],
+      model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+      temperature: 0,
+      response_format: { type: 'json_object' },
+    });
+
+    const jsonResponse = JSON.parse(response.choices[0]?.message?.content);
+
+    if (jsonResponse.status === 'NULL') {
+      return null;
+    }
+
+    delete jsonResponse.status;
+    return jsonResponse;
+  } catch (err) {
+    console.error('[Groq TweetBouncer Error]', err.message);
     return null;
   }
 }
