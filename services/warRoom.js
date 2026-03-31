@@ -218,22 +218,19 @@ async function handleWarRoomInteraction(interaction) {
     const [action, betId] = interaction.customId.split(':');
 
     if (action === 'war_approve') {
-      const bet = approveBet(betId);
-      if (!bet) {
-        return interaction.reply({ content: 'Bet not found or already confirmed.', ephemeral: true });
-      }
+      await interaction.deferReply({ ephemeral: true });
 
-      // Update the staging embed to show approved
-      const approvedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
-        .setTitle('Bet Approved')
-        .setColor(COLORS.success);
-      await interaction.update({ embeds: [approvedEmbed], components: [] });
+      try {
+        const bet = approveBet(betId);
+        if (!bet) {
+          return interaction.editReply({ content: 'Bet not found or already confirmed.' });
+        }
 
-      // Forward to private dashboard
-      await postPickTracked(
-        interaction.client, bet, bet.capper_name || 'Unknown',
-        'war-room', 'discord',
-      );
+        // Forward to private dashboard
+        await postPickTracked(
+          interaction.client, bet, bet.capper_name || 'Unknown',
+          'war-room', 'discord',
+        );
 
       // Post to Public Community Feed with Tail/Fade buttons only
       const publicChannelId = process.env.PUBLIC_CHANNEL_ID || process.env.DASHBOARD_CHANNEL_ID;
@@ -303,7 +300,16 @@ async function handleWarRoomInteraction(interaction) {
         }
       }
 
+      // Delete the War Room staging embed and confirm
+      await interaction.message.delete().catch(() => {});
+      await interaction.editReply({ content: 'Bet approved and moved to the dashboard. War Room cleared!' });
       return true;
+
+      } catch (error) {
+        console.error('[Approve Error]', error.message);
+        await interaction.editReply({ content: 'Something went wrong while approving the bet.' }).catch(() => {});
+        return true;
+      }
     }
 
     if (action === 'war_edit') {
