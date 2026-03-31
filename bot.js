@@ -205,6 +205,45 @@ client.on(Events.MessageCreate, async (message) => {
     }
   }
 
+  // 🗄️ FULL PENDING LIST
+  if (message.content.toLowerCase() === '!pending') {
+    try {
+      const { db: database } = require('./services/database');
+      const { AttachmentBuilder } = require('discord.js');
+      const allPending = database.prepare(`
+        SELECT b.*, c.display_name AS capper_name
+        FROM bets b LEFT JOIN cappers c ON b.capper_id = c.id
+        WHERE b.result = 'pending' ORDER BY b.created_at DESC
+      `).all();
+
+      if (allPending.length === 0) {
+        return message.reply('There are no pending bets right now.');
+      }
+
+      let fileContent = `--- FULL PENDING BETS LIST (${allPending.length} Total) ---\n`;
+      fileContent += `Generated: ${new Date().toISOString()}\n\n`;
+
+      allPending.forEach((bet, index) => {
+        const cleanDesc = bet.description ? bet.description.replace(/\n/g, ' | ') : 'No description';
+        fileContent += `${index + 1}. [${(bet.sport || 'Unknown').toUpperCase()}] Capper: ${bet.capper_name || 'Unknown'}\n`;
+        fileContent += `   Pick: ${cleanDesc}\n`;
+        fileContent += `   Type: ${bet.bet_type || 'straight'} | Odds: ${bet.odds || 'N/A'}\n`;
+        fileContent += `   Date Placed: ${bet.created_at}\n`;
+        fileContent += `   Bet ID: ${bet.id}\n`;
+        fileContent += `--------------------------------------------------\n\n`;
+      });
+
+      const attachment = new AttachmentBuilder(Buffer.from(fileContent, 'utf-8'), { name: 'pending-bets-backlog.txt' });
+      return message.reply({
+        content: `**Here is the complete backlog.**\nThere are currently **${allPending.length}** bets waiting to be graded.`,
+        files: [attachment],
+      });
+    } catch (error) {
+      console.error('[PENDING CMD ERROR]', error);
+      return message.reply('Error generating the pending bets file.');
+    }
+  }
+
   // 💵 BANKROLL COMMAND
   if (message.content.toLowerCase() === '!bankroll') {
     try {
