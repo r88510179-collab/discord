@@ -307,34 +307,45 @@ async function handleWarRoomInteraction(interaction) {
     }
 
     if (action === 'war_edit') {
+      // Fetch current bet data to pre-fill the modal
+      const currentBet = db.prepare('SELECT * FROM bets WHERE id = ?').get(betId);
+
       const modal = new ModalBuilder()
         .setCustomId(`war_modal:${betId}`)
-        .setTitle('Edit Bet');
+        .setTitle('Edit Bet Details');
 
-      const teamInput = new TextInputBuilder()
-        .setCustomId('team_name')
-        .setLabel('Team Name')
+      const sportInput = new TextInputBuilder()
+        .setCustomId('sport')
+        .setLabel('Sport')
         .setStyle(TextInputStyle.Short)
-        .setRequired(false)
-        .setPlaceholder('e.g., Los Angeles Lakers');
+        .setValue(currentBet?.sport || '')
+        .setRequired(true);
 
-      const lineInput = new TextInputBuilder()
-        .setCustomId('betting_line')
-        .setLabel('Betting Line')
+      const typeInput = new TextInputBuilder()
+        .setCustomId('bet_type')
+        .setLabel('Bet Type (straight, parlay, prop)')
         .setStyle(TextInputStyle.Short)
-        .setRequired(false)
-        .setPlaceholder('e.g., -3.5 or Over 220.5');
+        .setValue(currentBet?.bet_type || 'straight')
+        .setRequired(true);
+
+      const descInput = new TextInputBuilder()
+        .setCustomId('description')
+        .setLabel('Pick / Description')
+        .setStyle(TextInputStyle.Paragraph)
+        .setValue(currentBet?.description || '')
+        .setRequired(true);
 
       const oddsInput = new TextInputBuilder()
         .setCustomId('odds')
-        .setLabel('Odds')
+        .setLabel('Odds (e.g., -110, +150)')
         .setStyle(TextInputStyle.Short)
-        .setRequired(false)
-        .setPlaceholder('e.g., -110');
+        .setValue(currentBet?.odds != null ? String(currentBet.odds) : '')
+        .setRequired(true);
 
       modal.addComponents(
-        new ActionRowBuilder().addComponents(teamInput),
-        new ActionRowBuilder().addComponents(lineInput),
+        new ActionRowBuilder().addComponents(sportInput),
+        new ActionRowBuilder().addComponents(typeInput),
+        new ActionRowBuilder().addComponents(descInput),
         new ActionRowBuilder().addComponents(oddsInput),
       );
 
@@ -437,30 +448,28 @@ async function handleWarRoomInteraction(interaction) {
   // Handle modal submissions
   if (interaction.isModalSubmit() && interaction.customId.startsWith('war_modal:')) {
     const betId = interaction.customId.split(':')[1];
-    const teamName = interaction.fields.getTextInputValue('team_name').trim();
-    const bettingLine = interaction.fields.getTextInputValue('betting_line').trim();
+    const newSport = interaction.fields.getTextInputValue('sport').trim();
+    const newType = interaction.fields.getTextInputValue('bet_type').trim();
+    const newDesc = interaction.fields.getTextInputValue('description').trim();
     const oddsStr = interaction.fields.getTextInputValue('odds').trim();
-
-    // Build updated description from inputs
-    const parts = [teamName, bettingLine].filter(Boolean);
-    const newDesc = parts.length > 0 ? parts.join(' ') : null;
     const newOdds = oddsStr ? parseInt(oddsStr, 10) : null;
 
+    // Update all editable fields
     if (newDesc || newOdds) {
-      const current = updateBetFields(
-        betId,
-        newDesc || interaction.message?.embeds?.[0]?.fields?.find(f => f.name === 'Description')?.value || '',
-        newOdds || null,
-      );
+      db.prepare('UPDATE bets SET sport = ?, bet_type = ?, description = ?, odds = COALESCE(?, odds) WHERE id = ?')
+        .run(newSport || 'Unknown', newType || 'straight', newDesc, newOdds, betId);
+
+      const current = db.prepare('SELECT * FROM bets WHERE id = ?').get(betId);
 
       if (current) {
-        // Refresh the staging embed with updated data
         const refreshedEmbed = new EmbedBuilder()
-          .setTitle('🔒 Bet Pending Review (Edited)')
+          .setTitle('Bet Pending Review (Edited)')
           .setColor(COLORS.info)
           .addFields(
-            { name: 'Description', value: current.description || 'N/A' },
+            { name: 'Sport', value: current.sport || 'Unknown', inline: true },
+            { name: 'Type', value: (current.bet_type || 'straight').toUpperCase(), inline: true },
             { name: 'Odds', value: String(current.odds ?? 'N/A'), inline: true },
+            { name: 'Description', value: current.description || 'N/A' },
             { name: 'Units', value: String(current.units ?? 1), inline: true },
             { name: 'Bet ID', value: `\`${current.id}\``, inline: false },
           )
