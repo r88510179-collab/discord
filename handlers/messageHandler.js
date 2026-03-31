@@ -693,6 +693,8 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
       for (const bet of reviewBets) {
         await sendStagingEmbed(message.client, bet, capperInfo.name, message.url);
       }
+      // Inbox Zero: clean up #submit-picks after staging
+      try { await message.delete(); } catch (_) { /* Missing perms or already deleted */ }
     }
   } catch (err) {
     // Silently ignore duplicate image detections

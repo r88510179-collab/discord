@@ -318,11 +318,11 @@ async function runAutoGrade(client) {
     console.log(`[AutoGrade] Processing: "${bet.description?.slice(0, 50)}" | ${bet.sport} | Age: ${betAgeHours.toFixed(1)}h`);
 
     let retries = 3;
-    let gradeResult = null;
+    let aiResult = null;
 
     while (retries > 0) {
       try {
-        gradeResult = await gradePropWithAI(bet);
+        aiResult = await gradePropWithAI(bet);
         break;
       } catch (error) {
         if (error.status === 429 || error.message?.includes('429')) {
@@ -337,13 +337,12 @@ async function runAutoGrade(client) {
       }
     }
 
-    if (gradeResult) {
-      const tailerCount = payoutTailers(bet.id, bet.odds || -110, gradeResult.result);
-      if (tailerCount > 0 && client) {
-        await postResultTicker(client, bet, gradeResult.result, tailerCount);
+    if (aiResult && ['WIN', 'LOSS', 'PUSH', 'VOID'].includes(aiResult.status)) {
+      const finalResult = await finalizeBetGrading(client, bet, aiResult.status, aiResult.evidence);
+      if (finalResult) {
+        gradedBets.push(finalResult);
+        gradedCount++;
       }
-      gradedBets.push(gradeResult);
-      gradedCount++;
       await delay(2000); // Discord API spacing
     }
   }
@@ -464,82 +463,61 @@ async function gradeFromCelebration(client, capperId, outcome, subjects) {
 }
 
 // ── AI Prop Grader (Gemini with Google Search) ──────────────
+// ── Pure AI Brain — returns ONLY { status, evidence }. No DB updates. ──
 async function gradePropWithAI(bet) {
   if (!process.env.GEMINI_API_KEY) {
-    console.log(`[AI Grader] Skipping prop — no GEMINI_API_KEY`);
+    console.log(`[AI Grader] Skipped — no GEMINI_API_KEY`);
     return null;
   }
 
-  console.log(`[AI Grader] Attempting to grade prop: "${bet.description?.slice(0, 60)}" (${bet.sport})`);
+  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+  const model = genAI.getGenerativeModel({
+    model: 'gemini-2.0-flash',
+    tools: [{ googleSearch: {} }],
+  });
 
-  try {
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    const model = genAI.getGenerativeModel({
-      model: 'gemini-2.0-flash',
-      tools: [{ googleSearch: {} }],
-    });
+  const prompt = `Grade this sports bet. Search the web for the box score.
+Bet: "${bet.description}" | Sport: ${bet.sport || 'Unknown'} | Date: ${bet.created_at}
 
-    const prompt = `You are an expert sports betting grader.
-Your job is to grade the following player prop bet.
+Return JSON format: { "status": "WIN" | "LOSS" | "PUSH" | "VOID" | "PENDING", "evidence": "..." }
+NOTE: Use "VOID" if the player did not play (late scratch) or the game was canceled.
+If the game has not been played yet, return "PENDING".`;
 
-Bet Pick: "${bet.description}"
-Sport: ${bet.sport || 'Unknown'}
-Date Placed: ${bet.created_at}
-
-Instructions:
-1. Search the web for the final box score of the player's game on or immediately after the Date Placed.
-2. Find the exact stat requested (e.g., Assists, Points, Rebounds, Goals, Shots on Target, Strikeouts).
-3. Compare the actual stat to the bet line.
-4. Return STRICTLY valid JSON. No markdown formatting, no backticks.
-
-Format:
-{
-  "status": "WIN" | "LOSS" | "PUSH" | "PENDING",
-  "actual_stat": "number or text",
-  "evidence": "Briefly state the actual stat found and the game date."
+  const result = await model.generateContent(prompt);
+  const cleanJson = result.response.text().replace(/```json/g, '').replace(/```/g, '').trim();
+  const parsed = JSON.parse(cleanJson);
+  console.log(`[AI Grader] ${bet.id?.slice(0, 8)}: ${parsed.status} — ${parsed.evidence?.slice(0, 80)}`);
+  return parsed; // { status, evidence } — caller handles DB
 }
 
-If the game has not been played yet or you cannot find the box score, return status "PENDING".`;
+// ── Finalize: DB update + capper bankroll + tailer payouts + ticker ──
+async function finalizeBetGrading(client, bet, status, evidence) {
+  const resultLower = status.toLowerCase();
+  const profitUnits = (resultLower === 'void') ? 0 : calcProfit(bet.odds || -110, bet.units || 1, resultLower);
 
-    const result = await model.generateContent(prompt);
-    const textResponse = result.response.text();
+  await gradeBet(bet.id, resultLower, profitUnits,
+    resultLower === 'win' ? 'B' : resultLower === 'void' ? 'N/A' : 'D',
+    `AI Grader: ${evidence || 'Graded via Gemini Search'}`);
 
-    // Clean up response in case Gemini adds markdown
-    const cleanJson = textResponse.replace(/```json/g, '').replace(/```/g, '').trim();
-    const aiGrade = JSON.parse(cleanJson);
-
-    console.log(`[AI Grader] Result for "${bet.description?.slice(0, 40)}": ${aiGrade.status}. Evidence: ${aiGrade.evidence}`);
-
-    if (aiGrade.status === 'WIN' || aiGrade.status === 'LOSS' || aiGrade.status === 'PUSH') {
-      const resultLower = aiGrade.status.toLowerCase();
-      const profitUnits = calcProfit(bet.odds || -110, bet.units || 1, resultLower);
-
-      await gradeBet(bet.id, resultLower, profitUnits, resultLower === 'win' ? 'B' : 'D',
-        `AI Grader: ${aiGrade.evidence || 'Graded via Gemini Search'}`);
-
-      // Update bankroll
-      if (bet.capper_id) {
-        const bankroll = getBankroll(bet.capper_id);
-        if (bankroll) {
-          const dollarAmount = profitUnits * parseFloat(bankroll.unit_size);
-          updateBankroll(bet.capper_id, dollarAmount);
-        }
-        saveDailySnapshot(bet.capper_id);
-      }
-
-      const aiTailerCount = payoutTailers(bet.id, bet.odds || -110, resultLower);
-      console.log(`[AI Grader] ✅ DB updated: ${bet.id.slice(0, 8)} → ${resultLower} (${profitUnits >= 0 ? '+' : ''}${profitUnits.toFixed(2)}u)`);
-      return { bet, result: resultLower, profitUnits, grade: { grade: resultLower === 'win' ? 'B' : 'D', reason: aiGrade.evidence } };
+  // Update capper bankroll
+  if (bet.capper_id && resultLower !== 'void') {
+    const bankroll = getBankroll(bet.capper_id);
+    if (bankroll) {
+      updateBankroll(bet.capper_id, profitUnits * parseFloat(bankroll.unit_size));
     }
-
-    // PENDING or unknown — skip for now
-    console.log(`[AI Grader] Bet still pending or unresolvable: ${aiGrade.status}`);
-    return null;
-
-  } catch (error) {
-    console.error(`[AI Grader] Error grading bet ${bet.id?.slice(0, 8)}: ${error.message}`);
-    return null;
+    saveDailySnapshot(bet.capper_id);
   }
+
+  // Pay out community tailers (void = refund)
+  const tailerCount = payoutTailers(bet.id, bet.odds || -110, resultLower === 'void' ? 'push' : resultLower);
+
+  // Post ticker
+  if (tailerCount > 0 && client) {
+    await postResultTicker(client, bet, resultLower, tailerCount);
+  }
+
+  console.log(`[AutoGrade] Finalized ${bet.id?.slice(0, 8)} → ${resultLower} (${profitUnits >= 0 ? '+' : ''}${profitUnits.toFixed(2)}u) | ${tailerCount} tailers paid`);
+  return { bet, result: resultLower, profitUnits, grade: { grade: resultLower === 'win' ? 'B' : 'D', reason: evidence } };
 }
 
 // ── Result Ticker — announce graded bets to dashboard ────────

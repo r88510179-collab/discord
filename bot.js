@@ -458,6 +458,23 @@ client.once(Events.ClientReady, (c) => {
   });
   console.log('🌅 Daily recap at 8 AM ET');
 
+  // ── 90-Day DB Purge (3:30 AM UTC daily) ────────────────────
+  cron.schedule('30 3 * * *', () => {
+    try {
+      const { db: database } = require('./services/database');
+      console.log('[Cron] Running 90-Day DB Purge...');
+      database.transaction(() => {
+        database.prepare("DELETE FROM bets WHERE result = 'archived' AND created_at < datetime('now', '-90 days')").run();
+        database.prepare('DELETE FROM user_bets WHERE bet_id NOT IN (SELECT id FROM bets)').run();
+      })();
+      database.exec('VACUUM');
+      console.log('[Cron] DB Purge & VACUUM complete.');
+    } catch (err) {
+      console.error('[Cron] Purge error:', err.message);
+    }
+  });
+  console.log('🧹 90-day DB purge at 3:30 AM UTC');
+
   console.log('🚀 Bot is ready!\n');
 });
 

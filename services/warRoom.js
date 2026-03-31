@@ -476,10 +476,10 @@ async function handleWarRoomInteraction(interaction) {
   if (interaction.isModalSubmit() && interaction.customId.startsWith('war_tailmodal:')) {
     const betId = interaction.customId.split(':')[1];
     const rawUnits = interaction.fields.getTextInputValue('risk_units');
-    const riskUnits = parseFloat(rawUnits);
+    const riskUnits = Math.round(parseFloat(rawUnits) * 100) / 100;
 
-    if (isNaN(riskUnits) || riskUnits <= 0 || riskUnits > 50) {
-      return interaction.reply({ content: 'Invalid unit amount. Must be between 0.1 and 50.', ephemeral: true });
+    if (!Number.isFinite(riskUnits) || riskUnits < 0.1 || riskUnits > 50) {
+      return interaction.reply({ content: 'Invalid unit amount. Please enter a number between 0.1 and 50.', ephemeral: true });
     }
 
     try {
