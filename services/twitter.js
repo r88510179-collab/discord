@@ -1,109 +1,100 @@
-const { getTrackedTwitterAccounts, updateLastTweetId, getOrCreateCapper, createBet } = require('./database');
-const { parseTwitterPick } = require('./ai');
+// ═══════════════════════════════════════════════════════════
+// Twitter/X Scraper — uses agent-twitter-client to poll cappers
+// Feeds new tweets through the AI Bouncer → War Room pipeline
+// ═══════════════════════════════════════════════════════════
 
-const TWITTER_API = 'https://api.twitter.com/2';
+const { Scraper } = require('agent-twitter-client');
+const { extractPickFromTweet } = require('./ai');
+const { db, getOrCreateCapper, createBetWithLegs } = require('./database');
+const { sendStagingEmbed } = require('./warRoom');
 
-// ── Fetch recent tweets from a user ─────────────────────────
-async function fetchUserTweets(handle, sinceId) {
-  const bearer = process.env.TWITTER_BEARER_TOKEN;
-  if (!bearer) return [];
+const scraper = new Scraper();
+let isLoggedIn = false;
 
+async function loginTwitter() {
+  if (isLoggedIn) return true;
+  const { TWITTER_USERNAME, TWITTER_PASSWORD, TWITTER_EMAIL } = process.env;
+  if (!TWITTER_USERNAME || !TWITTER_PASSWORD) {
+    console.log('[Twitter] Skipped — no TWITTER_USERNAME/TWITTER_PASSWORD set');
+    return false;
+  }
   try {
-    // First get user ID from handle
-    const userRes = await fetch(`${TWITTER_API}/users/by/username/${handle}`, {
-      headers: { Authorization: `Bearer ${bearer}` },
-    });
-    if (!userRes.ok) return [];
-    const userData = await userRes.json();
-    const userId = userData.data?.id;
-    if (!userId) return [];
-
-    // Fetch recent tweets
-    let url = `${TWITTER_API}/users/${userId}/tweets?max_results=10&tweet.fields=created_at,text`;
-    if (sinceId) url += `&since_id=${sinceId}`;
-
-    const tweetsRes = await fetch(url, {
-      headers: { Authorization: `Bearer ${bearer}` },
-    });
-    if (!tweetsRes.ok) return [];
-    const tweetsData = await tweetsRes.json();
-    return tweetsData.data || [];
+    console.log('[Twitter] Logging into burner account...');
+    await scraper.login(TWITTER_USERNAME, TWITTER_PASSWORD, TWITTER_EMAIL || undefined);
+    isLoggedIn = true;
+    console.log('[Twitter] Login successful!');
+    return true;
   } catch (err) {
-    console.error(`[Twitter] Error fetching @${handle}:`, err.message);
-    return [];
+    console.error('[Twitter] Login failed:', err.message);
+    return false;
   }
 }
 
-// ── Poll all tracked accounts for new picks ─────────────────
-async function pollTwitterPicks(discordClient) {
-  const accounts = await getTrackedTwitterAccounts();
-  if (accounts.length === 0) return;
+async function pollCappers(client) {
+  const loggedIn = await loginTwitter();
+  if (!loggedIn) return;
 
-  console.log(`[Twitter] Polling ${accounts.length} tracked accounts...`);
+  // Parse capper handles from env: "handle1:DisplayName,handle2:DisplayName"
+  const raw = process.env.TWITTER_CAPPER_HANDLES || '';
+  const cappers = raw.split(',').map(s => s.trim()).filter(Boolean).map(entry => {
+    const [handle, name] = entry.split(':');
+    return { handle: handle.trim(), name: (name || handle).trim() };
+  });
 
-  for (const account of accounts) {
-    const tweets = await fetchUserTweets(account.twitter_handle, account.last_tweet_id);
-    if (tweets.length === 0) continue;
+  if (cappers.length === 0) {
+    console.log('[Twitter] No TWITTER_CAPPER_HANDLES configured');
+    return;
+  }
 
-    // Update last tweet ID to most recent
-    await updateLastTweetId(account.twitter_handle, tweets[0].id);
+  for (const { handle, name } of cappers) {
+    try {
+      console.log(`[Twitter] Checking @${handle} for new tweets...`);
+      const tweets = scraper.getTweets(handle, 5);
 
-    for (const tweet of tweets) {
-      // Use AI to parse the tweet for picks
-      const parsed = await parseTwitterPick(tweet.text, account.twitter_handle);
+      for await (const tweet of tweets) {
+        // 1. Already processed?
+        const exists = db.prepare('SELECT tweet_id FROM processed_tweets WHERE tweet_id = ?').get(tweet.id);
+        if (exists) continue;
 
-      if (!parsed.contains_picks || parsed.bets.length === 0) continue;
+        // 2. Mark as processed immediately
+        db.prepare('INSERT OR IGNORE INTO processed_tweets (tweet_id) VALUES (?)').run(tweet.id);
 
-      // Get or create the capper
-      const capper = require('./database').getOrCreateCapperByTwitter(account.twitter_handle);
+        // 3. Skip retweets and replies
+        if (tweet.isRetweet || tweet.isReply) continue;
 
-      // Save each detected bet
-      const savedBets = [];
-      for (const bet of parsed.bets) {
-        const saved = await createBet({
-          capper_id: capper.id,
-          sport: bet.sport || 'Unknown',
-          league: bet.league,
-          bet_type: bet.bet_type || 'straight',
-          description: bet.description,
-          odds: bet.odds || -110,
-          units: bet.units || 1,
-          source: 'twitter',
-          source_url: `https://x.com/${account.twitter_handle}/status/${tweet.id}`,
-          raw_text: tweet.text,
-        });
-        savedBets.push(saved);
-      }
+        // 4. AI Bouncer
+        console.log(`[Twitter] New tweet from @${handle}: "${(tweet.text || '').slice(0, 60)}..."`);
+        const pickData = await extractPickFromTweet(tweet.text || '', name);
 
-      // Post to Discord channel
-      try {
-        const channel = await discordClient.channels.fetch(account.channel_id);
-        if (channel) {
-          const betList = parsed.bets
-            .map(b => `• **${b.description}** (${b.odds > 0 ? '+' : ''}${b.odds}) ${b.units}u`)
-            .join('\n');
-
-          await channel.send({
-            embeds: [{
-              color: 0x1DA1F2,
-              author: {
-                name: `@${account.twitter_handle}`,
-                url: `https://x.com/${account.twitter_handle}`,
-                icon_url: 'https://abs.twimg.com/icons/apple-touch-icon-192x192.png',
-              },
-              title: '🐦 New Picks Detected',
-              description: betList,
-              footer: { text: `${savedBets.length} bet(s) auto-tracked • Source: Twitter` },
-              timestamp: new Date().toISOString(),
-              url: `https://x.com/${account.twitter_handle}/status/${tweet.id}`,
-            }],
-          });
+        if (!pickData) {
+          console.log(`[Twitter] Rejected — not a bet.`);
+          continue;
         }
-      } catch (err) {
-        console.error(`[Twitter] Discord post error:`, err.message);
+
+        // 5. Save to DB + stage to War Room
+        const capper = getOrCreateCapper(`twitter_${handle.toLowerCase()}`, name, null);
+        const saved = createBetWithLegs({
+          capper_id: capper.id,
+          sport: pickData.sport || 'Unknown',
+          bet_type: pickData.type || 'straight',
+          description: pickData.description,
+          odds: pickData.odds ? parseInt(pickData.odds, 10) : null,
+          units: pickData.units || 1,
+          source: 'twitter_scraper',
+          source_url: `https://x.com/${handle}/status/${tweet.id}`,
+          raw_text: (tweet.text || '').slice(0, 500),
+          review_status: 'needs_review',
+        }, pickData.legs || []);
+
+        if (saved && !saved._deduped && client) {
+          await sendStagingEmbed(client, saved, name, `https://x.com/${handle}/status/${tweet.id}`);
+          console.log(`[Twitter] Staged: "${pickData.description?.slice(0, 50)}" from @${handle}`);
+        }
       }
+    } catch (error) {
+      console.error(`[Twitter] Error scraping @${handle}:`, error.message);
     }
   }
 }
 
-module.exports = { pollTwitterPicks, fetchUserTweets };
+module.exports = { pollCappers, loginTwitter };

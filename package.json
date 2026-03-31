@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
+    "agent-twitter-client": "^0.0.18",
     "better-sqlite3": "^11.0.0",
     "discord.js": "^14.16.0",
     "dotenv": "^16.4.0",

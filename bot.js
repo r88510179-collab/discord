@@ -72,7 +72,7 @@ const { handleMessage } = require('./handlers/messageHandler');
 const { handleWarRoomInteraction } = require('./services/warRoom');
 const { handleGradeInteraction } = require('./handlers/gradeButtons');
 const { runAutoGrade } = require('./services/grading');
-const { pollTwitterPicks } = require('./services/twitter');
+const { pollCappers } = require('./services/twitter');
 const { postGradeSummary, postDailyLeaderboard } = require('./services/dashboard');
 
 /**
@@ -443,18 +443,18 @@ client.once(Events.ClientReady, (c) => {
     }
   });
 
-  // ── Schedule Twitter polling (every 5 minutes) ────────────
-  if (process.env.TWITTER_BEARER_TOKEN) {
-    cron.schedule('*/5 * * * *', async () => {
+  // ── Schedule Twitter/X scraping (every 10 minutes) ──────────
+  if (process.env.TWITTER_USERNAME && process.env.TWITTER_CAPPER_HANDLES) {
+    cron.schedule('*/10 * * * *', async () => {
       try {
-        await pollTwitterPicks(client);
+        await pollCappers(client);
       } catch (err) {
         console.error('[Cron] Twitter poll error:', err.message);
       }
     });
-    console.log('🐦 Twitter polling enabled (every 5 min)');
+    console.log('🐦 Twitter/X scraping enabled (every 10 min)');
   } else {
-    console.log('⚠️  Twitter polling disabled (no TWITTER_BEARER_TOKEN)');
+    console.log('⚠️  Twitter scraping disabled (no TWITTER_USERNAME or TWITTER_CAPPER_HANDLES)');
   }
 
   console.log(`⚡ Auto-grading every ${gradeInterval} min`);

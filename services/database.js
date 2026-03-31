@@ -26,6 +26,14 @@ db.exec(`
   );
 `);
 
+// ── Processed tweets dedup table ──────────────────────────────
+db.exec(`
+  CREATE TABLE IF NOT EXISTS processed_tweets (
+    tweet_id TEXT PRIMARY KEY,
+    processed_at TEXT DEFAULT (datetime('now'))
+  );
+`);
+
 // ── Additive: risk_amount column on user_bets ────────────────
 try {
   const ubCols = db.prepare("PRAGMA table_info('user_bets')").all().map(c => c.name);
