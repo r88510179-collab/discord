@@ -16,6 +16,16 @@ db.pragma('busy_timeout = 5000');
 // ── Run migrations (creates/updates schema) ─────────────────
 runMigrations(db);
 
+// ── Users table (community bankrolls for Tail/Fade) ──────────
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id        TEXT PRIMARY KEY,
+    username  TEXT,
+    bankroll  REAL NOT NULL DEFAULT 100.0,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+`);
+
 // ── Prepared statements (fast) ──────────────────────────────
 const stmts = {
   getCapper:         db.prepare('SELECT * FROM cappers WHERE discord_id = ?'),
@@ -513,6 +523,42 @@ function getSentimentCounts(betId) {
   return { tails: row?.tails || 0, fades: row?.fades || 0 };
 }
 
+function ensureUserExists(userId, username) {
+  db.prepare('INSERT OR IGNORE INTO users (id, username, bankroll) VALUES (?, ?, 100.0)').run(userId, username || 'Unknown');
+}
+
+function getUserBankroll(userId) {
+  const row = db.prepare('SELECT bankroll FROM users WHERE id = ?').get(userId);
+  return row ? row.bankroll : null;
+}
+
+function payoutTailers(betId, betOdds, result) {
+  const tailers = db.prepare("SELECT user_id FROM user_bets WHERE bet_id = ? AND action = 'tail'").all(betId);
+  if (tailers.length === 0) return 0;
+
+  const riskAmount = 1.0;
+  let payout = 0;
+  if (result === 'win') {
+    if (betOdds > 0) payout = riskAmount + (riskAmount * (betOdds / 100));
+    else if (betOdds < 0) payout = riskAmount + (riskAmount * (100 / Math.abs(betOdds)));
+    else payout = riskAmount * 2;
+  } else if (result === 'push') {
+    payout = riskAmount;
+  }
+
+  const txn = db.transaction(() => {
+    for (const t of tailers) {
+      ensureUserExists(t.user_id, null);
+      db.prepare('UPDATE users SET bankroll = bankroll - ? WHERE id = ?').run(riskAmount, t.user_id);
+      db.prepare('UPDATE users SET bankroll = bankroll + ? WHERE id = ?').run(payout, t.user_id);
+    }
+  });
+  txn();
+
+  console.log(`[Bankroll] Paid out ${tailers.length} tailers for bet ${betId} (result: ${result}, payout: ${payout.toFixed(2)}u each)`);
+  return tailers.length;
+}
+
 function getUserBets(userId) {
   return db.prepare(`
     SELECT ub.*, b.description, b.sport, b.odds, b.units, b.result, b.profit_units,
@@ -569,5 +615,8 @@ module.exports = {
   getCapperAnalytics,
   upsertUserBet,
   getSentimentCounts,
+  ensureUserExists,
+  getUserBankroll,
+  payoutTailers,
   getUserBets,
 };

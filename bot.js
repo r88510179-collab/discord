@@ -205,6 +205,26 @@ client.on(Events.MessageCreate, async (message) => {
     }
   }
 
+  // 💵 BANKROLL COMMAND
+  if (message.content.toLowerCase() === '!bankroll') {
+    try {
+      const { ensureUserExists, getUserBankroll } = require('./services/database');
+      ensureUserExists(message.author.id, message.author.username);
+      const balance = getUserBankroll(message.author.id);
+      const color = balance >= 100 ? 0x00FF00 : balance >= 50 ? 0xF39C12 : 0xFF0000;
+      return message.reply({ embeds: [{
+        color,
+        title: `${message.author.username}'s Bankroll`,
+        description: `**${balance.toFixed(2)}u**`,
+        footer: { text: 'Starting balance: 100.00u | Updated on Tail payouts' },
+        timestamp: new Date().toISOString(),
+      }] });
+    } catch (error) {
+      console.error('[BANKROLL ERROR]', error);
+      return message.reply('Error fetching your bankroll.');
+    }
+  }
+
   // 2. IMMEDIATELY ignore unauthorized channels
   if (!AUTHORIZED_CHANNELS.includes(message.channel.id)) return;
 
@@ -278,6 +298,51 @@ client.once(Events.ClientReady, (c) => {
   });
 
   console.log('📊 Daily leaderboard at 11 PM ET');
+
+  // ── Daily Recap (8 AM ET / 12 PM UTC) ──────────────────────
+  cron.schedule('0 12 * * *', async () => {
+    try {
+      const { db: database } = require('./services/database');
+      const { EmbedBuilder } = require('discord.js');
+      const stats = database.prepare(`
+        SELECT
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) as wins,
+          SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) as losses,
+          SUM(CASE WHEN result = 'push' THEN 1 ELSE 0 END) as pushes,
+          COALESCE(SUM(profit_units), 0) as total_profit,
+          COUNT(*) as total_bets
+        FROM bets
+        WHERE graded_at >= datetime('now', '-1 day')
+        AND result IN ('win', 'loss', 'push')
+      `).get();
+
+      if (!stats || stats.total_bets === 0) return;
+
+      const profit = stats.total_profit || 0;
+      const isGreen = profit >= 0;
+      const recapEmbed = new EmbedBuilder()
+        .setColor(isGreen ? 0x00FF00 : 0xFF0000)
+        .setTitle("Yesterday's Betting Recap")
+        .setDescription('Good morning! Here is how the server performed yesterday.')
+        .addFields(
+          { name: 'Total Profit', value: `${isGreen ? '+' : ''}${profit.toFixed(2)}u`, inline: true },
+          { name: 'Record', value: `${stats.wins}-${stats.losses}-${stats.pushes}`, inline: true },
+          { name: 'Total Graded', value: `${stats.total_bets}`, inline: true },
+        )
+        .setTimestamp();
+
+      const dashId = process.env.PUBLIC_CHANNEL_ID || process.env.DASHBOARD_CHANNEL_ID;
+      if (dashId) {
+        const ch = await client.channels.fetch(dashId).catch(() => null);
+        if (ch) await ch.send({ embeds: [recapEmbed] });
+      }
+      console.log('[Cron] Daily recap posted');
+    } catch (err) {
+      console.error('[Cron] Recap error:', err.message);
+    }
+  });
+  console.log('🌅 Daily recap at 8 AM ET');
+
   console.log('🚀 Bot is ready!\n');
 });
 

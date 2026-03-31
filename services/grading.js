@@ -1,4 +1,4 @@
-const { getPendingBets, gradeBet, updateBankroll, saveDailySnapshot, getBankroll, db } = require('./database');
+const { getPendingBets, gradeBet, updateBankroll, saveDailySnapshot, getBankroll, db, payoutTailers } = require('./database');
 const { gradeBetAI } = require('./ai');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
@@ -347,6 +347,9 @@ async function runAutoGrade(client) {
           await saveDailySnapshot(bet.capper_id);
         }
 
+        // Pay out community tailers
+        payoutTailers(bet.id, bet.odds || -110, result);
+
         gradedBets.push({ bet, result, profitUnits, grade: aiGrade });
         gradedCount++;
       }
@@ -532,6 +535,7 @@ If the game has not been played yet or you cannot find the box score, return sta
         saveDailySnapshot(bet.capper_id);
       }
 
+      payoutTailers(bet.id, bet.odds || -110, resultLower);
       console.log(`[AI Grader] ✅ DB updated: ${bet.id.slice(0, 8)} → ${resultLower} (${profitUnits >= 0 ? '+' : ''}${profitUnits.toFixed(2)}u)`);
       return { bet, result: resultLower, profitUnits, grade: { grade: resultLower === 'win' ? 'B' : 'D', reason: aiGrade.evidence } };
     }
