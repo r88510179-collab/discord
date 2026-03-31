@@ -476,18 +476,30 @@ async function gradePropWithAI(bet) {
     tools: [{ googleSearch: {} }],
   });
 
-  const prompt = `Grade this sports bet. Search the web for the box score.
-Bet: "${bet.description}" | Sport: ${bet.sport || 'Unknown'} | Date: ${bet.created_at}
+  const today = new Date().toISOString().split('T')[0];
 
-Return JSON format: { "status": "WIN" | "LOSS" | "PUSH" | "VOID" | "PENDING", "evidence": "..." }
-NOTE: Use "VOID" if the player did not play (late scratch) or the game was canceled.
-If the game has not been played yet, return "PENDING".`;
+  const prompt = `You are a sharp sports betting grader. Today's date is ${today}.
+Grade this sports bet. Search the web for the final box score or results.
+
+Bet: "${bet.description}"
+Sport: ${bet.sport || 'Unknown'}
+Date Placed: ${bet.created_at}
+
+Return exactly in this JSON format:
+{
+  "status": "WIN" | "LOSS" | "PUSH" | "VOID" | "PENDING",
+  "evidence": "A 1-sentence explanation of why you gave this grade (e.g. 'LeBron scored 26 points, over 25.5 hits')."
+}
+
+NOTE:
+- Use "VOID" if the player did not play (e.g., late scratch) or the game was canceled.
+- Only use "PENDING" if the game has literally not finished yet or hasn't started.`;
 
   const result = await model.generateContent(prompt);
   const cleanJson = result.response.text().replace(/```json/g, '').replace(/```/g, '').trim();
   const parsed = JSON.parse(cleanJson);
-  console.log(`[AI Grader] ${bet.id?.slice(0, 8)}: ${parsed.status} — ${parsed.evidence?.slice(0, 80)}`);
-  return parsed; // { status, evidence } — caller handles DB
+  console.log(`[AI Grader] Bet ID ${bet.id?.slice(0, 8)} | Status: ${parsed.status} | Evidence: ${parsed.evidence}`);
+  return parsed;
 }
 
 // ── Finalize: DB update + capper bankroll + tailer payouts + ticker ──
