@@ -642,4 +642,41 @@ async function generateRecap(stats, recentBets) {
   return (await callLLM(`Stats: ${JSON.stringify(stats)}\nBets: ${JSON.stringify(recentBets)}`, sys)) || 'Recap unavailable.';
 }
 
-module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, AMBIGUITY_THRESHOLD };
+// ── Tweet Bouncer: extract a pick from raw tweet text or return null ──
+async function extractPickFromTweet(tweetText, capperName) {
+  const prompt = `You are a sports betting parser. Read the following tweet.
+1. If the tweet does NOT contain a clear sports bet or pick, reply exactly with: NULL
+2. If the tweet DOES contain a bet, extract it and return it as clean JSON.
+3. If it's marketing/promo ("VIP", "RT", "Discount", "LIVE NOW"), reply: NULL
+
+Format for valid bets:
+{
+  "sport": "NBA/NFL/MLB/NHL/UFC/Soccer/etc",
+  "type": "straight/parlay/prop",
+  "description": "The actual pick, cleaned up (e.g., 'LeBron James Over 25.5 Pts')",
+  "odds": "-110",
+  "units": 1,
+  "legs": [{"description": "Leg 1 text", "odds": -110}]
+}
+
+For parlays, populate the "legs" array. For straights, use a single-entry legs array.
+If odds/units aren't mentioned, leave odds blank and default units to 1.
+
+Tweet from ${capperName}: "${tweetText}"`;
+
+  const sys = 'You are a strict sports betting parser. Return ONLY the JSON object or the word NULL. No markdown, no backticks, no explanation.';
+  const raw = await callLLM(prompt, sys);
+  if (!raw) return null;
+
+  const cleaned = raw.replace(/```json/g, '').replace(/```/g, '').trim();
+  if (cleaned === 'NULL' || cleaned.toLowerCase() === 'null') return null;
+
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    console.log(`[TweetBouncer] Failed to parse AI response: ${cleaned.slice(0, 80)}`);
+    return null;
+  }
+}
+
+module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, AMBIGUITY_THRESHOLD };

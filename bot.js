@@ -7,8 +7,64 @@ const path = require('path');
 
 // ── Health check server (starts FIRST, before Discord login) ──
 const app = express();
+app.use(express.json());
 app.get('/', (req, res) => res.status(200).send('OK'));
 app.get('/health', (req, res) => res.status(200).send('OK'));
+
+// ── Tweet Webhook Endpoint (Apify / Scraper integration) ─────
+app.post('/webhook/tweet', async (req, res) => {
+  try {
+    const { text, capper, author, tweetId } = req.body;
+    if (!text) return res.status(400).json({ error: 'Missing text field' });
+
+    const capperName = capper || author || 'Unknown';
+    console.log(`[Webhook] Tweet from ${capperName}: "${text.slice(0, 80)}..."`);
+
+    // AI Bouncer: extract pick or reject noise
+    const { extractPickFromTweet } = require('./services/ai');
+    const pick = await extractPickFromTweet(text, capperName);
+
+    if (!pick) {
+      console.log(`[Webhook] Rejected — not a bet.`);
+      return res.json({ status: 'ignored', reason: 'not_a_bet' });
+    }
+
+    // Save to DB with needs_review + send to War Room
+    const { getOrCreateCapper, createBetWithLegs } = require('./services/database');
+    const { sendStagingEmbed } = require('./services/warRoom');
+
+    const capperId = capper || `twitter_${(author || 'unknown').toLowerCase()}`;
+    const capperRecord = getOrCreateCapper(capperId, capperName, null);
+
+    const saved = createBetWithLegs({
+      capper_id: capperRecord.id,
+      sport: pick.sport || 'Unknown',
+      bet_type: pick.type || 'straight',
+      description: pick.description,
+      odds: pick.odds ? parseInt(pick.odds, 10) : null,
+      units: pick.units || 1,
+      source: 'twitter_webhook',
+      raw_text: text.slice(0, 500),
+      review_status: 'needs_review',
+    }, pick.legs || []);
+
+    if (saved && !saved._deduped) {
+      // Send to War Room
+      const warRoomClient = global._discordClient;
+      if (warRoomClient) {
+        await sendStagingEmbed(warRoomClient, saved, capperName);
+      }
+      console.log(`[Webhook] Staged bet: "${pick.description?.slice(0, 50)}" from ${capperName}`);
+      return res.json({ status: 'staged', betId: saved.id });
+    }
+
+    return res.json({ status: 'duplicate' });
+  } catch (error) {
+    console.error('[Webhook] Error:', error.message);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
 const port = process.env.PORT || 8080;
 app.listen(port, '0.0.0.0', () => console.log(`[SYSTEM] Health check server listening on 0.0.0.0:${port}`));
 
@@ -361,6 +417,7 @@ client.on(Events.MessageUpdate, (oldMsg, newMsg) => {
 
 // ── Bot ready ───────────────────────────────────────────────
 client.once(Events.ClientReady, (c) => {
+  global._discordClient = client; // Expose for webhook endpoint
   console.log('');
   console.log('╔═══════════════════════════════════════════════╗');
   console.log('║   🎰  ZoneTracker — Discord Bot  🎰       ║');
