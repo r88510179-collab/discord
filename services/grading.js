@@ -309,10 +309,18 @@ async function runAutoGrade(client) {
   const gradedBets = [];
 
   for (const [sport, bets] of Object.entries(sportGroups)) {
+    const mappedSportKey = SPORT_MAP[sport] || sport;
     const scores = await fetchScores(sport);
+    console.log(`[Diagnostic] Odds API returned ${scores.length} finished games for ${sport} (key: ${mappedSportKey})`);
     if (scores.length === 0) continue;
 
     for (const bet of bets) {
+      console.log(`\n================================`);
+      console.log(`[Diagnostic] Bet ID: ${bet.id?.slice(0, 12)}`);
+      console.log(`[Diagnostic] Sport: ${bet.sport} | Type: ${bet.bet_type}`);
+      console.log(`[Diagnostic] Description: ${bet.description?.substring(0, 60)}...`);
+      console.log(`[Diagnostic] Created At: ${bet.created_at}`);
+
       // Route player props to AI grader (Odds API doesn't have player stats)
       const desc = (bet.description || '').toLowerCase();
       const betType = (bet.bet_type || '').toLowerCase();
