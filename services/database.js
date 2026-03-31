@@ -26,6 +26,12 @@ db.exec(`
   );
 `);
 
+// ── Additive: risk_amount column on user_bets ────────────────
+try {
+  const ubCols = db.prepare("PRAGMA table_info('user_bets')").all().map(c => c.name);
+  if (!ubCols.includes('risk_amount')) db.exec('ALTER TABLE user_bets ADD COLUMN risk_amount REAL DEFAULT 1.0');
+} catch (_) { /* table may not exist yet */ }
+
 // ── Prepared statements (fast) ──────────────────────────────
 const stmts = {
   getCapper:         db.prepare('SELECT * FROM cappers WHERE discord_id = ?'),
@@ -509,8 +515,9 @@ function getCapperAnalytics(capperId) {
 
 // ── Export everything (same interface as old supabase.js) ────
 // ── User Bets (Tail/Fade tracking) ───────────────────────────
-function upsertUserBet(userId, betId, action) {
-  db.prepare('INSERT OR REPLACE INTO user_bets (user_id, bet_id, action) VALUES (?, ?, ?)').run(userId, betId, action);
+function upsertUserBet(userId, betId, action, riskAmount = 1.0) {
+  db.prepare('INSERT INTO user_bets (user_id, bet_id, action, risk_amount) VALUES (?, ?, ?, ?) ON CONFLICT(user_id, bet_id) DO UPDATE SET action = excluded.action, risk_amount = excluded.risk_amount')
+    .run(userId, betId, action, riskAmount);
 }
 
 function getSentimentCounts(betId) {
@@ -533,29 +540,28 @@ function getUserBankroll(userId) {
 }
 
 function payoutTailers(betId, betOdds, result) {
-  const tailers = db.prepare("SELECT user_id FROM user_bets WHERE bet_id = ? AND action = 'tail'").all(betId);
+  const tailers = db.prepare("SELECT user_id, COALESCE(risk_amount, 1.0) as risk FROM user_bets WHERE bet_id = ? AND action = 'tail'").all(betId);
   if (tailers.length === 0) return 0;
-
-  const riskAmount = 1.0;
-  let payout = 0;
-  if (result === 'win') {
-    if (betOdds > 0) payout = riskAmount + (riskAmount * (betOdds / 100));
-    else if (betOdds < 0) payout = riskAmount + (riskAmount * (100 / Math.abs(betOdds)));
-    else payout = riskAmount * 2;
-  } else if (result === 'push') {
-    payout = riskAmount;
-  }
 
   const txn = db.transaction(() => {
     for (const t of tailers) {
       ensureUserExists(t.user_id, null);
-      db.prepare('UPDATE users SET bankroll = bankroll - ? WHERE id = ?').run(riskAmount, t.user_id);
+      const risk = t.risk;
+      let payout = 0;
+      if (result === 'win') {
+        if (betOdds > 0) payout = risk + (risk * (betOdds / 100));
+        else if (betOdds < 0) payout = risk + (risk * (100 / Math.abs(betOdds)));
+        else payout = risk * 2;
+      } else if (result === 'push') {
+        payout = risk;
+      }
+      db.prepare('UPDATE users SET bankroll = bankroll - ? WHERE id = ?').run(risk, t.user_id);
       db.prepare('UPDATE users SET bankroll = bankroll + ? WHERE id = ?').run(payout, t.user_id);
     }
   });
   txn();
 
-  console.log(`[Bankroll] Paid out ${tailers.length} tailers for bet ${betId} (result: ${result}, payout: ${payout.toFixed(2)}u each)`);
+  console.log(`[Bankroll] Paid out ${tailers.length} tailers for bet ${betId} (result: ${result})`);
   return tailers.length;
 }
 

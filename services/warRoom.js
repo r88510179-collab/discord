@@ -380,15 +380,31 @@ async function handleWarRoomInteraction(interaction) {
       return true;
     }
 
-    // Tail / Fade — save vote, update embed with live sentiment counts
-    if (action === 'war_tail' || action === 'war_fade') {
-      const sentiment = action === 'war_tail' ? 'tail' : 'fade';
+    // Tail — show modal for custom risk amount
+    if (action === 'war_tail') {
+      const tailModal = new ModalBuilder()
+        .setCustomId(`war_tailmodal:${betId}`)
+        .setTitle('Tail this Bet');
+
+      const riskInput = new TextInputBuilder()
+        .setCustomId('risk_units')
+        .setLabel('How many units to risk? (e.g. 1, 2.5)')
+        .setStyle(TextInputStyle.Short)
+        .setValue('1')
+        .setRequired(true);
+
+      tailModal.addComponents(new ActionRowBuilder().addComponents(riskInput));
+      await interaction.showModal(tailModal);
+      return true;
+    }
+
+    // Fade — instant 1u fade
+    if (action === 'war_fade') {
       try {
-        upsertUserBet(interaction.user.id, betId, sentiment);
+        upsertUserBet(interaction.user.id, betId, 'fade', 1.0);
         const { tails, fades } = getSentimentCounts(betId);
         const sentimentString = `**${tails} Tailing** | **${fades} Fading**`;
 
-        // Rebuild embed with updated sentiment field
         const originalEmbed = EmbedBuilder.from(interaction.message.embeds[0]);
         const fieldIndex = originalEmbed.data.fields?.findIndex(f => f.name === 'Community Sentiment');
         if (fieldIndex !== undefined && fieldIndex !== -1) {
@@ -396,15 +412,11 @@ async function handleWarRoomInteraction(interaction) {
         } else {
           originalEmbed.addFields({ name: 'Community Sentiment', value: sentimentString, inline: false });
         }
-
         await interaction.update({ embeds: [originalEmbed] });
-        await interaction.followUp({
-          content: `${sentiment === 'tail' ? '🔥' : '🧊'} You chose to **${sentiment.toUpperCase()}** this bet!`,
-          ephemeral: true,
-        });
+        await interaction.followUp({ content: `🧊 You chose to **FADE** this bet!`, ephemeral: true });
       } catch (error) {
         console.error('[Sentiment Error]', error.message);
-        await interaction.reply({ content: 'Something went wrong saving your choice.', ephemeral: true }).catch(() => {});
+        await interaction.reply({ content: 'Something went wrong.', ephemeral: true }).catch(() => {});
       }
       return true;
     }
@@ -460,6 +472,43 @@ async function handleWarRoomInteraction(interaction) {
   }
 
   // Handle modal submissions
+  // Handle tail modal submission
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('war_tailmodal:')) {
+    const betId = interaction.customId.split(':')[1];
+    const rawUnits = interaction.fields.getTextInputValue('risk_units');
+    const riskUnits = parseFloat(rawUnits);
+
+    if (isNaN(riskUnits) || riskUnits <= 0 || riskUnits > 50) {
+      return interaction.reply({ content: 'Invalid unit amount. Must be between 0.1 and 50.', ephemeral: true });
+    }
+
+    try {
+      upsertUserBet(interaction.user.id, betId, 'tail', riskUnits);
+      const { tails, fades } = getSentimentCounts(betId);
+      const sentimentString = `**${tails} Tailing** | **${fades} Fading**`;
+
+      // Update the embed on the original message
+      const originalMsg = interaction.message;
+      if (originalMsg) {
+        const originalEmbed = EmbedBuilder.from(originalMsg.embeds[0]);
+        const fieldIndex = originalEmbed.data.fields?.findIndex(f => f.name === 'Community Sentiment');
+        if (fieldIndex !== undefined && fieldIndex !== -1) {
+          originalEmbed.data.fields[fieldIndex].value = sentimentString;
+        } else {
+          originalEmbed.addFields({ name: 'Community Sentiment', value: sentimentString, inline: false });
+        }
+        await originalMsg.edit({ embeds: [originalEmbed] }).catch(() => {});
+      }
+
+      await interaction.reply({ content: `🔥 You are tailing this bet for **${riskUnits}u**!`, ephemeral: true });
+    } catch (error) {
+      console.error('[Tail Modal Error]', error.message);
+      await interaction.reply({ content: 'Something went wrong.', ephemeral: true }).catch(() => {});
+    }
+    return true;
+  }
+
+  // Handle edit modal submission
   if (interaction.isModalSubmit() && interaction.customId.startsWith('war_modal:')) {
     const betId = interaction.customId.split(':')[1];
     const newSport = interaction.fields.getTextInputValue('sport').trim();

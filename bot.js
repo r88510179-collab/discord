@@ -308,6 +308,38 @@ client.on(Events.MessageCreate, async (message) => {
     }
   }
 
+  // 🏆 RESET SEASON (Admin only)
+  if (message.content.toLowerCase() === '!reset_season') {
+    if (!message.member.permissions.has('Administrator')) return;
+    try {
+      const { db: database } = require('./services/database');
+      const topCappers = database.prepare(`
+        SELECT c.display_name, COALESCE(SUM(b.profit_units), 0) as total_profit
+        FROM bets b JOIN cappers c ON b.capper_id = c.id
+        WHERE b.result IN ('win', 'loss', 'push')
+        GROUP BY c.id HAVING total_profit > 0
+        ORDER BY total_profit DESC LIMIT 3
+      `).all();
+
+      const medals = ['🥇', '🥈', '🥉'];
+      let announcement = '**SEASON CONCLUDED!**\n\n**Final Podium:**\n';
+      topCappers.forEach((c, i) => {
+        announcement += `${medals[i]} **${c.display_name}**: +${c.total_profit.toFixed(2)}u\n`;
+      });
+
+      database.transaction(() => {
+        database.prepare('UPDATE users SET bankroll = 100.00').run();
+        database.prepare("UPDATE bets SET result = 'archived' WHERE result IN ('win', 'loss', 'push')").run();
+      })();
+
+      announcement += '\n*All user bankrolls have been reset to 100.00u. A new season begins now!*';
+      return message.reply({ content: announcement });
+    } catch (error) {
+      console.error('[RESET_SEASON ERROR]', error);
+      return message.reply('Error resetting the season.');
+    }
+  }
+
   // 2. IMMEDIATELY ignore unauthorized channels
   if (!AUTHORIZED_CHANNELS.includes(message.channel.id)) return;
 

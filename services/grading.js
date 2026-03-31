@@ -308,27 +308,43 @@ async function runAutoGrade(client) {
   let gradedCount = 0;
   const gradedBets = [];
 
-  // ── Gemini grades EVERYTHING (props, straights, parlays, all sports) ──
+  // ── Hardened Gemini Grading Loop with retry + backoff ──
+  const delay = ms => new Promise(res => setTimeout(res, ms));
+
   for (const bet of pending) {
-    // Skip bets placed less than 4 hours ago (games probably still in progress)
     const betAgeHours = (Date.now() - new Date(bet.created_at).getTime()) / (1000 * 60 * 60);
     if (betAgeHours < 4) continue;
 
-    console.log(`\n================================`);
-    console.log(`[AutoGrade] Bet ID: ${bet.id?.slice(0, 12)} | ${bet.sport} | ${bet.bet_type}`);
-    console.log(`[AutoGrade] Pick: "${bet.description?.substring(0, 60)}..." | Age: ${betAgeHours.toFixed(1)}h`);
+    console.log(`[AutoGrade] Processing: "${bet.description?.slice(0, 50)}" | ${bet.sport} | Age: ${betAgeHours.toFixed(1)}h`);
 
-    const gradeResult = await gradePropWithAI(bet);
+    let retries = 3;
+    let gradeResult = null;
+
+    while (retries > 0) {
+      try {
+        gradeResult = await gradePropWithAI(bet);
+        break;
+      } catch (error) {
+        if (error.status === 429 || error.message?.includes('429')) {
+          const waitSec = (4 - retries) * 10;
+          console.warn(`[Rate Limit] Gemini 429. Retrying in ${waitSec}s... (${retries - 1} left)`);
+          await delay(waitSec * 1000);
+          retries--;
+        } else {
+          console.error(`[AutoGrade] Non-retryable error: ${error.message}`);
+          break;
+        }
+      }
+    }
 
     if (gradeResult) {
-      // Pay out community tailers + announce
       const tailerCount = payoutTailers(bet.id, bet.odds || -110, gradeResult.result);
       if (tailerCount > 0 && client) {
         await postResultTicker(client, bet, gradeResult.result, tailerCount);
       }
-
       gradedBets.push(gradeResult);
       gradedCount++;
+      await delay(2000); // Discord API spacing
     }
   }
 
