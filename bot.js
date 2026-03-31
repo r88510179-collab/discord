@@ -160,6 +160,51 @@ client.on(Events.MessageCreate, async (message) => {
     }
   }
 
+  // 🏆 LEADERBOARD COMMAND
+  if (message.content.toLowerCase() === '!leaderboard') {
+    try {
+      const { db } = require('./services/database');
+      const topCappers = db.prepare(`
+        SELECT c.display_name,
+          SUM(CASE WHEN b.result = 'win' THEN 1 ELSE 0 END) as wins,
+          SUM(CASE WHEN b.result = 'loss' THEN 1 ELSE 0 END) as losses,
+          SUM(CASE WHEN b.result = 'push' THEN 1 ELSE 0 END) as pushes,
+          COALESCE(SUM(b.profit_units), 0) as total_profit
+        FROM bets b
+        JOIN cappers c ON b.capper_id = c.id
+        WHERE b.result IN ('win', 'loss', 'push')
+        GROUP BY c.id
+        HAVING (wins + losses) > 0
+        ORDER BY total_profit DESC
+        LIMIT 10
+      `).all();
+
+      if (topCappers.length === 0) {
+        return message.reply('Not enough graded bets to generate a leaderboard yet!');
+      }
+
+      const medals = ['🥇', '🥈', '🥉'];
+      let boardText = '';
+      topCappers.forEach((cap, i) => {
+        const rank = i < 3 ? medals[i] : `**${i + 1}.**`;
+        const profit = cap.total_profit >= 0 ? `+${cap.total_profit.toFixed(2)}` : cap.total_profit.toFixed(2);
+        const winPct = Math.round((cap.wins / (cap.wins + cap.losses)) * 100);
+        boardText += `${rank} **${cap.display_name}**\n└ ${profit}u | ${cap.wins}-${cap.losses}-${cap.pushes} (${winPct}%)\n\n`;
+      });
+
+      return message.reply({ embeds: [{
+        color: 0xFFD700,
+        title: 'Server Leaderboard (All-Time)',
+        description: boardText,
+        footer: { text: 'Ranked by total profit units' },
+        timestamp: new Date().toISOString(),
+      }] });
+    } catch (error) {
+      console.error('[LEADERBOARD ERROR]', error);
+      return message.reply('Error fetching the leaderboard.');
+    }
+  }
+
   // 2. IMMEDIATELY ignore unauthorized channels
   if (!AUTHORIZED_CHANNELS.includes(message.channel.id)) return;
 
