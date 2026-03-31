@@ -254,6 +254,21 @@ async function handleWarRoomInteraction(interaction) {
               }
             } catch (_) { /* silent */ }
 
+            // Generate AI hype insight
+            let aiTake = '';
+            try {
+              const { GoogleGenerativeAI } = require('@google/generative-ai');
+              if (process.env.GEMINI_API_KEY) {
+                const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+                const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+                const prompt = `You are a sharp sports betting analyst. Write exactly ONE sentence (max 20 words) hyping up or analyzing this bet for a Discord community.\nCapper: ${bet.capper_name || 'Unknown'} (Win Rate: ${statsText})\nBet: ${bet.description} (${bet.sport})\nMake it punchy, sharp, and fun. No hashtags.`;
+                const aiResult = await model.generateContent(prompt);
+                aiTake = `**AI Take:** *"${aiResult.response.text().trim()}"*`;
+              }
+            } catch (_) {
+              aiTake = `**AI Take:** *"Riding with ${bet.capper_name || 'Unknown'} on this one!"*`;
+            }
+
             const pubEmbed = new EmbedBuilder()
               .setTitle(`New Play from ${bet.capper_name || 'Unknown'}`)
               .setColor(COLORS.success)
@@ -263,8 +278,12 @@ async function handleWarRoomInteraction(interaction) {
                 { name: 'Odds', value: String(bet.odds ?? 'N/A'), inline: true },
                 { name: 'Description', value: bet.description || 'N/A' },
                 { name: 'Capper History', value: statsText, inline: false },
-              )
-              .setTimestamp();
+              );
+
+            if (aiTake) {
+              pubEmbed.addFields({ name: '\u200B', value: aiTake, inline: false });
+            }
+            pubEmbed.setTimestamp();
 
             const pubRow = new ActionRowBuilder().addComponents(
               new ButtonBuilder()

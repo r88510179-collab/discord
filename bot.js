@@ -244,6 +244,50 @@ client.on(Events.MessageCreate, async (message) => {
     }
   }
 
+  // 👤 MYSTATS COMMAND
+  if (message.content.toLowerCase() === '!mystats') {
+    try {
+      const { db: database } = require('./services/database');
+      const userId = message.author.id;
+      const stats = database.prepare(`
+        SELECT
+          SUM(CASE WHEN b.result = 'win' THEN 1 ELSE 0 END) as wins,
+          SUM(CASE WHEN b.result = 'loss' THEN 1 ELSE 0 END) as losses,
+          SUM(CASE WHEN b.result = 'push' THEN 1 ELSE 0 END) as pushes
+        FROM user_bets ub
+        JOIN bets b ON ub.bet_id = b.id
+        WHERE ub.user_id = ? AND ub.action = 'tail' AND b.result IN ('win', 'loss', 'push')
+      `).get(userId);
+
+      const bestCapper = database.prepare(`
+        SELECT c.display_name, COUNT(*) as hits
+        FROM user_bets ub
+        JOIN bets b ON ub.bet_id = b.id
+        LEFT JOIN cappers c ON b.capper_id = c.id
+        WHERE ub.user_id = ? AND ub.action = 'tail' AND b.result = 'win'
+        GROUP BY c.id ORDER BY hits DESC LIMIT 1
+      `).get(userId);
+
+      const wins = stats?.wins || 0, losses = stats?.losses || 0, pushes = stats?.pushes || 0;
+      const total = wins + losses;
+      const winPct = total > 0 ? Math.round((wins / total) * 100) : 0;
+      const favText = bestCapper ? `${bestCapper.display_name} (${bestCapper.hits} winning tails)` : 'No winning tails yet!';
+
+      return message.reply({ embeds: [{
+        color: 0x0099ff,
+        title: `${message.author.username}'s Tailing Profile`,
+        fields: [
+          { name: 'Tailing Record', value: `${wins}-${losses}-${pushes} (${winPct}%)`, inline: true },
+          { name: 'Most Profitable Capper', value: favText, inline: false },
+        ],
+        thumbnail: { url: message.author.displayAvatarURL() },
+      }] });
+    } catch (error) {
+      console.error('[MYSTATS ERROR]', error);
+      return message.reply('Error fetching your stats.');
+    }
+  }
+
   // 💵 BANKROLL COMMAND
   if (message.content.toLowerCase() === '!bankroll') {
     try {

@@ -355,8 +355,11 @@ async function runAutoGrade(client) {
           await saveDailySnapshot(bet.capper_id);
         }
 
-        // Pay out community tailers
-        payoutTailers(bet.id, bet.odds || -110, result);
+        // Pay out community tailers + announce
+        const tailerCount = payoutTailers(bet.id, bet.odds || -110, result);
+        if (tailerCount > 0 && client) {
+          await postResultTicker(client, bet, result, tailerCount);
+        }
 
         gradedBets.push({ bet, result, profitUnits, grade: aiGrade });
         gradedCount++;
@@ -543,7 +546,7 @@ If the game has not been played yet or you cannot find the box score, return sta
         saveDailySnapshot(bet.capper_id);
       }
 
-      payoutTailers(bet.id, bet.odds || -110, resultLower);
+      const aiTailerCount = payoutTailers(bet.id, bet.odds || -110, resultLower);
       console.log(`[AI Grader] ✅ DB updated: ${bet.id.slice(0, 8)} → ${resultLower} (${profitUnits >= 0 ? '+' : ''}${profitUnits.toFixed(2)}u)`);
       return { bet, result: resultLower, profitUnits, grade: { grade: resultLower === 'win' ? 'B' : 'D', reason: aiGrade.evidence } };
     }
@@ -555,6 +558,43 @@ If the game has not been played yet or you cannot find the box score, return sta
   } catch (error) {
     console.error(`[AI Grader] Error grading bet ${bet.id?.slice(0, 8)}: ${error.message}`);
     return null;
+  }
+}
+
+// ── Result Ticker — announce graded bets to dashboard ────────
+async function postResultTicker(client, bet, status, tailerCount) {
+  try {
+    const dashId = process.env.PUBLIC_CHANNEL_ID || process.env.DASHBOARD_CHANNEL_ID;
+    if (!dashId) return;
+    const channel = await client.channels.fetch(dashId).catch(() => null);
+    if (!channel) return;
+
+    const isWin = status === 'win';
+    const color = isWin ? 0x00FF00 : (status === 'loss' ? 0xFF0000 : 0x808080);
+    const emoji = isWin ? 'WIN!' : (status === 'loss' ? 'LOSS' : 'PUSH');
+
+    const odds = bet.odds || -110;
+    const riskAmount = 1.0;
+    let perPayout = 0;
+    if (status === 'win') {
+      perPayout = odds > 0 ? riskAmount + (riskAmount * odds / 100) : riskAmount + (riskAmount * 100 / Math.abs(odds));
+    } else if (status === 'push') {
+      perPayout = riskAmount;
+    }
+    const totalDistributed = perPayout * tailerCount;
+
+    await channel.send({ embeds: [{
+      color,
+      title: `${emoji} ${(bet.sport || 'Unknown').toUpperCase()} Play Graded`,
+      description: `**Pick:** ${bet.description?.substring(0, 100) || 'Unknown'}\n**Capper:** ${bet.capper_name || 'Unknown'}`,
+      fields: [
+        { name: 'Odds', value: `${odds > 0 ? '+' : ''}${odds}`, inline: true },
+        { name: 'Community', value: `Paid out ${tailerCount} tailer${tailerCount === 1 ? '' : 's'} (${totalDistributed.toFixed(2)}u total)`, inline: false },
+      ],
+      timestamp: new Date().toISOString(),
+    }] });
+  } catch (err) {
+    console.error('[Ticker Error]', err.message);
   }
 }
 
