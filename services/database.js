@@ -48,8 +48,8 @@ const stmts = {
   insertCapper:      db.prepare('INSERT INTO cappers (id, discord_id, display_name, avatar_url) VALUES (?, ?, ?, ?)'),
   insertCapperTwitter: db.prepare('INSERT INTO cappers (id, twitter_handle, display_name) VALUES (?, ?, ?)'),
 
-  insertBet: db.prepare(`INSERT INTO bets (id, capper_id, sport, league, bet_type, description, odds, units, event_date, source, source_url, source_channel_id, source_message_id, fingerprint, raw_text, review_status, wager, payout)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+  insertBet: db.prepare(`INSERT INTO bets (id, capper_id, sport, league, bet_type, description, odds, units, event_date, source, source_url, source_channel_id, source_message_id, fingerprint, raw_text, review_status, wager, payout, season)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   insertLeg: db.prepare('INSERT INTO parlay_legs (id, bet_id, description, odds) VALUES (?, ?, ?, ?)'),
   gradeBet:  db.prepare('UPDATE bets SET result = ?, profit_units = ?, grade = ?, grade_reason = ?, graded_at = datetime(\'now\') WHERE id = ?'),
   getBet:    db.prepare('SELECT * FROM bets WHERE id = ?'),
@@ -144,6 +144,10 @@ const stmts = {
 
 function uid() { return crypto.randomBytes(16).toString('hex'); }
 
+function getActiveSeason() {
+  return String(process.env.ACTIVE_SEASON || 'Beta').trim() || 'Beta';
+}
+
 function normalizeDescription(text) {
   return String(text || '')
     .toLowerCase()
@@ -216,6 +220,7 @@ function createBet(betData) {
       betData.source_message_id || null, fingerprint, betData.raw_text || null,
       betData.review_status || 'confirmed',
       betData.wager || null, betData.payout || null,
+      betData.season || getActiveSeason(),
     );
   } catch (err) {
     // Concurrent insert race: unique fingerprint already committed by another writer.
@@ -310,12 +315,12 @@ function getLeaderboard(sortBy = 'total_profit_units', limit = 10) {
         MAX(SUM(CASE WHEN b.result IN ('win','loss') THEN b.units ELSE 0 END), 1) * 100, 1
       ) AS roi_pct
     FROM cappers c
-    LEFT JOIN bets b ON b.capper_id = c.id
+    LEFT JOIN bets b ON b.capper_id = c.id AND b.season = ?
     GROUP BY c.id
     HAVING COUNT(b.id) > 0
     ORDER BY ${col} DESC
     LIMIT ?
-  `).all(limit);
+  `).all(getActiveSeason(), limit);
 }
 
 // ── Bankroll ────────────────────────────────────────────────

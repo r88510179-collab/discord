@@ -29,6 +29,9 @@ module.exports = {
     };
 
     const cappers = await getLeaderboard(sortBy, 15);
+    if (!cappers.length) {
+      return interaction.editReply('No bets found for this season.');
+    }
     const embed = leaderboardEmbed(cappers, labels[sortBy]);
 
     await interaction.editReply({ embeds: [embed] });

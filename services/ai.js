@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════
 // Multi-LLM AI Service — rotates between providers
-// Priority: Gemini → Groq → Mistral → OpenRouter (all free tiers)
+// Priority: Cerebras → Gemini → Groq → Mistral → OpenRouter
 // ═══════════════════════════════════════════════════════════
 
 const { normalizeDescription, normalizePlayer } = require('./normalization');
@@ -14,6 +14,14 @@ const IMAGE_DEDUP_WINDOW = 12 * 60 * 60 * 1000; // 12 hours
 // Models are read from env vars so they can be hot-swapped via `fly secrets set`
 // without redeploying. Falls back to sensible defaults.
 const PROVIDERS = {
+  cerebras: {
+    url: 'https://api.cerebras.ai/v1/chat/completions',
+    get model() { return process.env.CEREBRAS_MODEL || 'llama-4-scout-17b-16e-instruct'; },
+    keyEnv: 'CEREBRAS_API_KEY',
+    format: 'openai',
+    supportsImages: false,
+    requestTimeoutMs: 15000,
+  },
   gemini: {
     url: 'https://generativelanguage.googleapis.com/v1beta/models',
     get model() { return process.env.GEMINI_MODEL || 'gemini-2.0-flash'; },
@@ -110,14 +118,24 @@ async function callOpenAI(provider, prompt, system, imageBase64, mediaType) {
     bodyPayload.response_format = { type: 'json_object' };
   }
 
-  const res = await fetch(provider.url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${provider.key}`,
-    },
-    body: JSON.stringify(bodyPayload),
-  });
+  const controller = new AbortController();
+  const timeoutMs = provider.requestTimeoutMs || 0;
+  const timeoutId = timeoutMs ? setTimeout(() => controller.abort(), timeoutMs) : null;
+
+  let res;
+  try {
+    res = await fetch(provider.url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${provider.key}`,
+      },
+      signal: controller.signal,
+      body: JSON.stringify(bodyPayload),
+    });
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
   if (!res.ok) {
     const errBody = (await res.text()).substring(0, 200);
     console.error(`[${provider.name}] HTTP ${res.status} (model: ${model}): ${errBody}`);
@@ -220,6 +238,9 @@ async function callLLM(prompt, system, imageBase64, mediaType) {
       }
     } catch (err) {
       const latency = Date.now() - startTime;
+      if (provider.name === 'cerebras' && (err.name === 'AbortError' || err.message?.includes('aborted'))) {
+        console.warn('[AI Waterfall] cerebras timed out, trying gemini...');
+      }
       console.error(`[${provider.name}] Error (${latency}ms): ${err.message}${err.cause ? ` (cause: ${err.cause})` : ''}`);
       console.error(`[${provider.name}] Stack: ${err.stack?.split('\n')[1]?.trim() || 'n/a'}`);
     }
@@ -554,6 +575,8 @@ STRICT RULES:
 - ANTI-PROMO / ANTI-SPAM: If the text OR image contains marketing, promotional, or spam content — including but not limited to: "1 MONTH VIP", "RT & REPLY", "Discount", "Promo", "FREE PICK", "Join VIP", "Giveaway", "Link in bio", "Use code", "Subscribe", "Follow for picks", promoting a tool, software, VIP group, Discord server, algorithm, "AI agent", "private beta", subscription service, or discussing general betting strategy without a specific actionable pick — you MUST return {"type":"ignore"}. Do NOT hallucinate bets from promotional graphics. Words like "EV props" or "sharp lines" alone do NOT make it a bet.
 - STRICT ENTITY REQUIREMENT: Do NOT hallucinate odds or units. To classify as a bet, there MUST be a clear, specific team name, player name, or betting line being backed. If you cannot confidently identify WHO or WHAT is being bet on, you MUST return {"type":"ignore"}.
 - If the text is a retweet (starts with "RT" or contains "Retweeted @"), a reply to a fan, or a capper celebrating someone else's win, return type "ignore".
+- If the text is mainly trash talk, memes, generic reactions, or hype without a specific pick, return type "ignore".
+- If the post is only a link/video/stream announcement (e.g., YouTube/Twitch/Kick/Spaces) without explicit bet details, return type "ignore".
 - If you see "[Quoted]" or "Quoted @", you MUST ignore the quoted text entirely. Only evaluate the capper's original text above it.
 - bet_type: straight, parlay, teaser, prop, future, ladder.
 - PARLAY / DFS DETECTION: If the text mentions multiple legs, multiple player props, "X-Pick", "Power Play", "Flex Play", "PrizePicks", "Underdog Fantasy", "Sleeper", or lists 2+ distinct player stats, you MUST classify bet_type as "parlay" — NEVER "straight". A slip with 6 players is a 6-leg parlay.
