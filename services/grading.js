@@ -145,7 +145,9 @@ async function fetchScores(sport) {
 
   try {
     const url = `${ODDS_API_BASE}/sports/${sportKey}/scores/?apiKey=${API_KEY}&daysFrom=3&dateFormat=iso`;
-    const res = await fetch(url);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    const res = await fetch(url, { signal: controller.signal }).finally(() => clearTimeout(timeout));
     if (!res.ok) return [];
     const data = await res.json();
     return data.filter(g => g.completed);
@@ -273,6 +275,11 @@ function aggregateParlayResults(results) {
   return 'win';
 }
 
+function cleanSearchQuery(input) {
+  const normalized = String(input || '').replace(/\r\n/g, '\n');
+  return normalized.split('\n')[0].trim();
+}
+
 // ── Try to determine W/L from score ─────────────────────────
 function determineResult(bet, matchData) {
   if (!matchData) return null;
@@ -310,40 +317,46 @@ async function runAutoGrade(client) {
 
   // ── Hardened Gemini Grading Loop with retry + backoff ──
   const delay = ms => new Promise(res => setTimeout(res, ms));
+  const PER_BET_DELAY_MS = Number(process.env.AUTO_GRADE_DELAY_MS || 15000);
 
   for (const bet of pending) {
-    const betAgeHours = (Date.now() - new Date(bet.created_at).getTime()) / (1000 * 60 * 60);
-    if (betAgeHours < 4) continue;
+    try {
+      const betAgeHours = (Date.now() - new Date(bet.created_at).getTime()) / (1000 * 60 * 60);
+      if (betAgeHours < 4) continue;
 
-    console.log(`[AutoGrade] Processing: "${bet.description?.slice(0, 50)}" | ${bet.sport} | Age: ${betAgeHours.toFixed(1)}h`);
+      console.log(`[AutoGrade] Processing: "${bet.description?.slice(0, 50)}" | ${bet.sport} | Age: ${betAgeHours.toFixed(1)}h`);
 
-    let retries = 3;
-    let aiResult = null;
+      let retries = 3;
+      let aiResult = null;
 
-    while (retries > 0) {
-      try {
-        aiResult = await gradePropWithAI(bet);
-        break;
-      } catch (error) {
-        if (error.status === 429 || error.message?.includes('429')) {
-          const waitSec = (4 - retries) * 10;
-          console.warn(`[Rate Limit] Gemini 429. Retrying in ${waitSec}s... (${retries - 1} left)`);
-          await delay(waitSec * 1000);
-          retries--;
-        } else {
-          console.error(`[AutoGrade] Non-retryable error: ${error.message}`);
+      while (retries > 0) {
+        try {
+          aiResult = await gradePropWithAI(bet);
           break;
+        } catch (error) {
+          if (error.status === 429 || error.message?.includes('429')) {
+            const waitSec = (4 - retries) * 10;
+            console.warn(`[Rate Limit] Gemini 429. Retrying in ${waitSec}s... (${retries - 1} left)`);
+            await delay(waitSec * 1000);
+            retries--;
+          } else {
+            console.error(`[AutoGrade] Non-retryable error: ${error.message}`);
+            break;
+          }
         }
       }
-    }
 
-    if (aiResult && ['WIN', 'LOSS', 'PUSH', 'VOID'].includes(aiResult.status)) {
-      const finalResult = await finalizeBetGrading(client, bet, aiResult.status, aiResult.evidence);
-      if (finalResult) {
-        gradedBets.push(finalResult);
-        gradedCount++;
+      if (aiResult && ['WIN', 'LOSS', 'PUSH', 'VOID'].includes(aiResult.status)) {
+        const finalResult = await finalizeBetGrading(client, bet, aiResult.status, aiResult.evidence);
+        if (finalResult) {
+          gradedBets.push(finalResult);
+          gradedCount++;
+        }
       }
-      await delay(2000); // Discord API spacing
+    } catch (error) {
+      console.error(`[AutoGrade] Error processing bet ${bet.id}: ${error.message}`);
+    } finally {
+      await delay(PER_BET_DELAY_MS);
     }
   }
 
@@ -478,10 +491,12 @@ async function gradePropWithAI(bet) {
 
   const today = new Date().toISOString().split('T')[0];
 
+  const cleanBetQuery = cleanSearchQuery(bet.description);
+
   const prompt = `You are a sharp sports betting grader. Today's date is ${today}.
 Grade this sports bet. Search the web for the final box score or results.
 
-Bet: "${bet.description}"
+Bet: "${cleanBetQuery}"
 Sport: ${bet.sport || 'Unknown'}
 Date Placed: ${bet.created_at}
 
@@ -493,11 +508,29 @@ Return exactly in this JSON format:
 
 NOTE:
 - Use "VOID" if the player did not play (e.g., late scratch) or the game was canceled.
-- Only use "PENDING" if the game has literally not finished yet or hasn't started.`;
+- Only use "PENDING" if the game has literally not finished yet or hasn't started.
+- If the original text includes multiple lines/legs, only evaluate the single Bet line shown above.`;
 
   const result = await model.generateContent(prompt);
-  const cleanJson = result.response.text().replace(/```json/g, '').replace(/```/g, '').trim();
-  const parsed = JSON.parse(cleanJson);
+  const rawText = result?.response?.text?.() || '';
+  const cleanJson = rawText
+    .replace(/^\s*```(?:json)?\s*/i, '')
+    .replace(/\s*```\s*$/i, '')
+    .trim();
+
+  let parsed = null;
+  try {
+    parsed = JSON.parse(cleanJson);
+  } catch (error) {
+    console.error(`[AI Grader] JSON parse failed for bet ${bet.id}: ${error.message}`);
+    console.error(`[AI Grader] Raw model output (truncated): ${rawText.slice(0, 500)}`);
+    return null;
+  }
+
+  if (!parsed || typeof parsed !== 'object') return null;
+  if (!['WIN', 'LOSS', 'PUSH', 'VOID', 'PENDING'].includes(parsed.status)) return null;
+  if (typeof parsed.evidence !== 'string') parsed.evidence = 'No evidence provided.';
+
   console.log(`[AI Grader] Bet ID ${bet.id?.slice(0, 8)} | Status: ${parsed.status} | Evidence: ${parsed.evidence}`);
   return parsed;
 }
@@ -577,6 +610,7 @@ module.exports = {
   fetchScores,
   determineResult,
   aggregateParlayResults,
+  cleanSearchQuery,
   matchBetToGame,
   findMentionedTeams,
   canonicalizeTeamName,
