@@ -148,10 +148,11 @@ async function testReplayNoDuplicateSideEffects() {
   const msg = makeMessage({ messageId: 'replay_1', withImage: false });
   await handleMessage(msg);
   await handleMessage(msg);
+  await new Promise((resolve) => setTimeout(resolve, 4500));
 
   assert.strictEqual(writer.insertedCount(), 1, 'replay should not insert duplicate bet rows');
   assert.strictEqual(msg._reactCalls.length, 1, 'replay should not react twice');
-  assert.strictEqual(msg._replyCalls.length, 1, 'replay should not reply twice');
+  assert.strictEqual(msg._replyCalls.length, 0, 'replay should not send chat replies');
   assert.strictEqual(tracked.length, 1, 'replay should not post tracked pick twice');
 }
 
@@ -171,10 +172,11 @@ async function testTextAndImageSinglePersistedSet() {
 
   const msg = makeMessage({ messageId: 'mix_1', withImage: true });
   await handleMessage(msg);
+  await new Promise((resolve) => setTimeout(resolve, 4500));
 
   assert.strictEqual(writer.insertedCount(), 1, 'text+image same message should persist only one bet set');
   assert.strictEqual(msg._reactCalls.length, 1, 'single processing should react once');
-  assert.strictEqual(msg._replyCalls.length, 1, 'single processing should reply once');
+  assert.strictEqual(msg._replyCalls.length, 0, 'single processing should not send chat replies');
   assert.strictEqual(tracked.length, 1, 'single processing should post one tracked pick');
 }
 
@@ -192,10 +194,11 @@ async function testNearSimultaneousReplaySingleSideEffects() {
 
   const msg = makeMessage({ messageId: 'concurrent_1', withImage: false });
   await Promise.all([handleMessage(msg), handleMessage(msg)]);
+  await new Promise((resolve) => setTimeout(resolve, 4500));
 
   assert.strictEqual(writer.insertedCount(), 1, 'concurrent replay should persist exactly one write');
   assert.strictEqual(msg._reactCalls.length, 1, 'concurrent replay should react once');
-  assert.strictEqual(msg._replyCalls.length, 1, 'concurrent replay should reply once');
+  assert.strictEqual(msg._replyCalls.length, 0, 'concurrent replay should not send chat replies');
   assert.strictEqual(tracked.length, 1, 'concurrent replay should post tracked pick once');
 }
 
