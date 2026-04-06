@@ -665,45 +665,33 @@ async function generateRecap(stats, recentBets) {
   return (await callLLM(`Stats: ${JSON.stringify(stats)}\nBets: ${JSON.stringify(recentBets)}`, sys)) || 'Recap unavailable.';
 }
 
-// ── Tweet Bouncer: extract a pick from raw tweet text or return null ──
-async function extractPickFromTweet(tweetText, capperName) {
+// ── Tweet Bouncer: extract a pick from raw tweet text (+ optional media) ──
+async function extractPickFromTweet(tweetText, capperName, mediaUrls = [], deps = {}) {
   try {
-    const Groq = require('groq-sdk');
-    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+    const parseTweet = deps.parseBetText || parseBetText;
+    const normalizedMediaUrls = Array.isArray(mediaUrls)
+      ? mediaUrls.map((u) => String(u || '').trim()).filter(Boolean)
+      : [];
+    const imageUrl = normalizedMediaUrls[0] || null;
 
-    const prompt = `You are a sports betting parser. Read this tweet from @${capperName}: "${tweetText}"
-
-1. If it does NOT contain a clear sports pick, return exactly: {"status": "NULL"}
-2. If it's marketing/promo ("VIP", "RT", "Discount", "LIVE NOW"), return: {"status": "NULL"}
-3. If it DOES contain a pick, extract it into this JSON format:
-{
-  "status": "VALID",
-  "sport": "NBA/NFL/MLB/etc",
-  "type": "straight/parlay/prop",
-  "description": "Cleaned up pick",
-  "odds": "-110 or N/A",
-  "units": 1,
-  "legs": [{"description": "Leg text", "odds": -110}]
-}
-For parlays, populate legs. For straights, use a single-entry legs array.`;
-
-    const response = await groq.chat.completions.create({
-      messages: [{ role: 'user', content: prompt }],
-      model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
-      temperature: 0,
-      response_format: { type: 'json_object' },
-    });
-
-    const jsonResponse = JSON.parse(response.choices[0]?.message?.content);
-
-    if (jsonResponse.status === 'NULL') {
+    const parsed = await parseTweet(tweetText, imageUrl);
+    if (!parsed || parsed.type === 'ignore' || !Array.isArray(parsed.bets) || parsed.bets.length === 0) {
       return null;
     }
 
-    delete jsonResponse.status;
-    return jsonResponse;
+    const [bet] = parsed.bets;
+    if (!bet || !bet.description) return null;
+
+    return {
+      sport: bet.sport || 'Unknown',
+      type: bet.bet_type || 'straight',
+      description: bet.description,
+      odds: bet.odds,
+      units: bet.units || 1,
+      legs: Array.isArray(bet.legs) ? bet.legs : [],
+    };
   } catch (err) {
-    console.error('[Groq TweetBouncer Error]', err.message);
+    console.error('[TweetBouncer Error]', err.message);
     return null;
   }
 }
