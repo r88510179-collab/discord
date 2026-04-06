@@ -64,7 +64,12 @@ async function pollCappers(client) {
 
         // 4. AI Bouncer
         console.log(`[Twitter] New tweet from @${handle}: "${(tweet.text || '').slice(0, 60)}..."`);
-        const pickData = await extractPickFromTweet(tweet.text || '', name);
+        const mediaUrls = Array.isArray(tweet.media)
+          ? tweet.media
+              .map((m) => m?.url || m?.media_url_https || m?.media_url || null)
+              .filter(Boolean)
+          : [];
+        const pickData = await extractPickFromTweet(tweet.text || '', name, mediaUrls);
 
         if (!pickData) {
           console.log(`[Twitter] Rejected — not a bet.`);
