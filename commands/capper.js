@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder, MessageFlags } = require('discord.js');
 const { findCapperByName, getCapperAnalytics, getBankroll } = require('../services/database');
 const { COLORS, fmtOdds, fmtUnits } = require('../utils/embeds');
 
@@ -15,7 +15,7 @@ module.exports = {
             .setRequired(true))),
 
   async execute(interaction) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     const sub = interaction.options.getSubcommand();
 

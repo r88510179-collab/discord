@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, Collection, Events, Options, Partials } = require('discord.js');
+const { Client, GatewayIntentBits, Collection, Events, Options, Partials, MessageFlags } = require('discord.js');
 const express = require('express');
 const cron = require('node-cron');
 const fs = require('fs');
@@ -176,9 +176,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.replied || interaction.deferred) {
         await interaction.editReply({ content: 'This action is no longer available. Please run the command again.' });
       } else {
-        await interaction.reply({ content: 'This action is no longer available. Please run the command again.', ephemeral: true });
+        await interaction.reply({ content: 'This action is no longer available. Please run the command again.', flags: MessageFlags.Ephemeral });
       }
-    } catch (_) { /* noop */ }
+    } catch (e) {
+      console.error('[Interaction] Fallback reply failed:', e.message);
+    }
     return;
   }
 
@@ -193,7 +195,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   } catch (err) {
     console.error(`[Command Error] /${interaction.commandName}:`, err);
     try {
-      const reply = { content: '❌ Something went wrong. Please try again.', ephemeral: true };
+      const reply = { content: '❌ Something went wrong. Please try again.', flags: MessageFlags.Ephemeral };
       if (interaction.deferred || interaction.replied) {
         await interaction.editReply(reply);
       } else {

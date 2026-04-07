@@ -602,6 +602,11 @@ async function handleMessage(message, { isUpdate = false } = {}) {
 async function processAggregatedMessage(message, combinedRawText, combinedImages) {
   const hasImages = combinedImages.length > 0;
   const fullText = combinedRawText;
+  const context = {
+    channelName: message?.channel?.name || 'unknown',
+    channelId: message?.channel?.id || 'unknown',
+    author: message?.author?.tag || 'unknown',
+  };
 
   try {
     const capperInfo = resolveCapper(message);
@@ -694,7 +699,11 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
         await sendStagingEmbed(message.client, bet, capperInfo.name, message.url);
       }
       // Inbox Zero: clean up #submit-picks after staging
-      try { await message.delete(); } catch (_) { /* Missing perms or already deleted */ }
+      try {
+        await message.delete();
+      } catch (e) {
+        console.error('[MessageHandler] Cleanup delete failed:', e.message);
+      }
     }
   } catch (err) {
     // Silently ignore duplicate image detections

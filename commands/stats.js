@@ -1,4 +1,4 @@
-const { SlashCommandBuilder } = require('discord.js');
+const { SlashCommandBuilder, MessageFlags } = require('discord.js');
 const { getOrCreateCapper, getCapperStats, getBankroll, getRecentBets } = require('../services/database');
 const { statsEmbed, RESULT_EMOJI, fmtOdds, fmtUnits, COLORS } = require('../utils/embeds');
 const { EmbedBuilder } = require('discord.js');
@@ -13,7 +13,7 @@ module.exports = {
         .setRequired(false)),
 
   async execute(interaction) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     const targetUser = interaction.options.getUser('user') || interaction.user;
     const capper = await getOrCreateCapper(targetUser.id, targetUser.displayName, targetUser.displayAvatarURL());

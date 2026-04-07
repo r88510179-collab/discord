@@ -1,4 +1,4 @@
-const { SlashCommandBuilder } = require('discord.js');
+const { SlashCommandBuilder, MessageFlags } = require('discord.js');
 const { parseBetText } = require('../services/ai');
 const { getOrCreateCapper, createBetWithLegs } = require('../services/database');
 const { betEmbed } = require('../utils/embeds');
@@ -14,7 +14,7 @@ module.exports = {
         .setRequired(true)),
 
   async execute(interaction) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     const pickText = interaction.options.getString('pick');
     const user = interaction.user;
