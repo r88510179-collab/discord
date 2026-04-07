@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder, MessageFlags } = require('discord.js');
 const { getOrCreateCapper, getCapperStats, getRecentBets, getBankroll } = require('../services/database');
 const { generateRecap } = require('../services/ai');
 const { COLORS } = require('../utils/embeds');
@@ -9,7 +9,7 @@ module.exports = {
     .setDescription('Get an AI-generated recap of your betting performance'),
 
   async execute(interaction) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     const capper = await getOrCreateCapper(
       interaction.user.id,

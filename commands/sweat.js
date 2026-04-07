@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder, MessageFlags } = require('discord.js');
 const { getLiveScores } = require('../services/odds');
 const { COLORS } = require('../utils/embeds');
 
@@ -25,7 +25,7 @@ module.exports = {
         .addChoices(...SPORT_CHOICES)),
 
   async execute(interaction) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     const sport = interaction.options.getString('sport');
     const games = await getLiveScores(sport);

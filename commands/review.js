@@ -1,8 +1,4 @@
-const {
-  SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits,
-  ActionRowBuilder, ButtonBuilder, ButtonStyle,
-  StringSelectMenuBuilder,
-} = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder, MessageFlags } = require('discord.js');
 const { getPendingReviews, approveBet, rejectBet } = require('../services/database');
 const { COLORS } = require('../utils/embeds');
 const { postPickTracked } = require('../services/dashboard');
@@ -14,7 +10,7 @@ module.exports = {
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   async execute(interaction) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     const pending = getPendingReviews();
 
@@ -85,14 +81,14 @@ module.exports = {
           selectedIds = i.values;
           await i.reply({
             content: `Selected **${selectedIds.length}** bet(s). Now click **Approve Selected** or pick again.`,
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
           return;
         }
 
         if (i.customId === 'review_approve_selected') {
           if (selectedIds.length === 0) {
-            await i.reply({ content: 'No bets selected. Use the dropdown first.', ephemeral: true });
+            await i.reply({ content: 'No bets selected. Use the dropdown first.', flags: MessageFlags.Ephemeral });
             return;
           }
 

@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, MessageFlags } = require('discord.js');
 const { getPendingBets } = require('../services/database');
 const { shopLine, extractTeamFromDescription } = require('../services/odds');
 const { americanToDecimal, impliedProbability } = require('../services/bankroll');
@@ -17,7 +17,7 @@ module.exports = {
     const sub = interaction.options.getSubcommand();
 
     if (sub === 'clv') {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
       const pending = getPendingBets().filter(b => b.review_status === 'confirmed');
       if (pending.length === 0) {

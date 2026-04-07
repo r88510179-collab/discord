@@ -1,8 +1,4 @@
-const {
-  SlashCommandBuilder, EmbedBuilder, ActionRowBuilder,
-  StringSelectMenuBuilder, ButtonBuilder, ButtonStyle,
-  PermissionFlagsBits,
-} = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, ButtonStyle, PermissionFlagsBits, MessageFlags } = require('discord.js');
 const { getPendingBets, deleteBetById } = require('../services/database');
 const { COLORS } = require('../utils/embeds');
 
@@ -13,7 +9,7 @@ module.exports = {
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   async execute(interaction) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     const pending = getPendingBets();
     if (pending.length === 0) {
@@ -69,24 +65,24 @@ module.exports = {
 
     collector.on('collect', async (i) => {
       if (i.user.id !== interaction.user.id) {
-        return i.reply({ content: 'Only the command user can interact with this.', ephemeral: true });
+        return i.reply({ content: 'Only the command user can interact with this.', flags: MessageFlags.Ephemeral });
       }
 
       if (i.isStringSelectMenu() && i.customId === 'active_select') {
         selectedBetId = i.values[0];
         const selected = bets.find(b => b.id === selectedBetId);
         const desc = selected ? (selected.description || 'Unknown').slice(0, 60) : selectedBetId.slice(0, 8);
-        await i.reply({ content: `Selected: **${desc}** — click the red button to delete.`, ephemeral: true });
+        await i.reply({ content: `Selected: **${desc}** — click the red button to delete.`, flags: MessageFlags.Ephemeral });
       }
 
       if (i.isButton() && i.customId === 'active_delete') {
         if (!selectedBetId) {
-          return i.reply({ content: 'Please select a bet from the dropdown first.', ephemeral: true });
+          return i.reply({ content: 'Please select a bet from the dropdown first.', flags: MessageFlags.Ephemeral });
         }
 
         const deleted = deleteBetById(selectedBetId);
         if (!deleted) {
-          return i.reply({ content: 'Bet not found or already deleted.', ephemeral: true });
+          return i.reply({ content: 'Bet not found or already deleted.', flags: MessageFlags.Ephemeral });
         }
 
         // Refresh the list

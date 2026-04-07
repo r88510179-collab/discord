@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
+const { SlashCommandBuilder, PermissionFlagsBits, MessageFlags } = require('discord.js');
 const { getSetting, setSetting } = require('../services/database');
 
 module.exports = {
@@ -28,7 +28,7 @@ module.exports = {
       if (mode === current) {
         return interaction.reply({
           content: `Audit mode is already **${mode}**.`,
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       }
 
@@ -41,7 +41,7 @@ module.exports = {
 
       return interaction.reply({
         content: `${emoji} Audit mode set to **${mode}**.\n${desc}`,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     }
   },

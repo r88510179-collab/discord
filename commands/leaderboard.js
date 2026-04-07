@@ -1,4 +1,4 @@
-const { SlashCommandBuilder } = require('discord.js');
+const { SlashCommandBuilder, MessageFlags } = require('discord.js');
 const { getLeaderboard } = require('../services/database');
 const { leaderboardEmbed } = require('../utils/embeds');
 
@@ -18,7 +18,7 @@ module.exports = {
         )),
 
   async execute(interaction) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     const sortBy = interaction.options.getString('sort') || 'total_profit_units';
     const labels = {

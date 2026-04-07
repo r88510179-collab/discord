@@ -38,7 +38,9 @@ db.exec(`
 try {
   const ubCols = db.prepare("PRAGMA table_info('user_bets')").all().map(c => c.name);
   if (!ubCols.includes('risk_amount')) db.exec('ALTER TABLE user_bets ADD COLUMN risk_amount REAL DEFAULT 1.0');
-} catch (_) { /* table may not exist yet */ }
+} catch (e) {
+  console.error('[DB] risk_amount migration check skipped:', e.message);
+}
 
 // ── Prepared statements (fast) ──────────────────────────────
 const stmts = {

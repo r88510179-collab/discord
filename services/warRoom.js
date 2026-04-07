@@ -4,10 +4,7 @@
 // ADMIN_LOG_CHANNEL_ID. Handles button clicks and edit modals.
 // ═══════════════════════════════════════════════════════════
 
-const {
-  EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
-  ModalBuilder, TextInputBuilder, TextInputStyle,
-} = require('discord.js');
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, MessageFlags } = require('discord.js');
 const { approveBet, rejectBet, updateBetFields, getBetLegs, getBetProps, getCapperStats, getBankroll, db, createBet, updateBankroll, upsertUserBet, getSentimentCounts } = require('./database');
 const { postPickTracked } = require('./dashboard');
 const { shopLine, formatLineShop, extractTeamFromDescription } = require('./odds');
@@ -218,7 +215,7 @@ async function handleWarRoomInteraction(interaction) {
     const [action, betId] = interaction.customId.split(':');
 
     if (action === 'war_approve') {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
       try {
         const bet = approveBet(betId);
@@ -249,7 +246,9 @@ async function handleWarRoomInteraction(interaction) {
                 const hot = pct >= 65 && prof > 0 && (w + l) >= 5;
                 statsText = `${hot ? ' ' : ''}**Record:** ${w}-${l}-${p} (${pct}%) | **Profit:** ${prof > 0 ? '+' : ''}${prof}u`;
               }
-            } catch (_) { /* silent */ }
+            } catch (e) {
+              console.error('[WarRoom] Failed to build capper stats:', e.message);
+            }
 
             // Generate AI hype insight
             let aiTake = '';
@@ -375,7 +374,7 @@ async function handleWarRoomInteraction(interaction) {
         console.warn(`[WarRoom] Bet ${betId} not found in DB, but proceeding with cleanup.`);
       }
 
-      await interaction.reply({ content: '❌ Slip rejected and cleared.', ephemeral: true });
+      await interaction.reply({ content: '❌ Slip rejected and cleared.', flags: MessageFlags.Ephemeral });
       await interaction.message.delete().catch(() => {});
       return true;
     }
@@ -413,10 +412,10 @@ async function handleWarRoomInteraction(interaction) {
           originalEmbed.addFields({ name: 'Community Sentiment', value: sentimentString, inline: false });
         }
         await interaction.update({ embeds: [originalEmbed] });
-        await interaction.followUp({ content: `🧊 You chose to **FADE** this bet!`, ephemeral: true });
+        await interaction.followUp({ content: `🧊 You chose to **FADE** this bet!`, flags: MessageFlags.Ephemeral });
       } catch (error) {
         console.error('[Sentiment Error]', error.message);
-        await interaction.reply({ content: 'Something went wrong.', ephemeral: true }).catch(() => {});
+        await interaction.reply({ content: 'Something went wrong.', flags: MessageFlags.Ephemeral }).catch(() => {});
       }
       return true;
     }
@@ -432,7 +431,7 @@ async function handleWarRoomInteraction(interaction) {
         const description = embed?.fields?.find(f => f.name === 'Description')?.value || 'Unknown bet';
 
         if (!capperId) {
-          await interaction.reply({ content: 'Could not determine capper. Please grade manually.', ephemeral: true });
+          await interaction.reply({ content: 'Could not determine capper. Please grade manually.', flags: MessageFlags.Ephemeral });
           return true;
         }
 
@@ -458,14 +457,14 @@ async function handleWarRoomInteraction(interaction) {
         await interaction.update({ embeds: [loggedEmbed], components: [] });
       } catch (err) {
         console.error('[WarRoom] Log win error:', err.message);
-        await interaction.reply({ content: 'Failed to log win.', ephemeral: true });
+        await interaction.reply({ content: 'Failed to log win.', flags: MessageFlags.Ephemeral });
       }
       return true;
     }
 
     // Untracked winner — Reject
     if (action === 'war_rejectwin') {
-      await interaction.reply({ content: '❌ Untracked winner dismissed.', ephemeral: true });
+      await interaction.reply({ content: '❌ Untracked winner dismissed.', flags: MessageFlags.Ephemeral });
       await interaction.message.delete().catch(() => {});
       return true;
     }
@@ -479,7 +478,7 @@ async function handleWarRoomInteraction(interaction) {
     const riskUnits = Math.round(parseFloat(rawUnits) * 100) / 100;
 
     if (!Number.isFinite(riskUnits) || riskUnits < 0.1 || riskUnits > 50) {
-      return interaction.reply({ content: 'Invalid unit amount. Please enter a number between 0.1 and 50.', ephemeral: true });
+      return interaction.reply({ content: 'Invalid unit amount. Please enter a number between 0.1 and 50.', flags: MessageFlags.Ephemeral });
     }
 
     try {
@@ -500,10 +499,10 @@ async function handleWarRoomInteraction(interaction) {
         await originalMsg.edit({ embeds: [originalEmbed] }).catch(() => {});
       }
 
-      await interaction.reply({ content: `🔥 You are tailing this bet for **${riskUnits}u**!`, ephemeral: true });
+      await interaction.reply({ content: `🔥 You are tailing this bet for **${riskUnits}u**!`, flags: MessageFlags.Ephemeral });
     } catch (error) {
       console.error('[Tail Modal Error]', error.message);
-      await interaction.reply({ content: 'Something went wrong.', ephemeral: true }).catch(() => {});
+      await interaction.reply({ content: 'Something went wrong.', flags: MessageFlags.Ephemeral }).catch(() => {});
     }
     return true;
   }
@@ -560,7 +559,7 @@ async function handleWarRoomInteraction(interaction) {
       }
     }
 
-    await interaction.reply({ content: 'No changes made.', ephemeral: true });
+    await interaction.reply({ content: 'No changes made.', flags: MessageFlags.Ephemeral });
     return true;
   }
 
