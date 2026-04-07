@@ -44,6 +44,8 @@ app.post('/webhook/tweet', async (req, res) => {
       odds: pick.odds ? parseInt(pick.odds, 10) : null,
       units: pick.units || 1,
       source: 'twitter_webhook',
+      source_channel_id: `twitter:${(capper || author || 'unknown').toLowerCase()}`,
+      source_message_id: tweetId ? String(tweetId) : null,
       raw_text: text.slice(0, 500),
       review_status: 'needs_review',
     }, pick.legs || []);
@@ -74,6 +76,21 @@ const { handleGradeInteraction } = require('./handlers/gradeButtons');
 const { runAutoGrade } = require('./services/grading');
 const { pollCappers } = require('./services/twitter');
 const { postGradeSummary, postDailyLeaderboard } = require('./services/dashboard');
+
+// ── In-flight guard for scheduled jobs (prevents overlap) ──
+const cronInFlight = new Map();
+async function runWithCronLock(jobName, fn) {
+  if (cronInFlight.get(jobName)) {
+    console.log(`[Cron] ${jobName} skipped (previous run still in flight).`);
+    return;
+  }
+  cronInFlight.set(jobName, true);
+  try {
+    await fn();
+  } finally {
+    cronInFlight.set(jobName, false);
+  }
+}
 
 /**
  * Utility to extract bet data from a War Room embed.
@@ -153,6 +170,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
       return;
     }
+
+    // Graceful fallback for unmatched component IDs
+    try {
+      if (interaction.replied || interaction.deferred) {
+        await interaction.editReply({ content: 'This action is no longer available. Please run the command again.' });
+      } else {
+        await interaction.reply({ content: 'This action is no longer available. Please run the command again.', ephemeral: true });
+      }
+    } catch (_) { /* noop */ }
+    return;
   }
 
   // Slash commands
@@ -431,26 +458,30 @@ client.once(Events.ClientReady, (c) => {
   // ── Schedule auto-grading ─────────────────────────────────
   const gradeInterval = process.env.AUTO_GRADE_INTERVAL_MINUTES || 15;
   cron.schedule(`*/${gradeInterval} * * * *`, async () => {
-    try {
-      console.log('[Cron] Running auto-grade...');
-      const results = await runAutoGrade(client);
-      if (results.graded > 0) {
-        console.log(`[Cron] Auto-graded ${results.graded} bets`);
-        await postGradeSummary(client, results);
+    await runWithCronLock('auto-grade', async () => {
+      try {
+        console.log('[Cron] Running auto-grade...');
+        const results = await runAutoGrade(client);
+        if (results.graded > 0) {
+          console.log(`[Cron] Auto-graded ${results.graded} bets`);
+          await postGradeSummary(client, results);
+        }
+      } catch (err) {
+        console.error('[Cron] Auto-grade error:', err.message);
       }
-    } catch (err) {
-      console.error('[Cron] Auto-grade error:', err.message);
-    }
+    });
   });
 
   // ── Schedule Twitter/X scraping (every 10 minutes) ──────────
   if (process.env.TWITTER_USERNAME && process.env.TWITTER_CAPPER_HANDLES) {
     cron.schedule('*/10 * * * *', async () => {
-      try {
-        await pollCappers(client);
-      } catch (err) {
-        console.error('[Cron] Twitter poll error:', err.message);
-      }
+      await runWithCronLock('twitter-poller', async () => {
+        try {
+          await pollCappers(client);
+        } catch (err) {
+          console.error('[Cron] Twitter poll error:', err.message);
+        }
+      });
     });
     console.log('🐦 Twitter/X scraping enabled (every 10 min)');
   } else {
@@ -461,22 +492,25 @@ client.once(Events.ClientReady, (c) => {
 
   // ── Daily leaderboard post (11 PM ET / 3 AM UTC) ──────────
   cron.schedule('0 3 * * *', async () => {
-    try {
-      await postDailyLeaderboard(client);
-      console.log('[Cron] Daily leaderboard posted');
-    } catch (err) {
-      console.error('[Cron] Leaderboard error:', err.message);
-    }
+    await runWithCronLock('daily-leaderboard', async () => {
+      try {
+        await postDailyLeaderboard(client);
+        console.log('[Cron] Daily leaderboard posted');
+      } catch (err) {
+        console.error('[Cron] Leaderboard error:', err.message);
+      }
+    });
   });
 
   console.log('📊 Daily leaderboard at 11 PM ET');
 
   // ── Daily Recap (8 AM ET / 12 PM UTC) ──────────────────────
   cron.schedule('0 12 * * *', async () => {
-    try {
-      const { db: database } = require('./services/database');
-      const { EmbedBuilder } = require('discord.js');
-      const stats = database.prepare(`
+    await runWithCronLock('daily-recap', async () => {
+      try {
+        const { db: database } = require('./services/database');
+        const { EmbedBuilder } = require('discord.js');
+        const stats = database.prepare(`
         SELECT
           SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) as wins,
           SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) as losses,
@@ -488,11 +522,11 @@ client.once(Events.ClientReady, (c) => {
         AND result IN ('win', 'loss', 'push')
       `).get();
 
-      if (!stats || stats.total_bets === 0) return;
+        if (!stats || stats.total_bets === 0) return;
 
-      const profit = stats.total_profit || 0;
-      const isGreen = profit >= 0;
-      const recapEmbed = new EmbedBuilder()
+        const profit = stats.total_profit || 0;
+        const isGreen = profit >= 0;
+        const recapEmbed = new EmbedBuilder()
         .setColor(isGreen ? 0x00FF00 : 0xFF0000)
         .setTitle("Yesterday's Betting Recap")
         .setDescription('Good morning! Here is how the server performed yesterday.')
@@ -503,32 +537,35 @@ client.once(Events.ClientReady, (c) => {
         )
         .setTimestamp();
 
-      const dashId = process.env.PUBLIC_CHANNEL_ID || process.env.DASHBOARD_CHANNEL_ID;
-      if (dashId) {
-        const ch = await client.channels.fetch(dashId).catch(() => null);
-        if (ch) await ch.send({ embeds: [recapEmbed] });
+        const dashId = process.env.PUBLIC_CHANNEL_ID || process.env.DASHBOARD_CHANNEL_ID;
+        if (dashId) {
+          const ch = await client.channels.fetch(dashId).catch(() => null);
+          if (ch) await ch.send({ embeds: [recapEmbed] });
+        }
+        console.log('[Cron] Daily recap posted');
+      } catch (err) {
+        console.error('[Cron] Recap error:', err.message);
       }
-      console.log('[Cron] Daily recap posted');
-    } catch (err) {
-      console.error('[Cron] Recap error:', err.message);
-    }
+    });
   });
   console.log('🌅 Daily recap at 8 AM ET');
 
   // ── 90-Day DB Purge (3:30 AM UTC daily) ────────────────────
   cron.schedule('30 3 * * *', () => {
-    try {
-      const { db: database } = require('./services/database');
-      console.log('[Cron] Running 90-Day DB Purge...');
-      database.transaction(() => {
-        database.prepare("DELETE FROM bets WHERE result = 'archived' AND created_at < datetime('now', '-90 days')").run();
-        database.prepare('DELETE FROM user_bets WHERE bet_id NOT IN (SELECT id FROM bets)').run();
-      })();
-      database.exec('VACUUM');
-      console.log('[Cron] DB Purge & VACUUM complete.');
-    } catch (err) {
-      console.error('[Cron] Purge error:', err.message);
-    }
+    void runWithCronLock('nightly-purge', async () => {
+      try {
+        const { db: database } = require('./services/database');
+        console.log('[Cron] Running 90-Day DB Purge...');
+        database.transaction(() => {
+          database.prepare("DELETE FROM bets WHERE result = 'archived' AND created_at < datetime('now', '-90 days')").run();
+          database.prepare('DELETE FROM user_bets WHERE bet_id NOT IN (SELECT id FROM bets)').run();
+        })();
+        database.exec('VACUUM');
+        console.log('[Cron] DB Purge & VACUUM complete.');
+      } catch (err) {
+        console.error('[Cron] Purge error:', err.message);
+      }
+    });
   });
   console.log('🧹 90-day DB purge at 3:30 AM UTC');
 

@@ -87,6 +87,8 @@ async function pollCappers(client) {
           units: pickData.units || 1,
           source: 'twitter_scraper',
           source_url: `https://x.com/${handle}/status/${tweet.id}`,
+          source_channel_id: `twitter:${handle.toLowerCase()}`,
+          source_message_id: String(tweet.id),
           raw_text: (tweet.text || '').slice(0, 500),
           review_status: 'needs_review',
         }, pickData.legs || []);

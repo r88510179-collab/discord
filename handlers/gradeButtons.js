@@ -83,7 +83,11 @@ async function handleGradeInteraction(interaction) {
   await interaction.update({ embeds: [gradedEmbed], components: [] });
 
   // Post to dashboard
-  await postBetGraded(interaction.client, graded, result, profitUnits, { grade: display.label, reason: gradeReason });
+  try {
+    await postBetGraded(interaction.client, graded, result, profitUnits, { grade: display.label, reason: gradeReason });
+  } catch (err) {
+    console.error('[GradeBtn] Dashboard post error:', err.message);
+  }
 }
 
 module.exports = { handleGradeInteraction };
