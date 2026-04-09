@@ -155,8 +155,11 @@ function looksLikePick(text) {
 }
 
 function getPicksChannels() {
-  const raw = process.env.PICKS_CHANNEL_IDS || '';
-  return raw.split(',').map(id => id.trim()).filter(Boolean);
+  const configured = (process.env.PICKS_CHANNEL_IDS || '')
+    .split(',').map(id => id.trim()).filter(Boolean);
+  const humanSubmission = (process.env.HUMAN_SUBMISSION_CHANNEL_IDS || '')
+    .split(',').map(id => id.trim()).filter(Boolean);
+  return Array.from(new Set([...configured, ...humanSubmission]));
 }
 
 /**
@@ -164,8 +167,7 @@ function getPicksChannels() {
  * Single source of truth: if this returns authorized:false, nothing runs.
  */
 function globalPipelineGuard(message) {
-  const picksWhitelist = (process.env.PICKS_CHANNEL_IDS || '')
-    .split(',').map(id => id.trim()).filter(Boolean);
+  const picksWhitelist = getPicksChannels();
 
   const isSlipChannel = message.channel.id === process.env.SLIP_FEED_CHANNEL_ID;
   const isPicksChannel = picksWhitelist.includes(message.channel.id);

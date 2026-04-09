@@ -207,12 +207,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
+function parseChannelIds(raw) {
+  return String(raw || '')
+    .split(',')
+    .map(id => id.trim())
+    .filter(Boolean);
+}
+
 // ── Handle messages (auto-parse picks channel) ──────────────
-// Add your authorized channel IDs here
-const AUTHORIZED_CHANNELS = [
+// Static defaults + env-driven human submission channels for Bug 3 parity.
+const AUTHORIZED_CHANNELS = Array.from(new Set([
   '1488236820700594197', // #submit-picks
   '1486825605105192960', // #admin-log
-];
+  ...parseChannelIds(process.env.HUMAN_SUBMISSION_CHANNEL_IDS),
+]));
 
 client.on(Events.MessageCreate, async (message) => {
   // 1. IMMEDIATELY ignore bots (prevents infinite loops)
@@ -561,6 +569,7 @@ client.once(Events.ClientReady, (c) => {
         database.transaction(() => {
           database.prepare("DELETE FROM bets WHERE result = 'archived' AND created_at < datetime('now', '-90 days')").run();
           database.prepare('DELETE FROM user_bets WHERE bet_id NOT IN (SELECT id FROM bets)').run();
+          database.prepare("DELETE FROM processed_tweets WHERE processed_at < datetime('now', '-30 days')").run();
         })();
         database.exec('VACUUM');
         console.log('[Cron] DB Purge & VACUUM complete.');
