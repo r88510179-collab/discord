@@ -8,6 +8,15 @@ Parse @capperledger recap tweets to grade pending bets without AI calls. Add `gr
 ### City-name ambiguity in reclassifier
 The SPORT_TEAM_KEYWORDS list only contains team nicknames (Thunder, Lakers, Capitals), not city names (Oklahoma City, Los Angeles, Washington). When a bet uses the city name alone ("Oklahoma City to win"), the reclassifier fails to match it against the correct sport. This is especially problematic for cities with multiple teams across sports (LA has 8+ pro teams). Fix: add city aliases to each sport's keyword list, OR implement a disambiguation step that checks all sports and flags truly ambiguous cities as "requires-context" rather than forcing a reclassification.
 
+### Capper ROI display bug
+`/admin snapshot` shows Top 3 cappers all at "+500%" ROI (rbssportsplays, dangambleai, Dan). Suspiciously uniform cap or calculation error. Investigate ROI formula in snapshot handler and `/health quick` — likely capping at 500% or dividing by wrong denominator. Should show actual ROI per capper.
+
+### Brave Search returning HTTP 402 — free tier exhausted or API key issue
+Grader logs show 100% HTTP 402 responses from Brave backend. DDG circuit breaker is open. Only Bing fallback is returning results. Need to: (1) verify BRAVE_API_KEY is still valid, (2) check Brave dashboard for usage/billing status, (3) circuit-breaker Brave on 402 like we do for DDG timeouts, (4) add 402 detection to Brave health check so /admin snapshot reflects real state.
+
+### Snapshot Brave health check is wrong
+/admin snapshot reports "Brave: healthy" while actual calls return HTTP 402. The circuit tracker only detects timeouts, not HTTP error codes. Fix: track 4xx/5xx responses as circuit failures. Show real last-success timestamp per backend.
+
 ## Ingestion Expansion
 
 ### DubClub email → Discord bridge
