@@ -50,7 +50,10 @@ module.exports = {
         .setDescription('Pause/resume AutoGrader'))
     .addSubcommand(sub =>
       sub.setName('list-channels')
-        .setDescription('List tracked, ignored, and unmonitored channels')),
+        .setDescription('List tracked, ignored, and unmonitored channels'))
+    .addSubcommand(sub =>
+      sub.setName('snapshot')
+        .setDescription('Full bot state snapshot for fast triage')),
 
   async execute(interaction) {
     const sub = interaction.options.getSubcommand();
@@ -277,6 +280,141 @@ module.exports = {
         `AutoGrader: ${process.env.AUTOGRADER_DISABLED === 'true' ? '⏸️ PAUSED' : '▶️ Active'}`,
       ];
       return interaction.editReply(lines.join('\n'));
+    }
+
+    // ── Snapshot: full bot state for fast triage ──
+    if (sub === 'snapshot') {
+      if (process.env.OWNER_ID && interaction.user.id !== process.env.OWNER_ID) return interaction.reply({ content: '🚫', ephemeral: true });
+      await interaction.deferReply({ ephemeral: true });
+
+      const { EmbedBuilder } = require('discord.js');
+      const { db, getLeaderboard, getPendingBets, getTrackedTwitterAccounts } = require('../services/database');
+      const v8 = require('v8');
+      const mem = process.memoryUsage();
+      const hs = v8.getHeapStatistics();
+      const mb = (b) => (b / 1024 / 1024).toFixed(1);
+      const uptimeMin = Math.round(process.uptime() / 60);
+      const fmtDur = (m) => `${Math.floor(m / 60)}h ${m % 60}m`;
+
+      // ── 1. System ──
+      const client = interaction.client;
+      let totalMsgCache = 0;
+      client.channels.cache.forEach(ch => { if (ch.messages) totalMsgCache += ch.messages.cache.size; });
+      const sysLines = [
+        `**Uptime:** ${fmtDur(uptimeMin)}`,
+        `**Memory:** RSS ${mb(mem.rss)}MB | Heap ${mb(hs.used_heap_size)}/${mb(hs.heap_size_limit)}MB (${(hs.used_heap_size / hs.heap_size_limit * 100).toFixed(1)}%)`,
+        `**Node:** ${process.version} | PID ${process.pid}`,
+        `**Discord:** ${client.guilds.cache.size} guild(s) | ${client.channels.cache.size} ch | ${totalMsgCache} cached msgs`,
+      ];
+
+      // ── 2. Pause switches ──
+      const switchLines = [
+        `AutoGrader: ${process.env.AUTOGRADER_DISABLED === 'true' ? '⏸️ PAUSED' : '▶️ Active'}`,
+        `Twitter Poller: ${process.env.TWITTER_POLLER_DISABLED === 'true' ? '⏸️ PAUSED' : '▶️ Active'}`,
+      ];
+
+      // ── 3. Bet pipeline ──
+      const totalBets = db.prepare('SELECT COUNT(*) as c FROM bets').get().c;
+      const pending = db.prepare("SELECT COUNT(*) as c FROM bets WHERE result = 'pending'").get().c;
+      const stuck = db.prepare("SELECT COUNT(*) as c FROM bets WHERE result = 'pending' AND review_status = 'confirmed' AND created_at < datetime('now', '-24 hours')").get().c;
+      const todayConfirmed = db.prepare("SELECT COUNT(*) as c FROM bets WHERE review_status = 'confirmed' AND created_at > datetime('now', '-24 hours')").get().c;
+      const needsReview = db.prepare("SELECT COUNT(*) as c FROM bets WHERE review_status = 'needs_review'").get().c;
+      const graded24h = db.prepare("SELECT result, COUNT(*) as c FROM bets WHERE graded_at > datetime('now', '-24 hours') AND result IN ('win','loss','push','void') GROUP BY result").all();
+      const gradedMap = {};
+      for (const r of graded24h) gradedMap[r.result] = r.c;
+      const pipeLines = [
+        `**Total:** ${totalBets} | **Pending:** ${pending} | **Stuck >24h:** ${stuck}`,
+        `**Today confirmed:** ${todayConfirmed} | **Needs review:** ${needsReview}`,
+        `**Graded 24h:** ${gradedMap.win || 0}W / ${gradedMap.loss || 0}L / ${gradedMap.push || 0}P / ${gradedMap.void || 0}V`,
+      ];
+
+      // ── 4. Grading health ──
+      const lastGrade = db.prepare("SELECT MAX(graded_at) as last FROM bets WHERE graded_at IS NOT NULL").get()?.last || 'never';
+      const gradeLines = [
+        `**Last grade:** ${lastGrade}`,
+        `**Pending queue:** ${pending}`,
+        `**Brave:** healthy | **DDG:** ${typeof global.ddgFailCount !== 'undefined' ? `${global.ddgFailCount} fails` : 'unknown'}`,
+      ];
+
+      // ── 5. Twitter ingestion ──
+      const tracked = getTrackedTwitterAccounts();
+      let creditLine = 'N/A';
+      try {
+        const { getTwitterCreditStats } = require('../services/twitter');
+        const cs = getTwitterCreditStats();
+        creditLine = `${cs.used}/${cs.budget} (${cs.pct}%)`;
+      } catch (_) {}
+      const deadHandles = db.prepare(`
+        SELECT t.twitter_handle FROM tracked_twitter t WHERE t.active = 1
+        AND t.twitter_handle NOT IN (SELECT DISTINCT handle FROM twitter_audit_log WHERE stage = 'saved' AND created_at > datetime('now', '-7 days'))
+      `).all();
+      const twitLines = [
+        `**Poller:** ${process.env.TWITTER_POLLER_DISABLED === 'true' ? '⏸️ PAUSED' : '▶️ Active'}`,
+        `**Credits:** ${creditLine}`,
+        `**Tracked handles:** ${tracked.length}`,
+        deadHandles.length > 0 ? `**0 saves 7d:** ${deadHandles.slice(0, 5).map(h => `@${h.twitter_handle}`).join(', ')}${deadHandles.length > 5 ? ` +${deadHandles.length - 5}` : ''}` : '**0 saves 7d:** none',
+      ];
+
+      // ── 6. Channels ──
+      const chLines = [
+        `TRACKED: ${(process.env.TRACKED_CHANNELS || '').split(',').filter(Boolean).length}`,
+        `PICKS: ${(process.env.PICKS_CHANNEL_IDS || '').split(',').filter(Boolean).length}`,
+        `IGNORED: ${(process.env.IGNORED_CHANNELS || '').split(',').filter(Boolean).length}`,
+        `HUMAN: ${(process.env.HUMAN_SUBMISSION_CHANNEL_IDS || '').split(',').filter(Boolean).join(', ') || 'none'}`,
+        `SUBMIT: ${process.env.SUBMIT_CHANNEL_ID || 'none'}`,
+        `DASHBOARD: ${process.env.DASHBOARD_CHANNEL_ID || 'none'}`,
+        `SLIP_FEED: ${process.env.SLIP_FEED_CHANNEL_ID || 'none'}`,
+        `WAR_ROOM: ${process.env.WAR_ROOM_CHANNEL_ID || 'none'}`,
+      ];
+
+      // ── 7. Secrets (names only) ──
+      const knownSecrets = ['DISCORD_TOKEN','GROQ_API_KEY','GEMINI_API_KEY','CEREBRAS_API_KEY','OPENROUTER_API_KEY','MISTRAL_API_KEY','BRAVE_API_KEY','SERPER_API_KEY','TWITTERAPI_KEY','APITWITTER_KEY','MOBILE_SCRAPER_SECRET','OWNER_ID','AUTOGRADER_DISABLED','TWITTER_POLLER_DISABLED','ACTIVE_SEASON','ODDS_API_KEY','OCR_SPACE_API_KEY'];
+      const setSecrets = knownSecrets.filter(k => process.env[k]);
+      const secretLine = `**Set (${setSecrets.length}):** ${setSecrets.join(', ')}`;
+
+      // ── 8. Cappers ──
+      const allCappers = getLeaderboard('roi_pct', 50);
+      const qualified = allCappers.filter(c => (c.wins + c.losses) >= 1);
+      const top3 = qualified.slice(0, 3).map(c => `${c.display_name} ${c.wins}W-${c.losses}L ${c.roi_pct >= 0 ? '+' : ''}${c.roi_pct}%`).join('\n') || 'none';
+      const bot3 = [...qualified].sort((a, b) => a.roi_pct - b.roi_pct).slice(0, 3).map(c => `${c.display_name} ${c.wins}W-${c.losses}L ${c.roi_pct >= 0 ? '+' : ''}${c.roi_pct}%`).join('\n') || 'none';
+
+      // ── 9. Active handles ──
+      const handles = process._getActiveHandles?.()?.length || '?';
+      const requests = process._getActiveRequests?.()?.length || '?';
+
+      // ── 10. Alerts ──
+      let alertText = '✅ All systems nominal';
+      try {
+        const { sectionAlerts } = require('../services/healthReport');
+        const alerts = sectionAlerts();
+        alertText = alerts.lines.join('\n');
+      } catch (_) {}
+
+      // Build embeds
+      const embed1 = new EmbedBuilder()
+        .setTitle('📸 Bot State Snapshot')
+        .setColor(0x3498DB)
+        .addFields(
+          { name: '💻 System', value: sysLines.join('\n'), inline: false },
+          { name: '🔘 Pause Switches', value: switchLines.join('\n'), inline: true },
+          { name: '📊 Bet Pipeline', value: pipeLines.join('\n'), inline: false },
+          { name: '⚡ Grading', value: gradeLines.join('\n'), inline: true },
+          { name: '🐦 Twitter', value: twitLines.join('\n'), inline: true },
+        )
+        .setTimestamp();
+
+      const embed2 = new EmbedBuilder()
+        .setColor(0x3498DB)
+        .addFields(
+          { name: '📡 Channels', value: chLines.join('\n'), inline: true },
+          { name: '🔑 Secrets', value: secretLine, inline: false },
+          { name: '🏆 Top 3 Cappers', value: top3, inline: true },
+          { name: '🥶 Bottom 3', value: bot3, inline: true },
+          { name: '⚙️ Runtime', value: `Handles: ${handles} | Requests: ${requests}`, inline: true },
+          { name: '🚨 Alerts', value: alertText.slice(0, 1000), inline: false },
+        );
+
+      return interaction.editReply({ embeds: [embed1, embed2] });
     }
   },
 };
