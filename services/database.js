@@ -544,6 +544,9 @@ function getNeedsReviewBets() {
   return stmts.needsReviewBets.all();
 }
 
+// DEPRECATED 2026-04-11: fuzzy first-3-words matching causes false positives
+// for similar-prefix bets (e.g. Hard Rock slips). Use createBetWithLegs fingerprint dedup instead.
+// Kept for backward compatibility but no longer called from production paths.
 function isDuplicateBet(capperId, description) {
   if (!description || description.length < 5) return false;
   // Extract key words (player name, team, line) for fuzzy matching

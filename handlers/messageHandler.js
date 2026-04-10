@@ -1,5 +1,5 @@
 const { parseBetText, parseBetSlipImage, evaluateTweet, validateParsedBet } = require('../services/ai');
-const { getOrCreateCapper, createBetWithLegs, isDuplicateBet, isAuditMode, findPendingBetBySubject, gradeBet: gradeBetRecord, getBankroll, updateBankroll } = require('../services/database');
+const { getOrCreateCapper, createBetWithLegs, isAuditMode, findPendingBetBySubject, gradeBet: gradeBetRecord, getBankroll, updateBankroll } = require('../services/database');
 const { betEmbed } = require('../utils/embeds');
 const { postPickTracked } = require('../services/dashboard');
 const { sendStagingEmbed } = require('../services/warRoom');
@@ -417,7 +417,7 @@ async function processSlipImage(client, imageUrl, capperId, capperName, opts = {
   // ── Stage 4: Save to DB + send to War Room ──
   const saved = [];
   for (const bet of parsed.bets) {
-    if (isDuplicateBet(capperId, bet.description)) continue;
+    // Dedup handled by createBetWithLegs fingerprint — isDuplicateBet removed (false positives)
 
     const record = await createBetWithLegs({
       capper_id: capperId,
@@ -875,7 +875,7 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
 
         const hasAnyImage = imageUrls.length > 0;
         for (const bet of betsToSave) {
-          if (isDuplicateBet(capper.id, bet.description)) continue;
+          // Dedup handled by createBetWithLegs fingerprint — isDuplicateBet removed (false positives)
 
           // Anti-hallucination: validate parsed bet against source content
           const validation = validateParsedBet(bet, cleanText);
