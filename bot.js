@@ -486,6 +486,9 @@ client.on(Events.MessageCreate, async (message) => {
 client.on(Events.MessageUpdate, (oldMsg, newMsg) => {
   // Only care if embeds were added (0 → N) — this is Discord unfurling a link
   if (oldMsg.embeds.length === 0 && newMsg.embeds.length > 0) {
+    if (newMsg.content && /hardrock\.bet/i.test(newMsg.content)) {
+      console.log(`[HRB-DIAG-UPDATE] update fired for hardrock.bet message ${newMsg.id}, embeds now: ${newMsg.embeds.length}`);
+    }
     console.log(`[DEBUG] MessageUpdate in #${newMsg.channel.name} (${newMsg.channel.id}) | new embeds: ${newMsg.embeds.length} | content: "${(newMsg.content || '').slice(0, 60)}"`);
     handleMessage(newMsg, { isUpdate: true });
   }

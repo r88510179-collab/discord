@@ -557,6 +557,29 @@ async function handleMessage(message, { isUpdate = false } = {}) {
   // ═══ TRACE: log EVERY message the bot sees (remove after debugging) ═══
   console.log(`[MessageHandler] ENTRY | ch=${message.channel?.name || message.channel?.id} | author=${message.author?.username} | bot=${message.author?.bot} | content=${message.content?.length || 0} | att=${message.attachments?.size || 0} | embeds=${message.embeds?.length || 0} | isUpdate=${isUpdate}`);
 
+  // TEMP DIAG: dump full embed structure for hardrock.bet messages
+  if (message.content && /hardrock\.bet/i.test(message.content)) {
+    console.log(`[HRB-DIAG] hardrock.bet URL detected in message ${message.id}`);
+    console.log(`[HRB-DIAG] content: ${message.content.slice(0, 200)}`);
+    console.log(`[HRB-DIAG] attachments.size: ${message.attachments.size}`);
+    console.log(`[HRB-DIAG] embeds.length: ${message.embeds.length}`);
+    for (let i = 0; i < message.embeds.length; i++) {
+      const e = message.embeds[i];
+      console.log(`[HRB-DIAG] embed[${i}] type=${e.type} url=${e.url || 'none'}`);
+      console.log(`[HRB-DIAG] embed[${i}] title=${e.title || 'none'}`);
+      console.log(`[HRB-DIAG] embed[${i}] description=${(e.description || '').slice(0, 100)}`);
+      console.log(`[HRB-DIAG] embed[${i}] image.url=${e.image?.url || 'none'}`);
+      console.log(`[HRB-DIAG] embed[${i}] thumbnail.url=${e.thumbnail?.url || 'none'}`);
+      console.log(`[HRB-DIAG] embed[${i}] author=${e.author?.name || 'none'}`);
+      console.log(`[HRB-DIAG] embed[${i}] fields=${e.fields?.length || 0}`);
+    }
+    if (message.attachments.size > 0) {
+      for (const att of message.attachments.values()) {
+        console.log(`[HRB-DIAG] attachment: url=${att.url} contentType=${att.contentType} size=${att.size}`);
+      }
+    }
+  }
+
   if (!message.guild) return;
 
   // ═══ PARTIAL FETCH: ensure forwarded/partial messages are fully loaded ═══
