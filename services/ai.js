@@ -956,7 +956,75 @@ function validateParsedBet(pick, sourceText) {
     }
   }
 
+  // Bug B: Sportsbook brand names parsed as bets
+  if (isSportsbookBrand(pick.description)) {
+    issues.push(`Description matches sportsbook brand name`);
+    return { valid: false, issues, reason: 'sportsbook_brand' };
+  }
+  if ((pick.sport === 'Unknown' || !pick.sport) && /sportsbook/i.test(desc)) {
+    issues.push(`Unknown sport with sportsbook keyword`);
+    return { valid: false, issues, reason: 'sportsbook_brand' };
+  }
+
+  // Bug A: Wrong-sport team contamination in parlay legs
+  if (pick.legs && pick.legs.length > 0 && pick.sport) {
+    for (const leg of pick.legs) {
+      const legCheck = validateLegSportConsistency(leg, pick.sport);
+      if (!legCheck.valid) {
+        issues.push(legCheck.reason);
+        return { valid: false, issues, reason: 'leg_sport_mismatch' };
+      }
+    }
+  }
+
   return { valid: true, issues };
 }
 
-module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, evaluateTweet, validateParsedBet, reclassifySport, inferLegSport, isInSeason, AMBIGUITY_THRESHOLD };
+// Bug A: Validate that parlay legs don't contain teams from wrong sports
+function validateLegSportConsistency(leg, parlaySport) {
+  const desc = (leg.description || '').toLowerCase();
+  for (const [sport, keywords] of Object.entries(SPORT_TEAM_MAP)) {
+    if (sport === (parlaySport || '').toUpperCase()) continue;
+    for (const keyword of keywords) {
+      if (desc.includes(keyword)) {
+        console.log(`[Parser] WRONG-SPORT LEG REJECTED: parlay sport=${parlaySport}, leg="${desc.slice(0, 80)}", found ${sport} keyword "${keyword}"`);
+        return { valid: false, reason: `Leg contains ${sport} team "${keyword}" but parlay is ${parlaySport}` };
+      }
+    }
+  }
+  return { valid: true };
+}
+
+// Bug B: Detect sportsbook brand names that aren't bets
+const SPORTSBOOK_BRAND_PATTERNS = [
+  /america['']s premium social sportsbook/i,
+  /hard ?rock( bet)?/i,
+  /draftkings/i,
+  /fanduel/i,
+  /betmgm/i,
+  /caesars/i,
+  /fanatics( sportsbook)?/i,
+  /prizepicks/i,
+  /underdog( fantasy)?/i,
+  /pointsbet/i,
+  /barstool sportsbook/i,
+  /wynnbet/i,
+  /bet365/i,
+  /unibet/i,
+  /betrivers/i,
+  /sportsbook$/i,
+  /^social sportsbook/i,
+  /betr/i,
+  /espn bet/i,
+  /pinnacle/i,
+];
+
+function isSportsbookBrand(text) {
+  if (!text) return false;
+  for (const pattern of SPORTSBOOK_BRAND_PATTERNS) {
+    if (pattern.test(text)) return true;
+  }
+  return false;
+}
+
+module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, evaluateTweet, validateParsedBet, validateLegSportConsistency, isSportsbookBrand, reclassifySport, inferLegSport, isInSeason, AMBIGUITY_THRESHOLD };

@@ -300,6 +300,24 @@ function createBet(betData) {
   return { ...stmts.getBet.get(id), _deduped: false };
 }
 
+// Bug C: Deduplicate parlay legs before inserting
+function dedupeParlayLegs(legs) {
+  const seen = new Set();
+  const unique = [];
+  const duplicates = [];
+  for (const leg of legs) {
+    const key = (leg.description || '').toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
+    if (!key) continue;
+    if (seen.has(key)) { duplicates.push(leg.description); continue; }
+    seen.add(key);
+    unique.push(leg);
+  }
+  if (duplicates.length > 0) {
+    console.log(`[Parser] DEDUPED ${duplicates.length} duplicate leg(s): ${duplicates.join(' | ')}`);
+  }
+  return unique;
+}
+
 function createBetWithLegs(betData, legs) {
   const fingerprint = buildFingerprint(betData);
   if (fingerprint) {
@@ -309,11 +327,11 @@ function createBetWithLegs(betData, legs) {
 
   const bet = createBet(betData);
   if (bet?._deduped) return bet;
-  if (legs && legs.length > 0) {
-    for (const leg of legs) {
-      if (!leg.description) continue; // skip legs with no description
-      stmts.insertLeg.run(uid(), bet.id, leg.description, leg.odds || null);
-    }
+  // Deduplicate legs before inserting
+  const cleanLegs = dedupeParlayLegs(legs || []);
+  for (const leg of cleanLegs) {
+    if (!leg.description) continue;
+    stmts.insertLeg.run(uid(), bet.id, leg.description, leg.odds || null);
   }
   return bet;
 }
@@ -729,6 +747,7 @@ module.exports = {
   getOrCreateCapperByTwitter,
   createBet,
   createBetWithLegs,
+  dedupeParlayLegs,
   gradeBet: gradeBetRecord,
   getPendingBets,
   getRecentBets,
