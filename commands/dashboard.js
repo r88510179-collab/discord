@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder, MessageFlags } = require('discord.js');
 const { getDashboardSummary, getRecentPendingBets, getTotalBankroll, getRiskedCapital } = require('../services/database');
 const { COLORS, fmtOdds, fmtUnits, fmtMoney } = require('../utils/embeds');
 
@@ -56,6 +56,6 @@ module.exports = {
       });
     }
 
-    await interaction.reply({ embeds: [embed], ephemeral: true });
+    await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
   },
 };

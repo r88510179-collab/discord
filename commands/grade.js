@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder, MessageFlags } = require('discord.js');
 const { runAutoGrade } = require('../services/grading');
 const { getOrCreateCapper, getRecentBets, gradeBet, updateBankroll, getBankroll, saveDailySnapshot } = require('../services/database');
 const { gradeBetAI } = require('../services/ai');
@@ -49,7 +49,7 @@ module.exports = {
             ))),
 
   async execute(interaction) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     const subcommand = interaction.options.getSubcommand();
 

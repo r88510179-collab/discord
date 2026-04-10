@@ -1,7 +1,7 @@
 // handlers/gradeButtons.js — Interactive grading via Discord buttons
 // Handles grade_win, grade_loss, grade_push, grade_void button clicks
 
-const { EmbedBuilder } = require('discord.js');
+const { EmbedBuilder, MessageFlags } = require('discord.js');
 const { gradeBet, getBankroll, updateBankroll, saveDailySnapshot } = require('../services/database');
 const { calcProfit } = require('../services/grading');
 const { postBetGraded } = require('../services/dashboard');
@@ -23,13 +23,13 @@ async function handleGradeInteraction(interaction) {
   const result = prefix.replace('grade_', ''); // win, loss, push, void
 
   if (!RESULT_MAP[result] || !betId) {
-    return interaction.reply({ content: 'Invalid grading action.', ephemeral: true });
+    return interaction.reply({ content: 'Invalid grading action.', flags: MessageFlags.Ephemeral });
   }
 
   // Extract bet info from the original embed
   const originalEmbed = interaction.message.embeds[0];
   if (!originalEmbed) {
-    return interaction.reply({ content: 'Could not read bet embed.', ephemeral: true });
+    return interaction.reply({ content: 'Could not read bet embed.', flags: MessageFlags.Ephemeral });
   }
 
   // Get odds and units from embed fields
@@ -52,7 +52,7 @@ async function handleGradeInteraction(interaction) {
   const graded = gradeBet(betId, result, profitUnits, display.label, gradeReason);
 
   if (!graded) {
-    return interaction.reply({ content: `Could not grade bet \`${betId.slice(0, 8)}\`. It may already be graded.`, ephemeral: true });
+    return interaction.reply({ content: `Could not grade bet \`${betId.slice(0, 8)}\`. It may already be graded.`, flags: MessageFlags.Ephemeral });
   }
 
   // Update bankroll if capper has one
@@ -83,7 +83,11 @@ async function handleGradeInteraction(interaction) {
   await interaction.update({ embeds: [gradedEmbed], components: [] });
 
   // Post to dashboard
-  await postBetGraded(interaction.client, graded, result, profitUnits, { grade: display.label, reason: gradeReason });
+  try {
+    await postBetGraded(interaction.client, graded, result, profitUnits, { grade: display.label, reason: gradeReason });
+  } catch (err) {
+    console.error('[GradeBtn] Dashboard post error:', err.message);
+  }
 }
 
 module.exports = { handleGradeInteraction };

@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, MessageFlags } = require('discord.js');
 const { deleteAllPending } = require('../services/database');
 const { COLORS } = require('../utils/embeds');
 
@@ -28,7 +28,7 @@ module.exports = {
         .setTimestamp()
         .setFooter({ text: 'ZoneTracker' });
 
-      await interaction.reply({ embeds: [embed], ephemeral: true });
+      await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
     }
   },
 };

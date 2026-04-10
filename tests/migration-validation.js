@@ -7,6 +7,7 @@ const Database = require('better-sqlite3');
 const { runMigrations } = require('../services/migrator');
 
 const MIGRATIONS_DIR = path.join(__dirname, '..', 'migrations');
+const migrationFiles = fs.readdirSync(MIGRATIONS_DIR).filter(f => f.endsWith('.sql')).sort();
 
 function run() {
   // ── TEST 1: Fresh database — all migrations applied ────────
@@ -28,12 +29,13 @@ function run() {
 
     // Verify schema_migrations table tracks them
     const tracked = db.prepare('SELECT filename FROM schema_migrations ORDER BY filename').all();
-    assert.strictEqual(tracked.length, 5, 'Should track 5 migrations');
+    assert.strictEqual(tracked.length, migrationFiles.length, `Should track ${migrationFiles.length} migrations`);
     assert.strictEqual(tracked[0].filename, '001_initial_schema.sql');
     assert.strictEqual(tracked[1].filename, '002_add_review_columns.sql');
     assert.strictEqual(tracked[2].filename, '003_add_settings_table.sql');
     assert.strictEqual(tracked[3].filename, '004_create_props_table.sql');
     assert.strictEqual(tracked[4].filename, '005_create_user_bets_table.sql');
+    assert.strictEqual(tracked[5].filename, '006_add_season_to_bets.sql');
 
     // Verify tables exist
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map(r => r.name);
@@ -48,6 +50,7 @@ function run() {
     // Verify review_status column exists on bets
     const betCols = db.prepare("PRAGMA table_info('bets')").all().map(c => c.name);
     assert.ok(betCols.includes('review_status'), 'bets should have review_status column');
+    assert.ok(betCols.includes('season'), 'bets should have season column');
 
     db.close();
     fs.unlinkSync(dbFile);
@@ -62,11 +65,11 @@ function run() {
     db.pragma('foreign_keys = ON');
 
     const first = runMigrations(db);
-    assert.strictEqual(first.applied.length, 5, 'First run should apply 5');
+    assert.strictEqual(first.applied.length, migrationFiles.length, `First run should apply ${migrationFiles.length}`);
 
     const second = runMigrations(db);
     assert.strictEqual(second.applied.length, 0, 'Second run should apply 0');
-    assert.strictEqual(second.skipped.length, 5, 'Second run should skip 5');
+    assert.strictEqual(second.skipped.length, migrationFiles.length, `Second run should skip ${migrationFiles.length}`);
 
     db.close();
     fs.unlinkSync(dbFile);
