@@ -1,5 +1,30 @@
 # ZoneTracker Backlog
 
+## 🚨 KNOWN BUG - Priority 1
+
+### DatDude #datdude-slips Hard Rock bet slips not staging to war-room
+
+**Symptom**: DatDudeStill posts Hard Rock Bet shares in #datdude-slips. Bot receives message, extracts image attachment, calls Vision AI. But no bet appears in war-room. Same user posting same content in #ig-dave-picks works fine.
+
+**Verified NOT the cause**:
+- MessageHandler.ENTRY fires for both channels (author=datdudestill reaches bot)
+- Both channels in HUMAN_SUBMISSION_CHANNEL_IDS
+- Both channels in CAPPER_CHANNEL_MAP (1473347391284576469:IgDave, 1355182920163262664:DatDude)
+- Neither in IGNORED_CHANNELS
+- Image extraction succeeds: "Images Extracted: 1" for both
+- Vision AI fires for both (5-sec buffer delay from 20:07:33 datdude → 20:07:38 vision call)
+- resolveCapper() returns valid capper info for both (DatDude, IgDave)
+- No channel-specific branching in processAggregatedMessage or bufferMessage
+
+**Next debug steps when resumed**:
+1. Add log line inside processAggregatedMessage right after "[DEBUG] AI Response:" showing channel name + bets.length
+2. Add log line before any return/drop in the war-room staging path
+3. Have DatDude post ONLY in #datdude-slips (no concurrent #ig-dave-picks post within 10s to rule out buffer collision)
+4. Immediately grep logs for full trace from ENTRY → AI Response → staged/dropped
+5. HRB-DIAG logging already live (commit 43b59e3) — keep it
+
+**Hypothesis**: Post-Vision-AI bet creation path has a silent drop for second channel in HUMAN_SUBMISSION_CHANNEL_IDS, OR buffer key collision drops one when both post near-simultaneously.
+
 ## Grading Enhancements
 
 ### Oracle: CapperLedger as grading source
