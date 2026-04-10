@@ -883,11 +883,22 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
 
   function writeAudit() {
     try {
+      console.log(`[GradeAudit] Writing audit for bet=${audit.bet_id?.slice(0, 12)} status=${audit.final_status} provider=${audit.provider_used}`);
       const uid = require('crypto').randomBytes(8).toString('hex');
       const attemptNum = db.prepare('SELECT COUNT(*) as c FROM grading_audit WHERE bet_id = ?').get(audit.bet_id)?.c || 0;
       db.prepare(`INSERT INTO grading_audit (id, bet_id, attempt_num, timestamp, sport_in, sport_out, reclassified, is_parlay, leg_index, leg_count, search_backend, search_query, search_hits, search_duration_ms, provider_used, raw_response, guards_passed, guards_failed, final_status, final_evidence) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .run(uid, audit.bet_id, attemptNum + 1, Date.now(), audit.sport_in, audit.sport_out, audit.reclassified, audit.is_parlay, audit.leg_index, audit.leg_count, audit.search_backend, audit.search_query, audit.search_hits, audit.search_duration_ms, audit.provider_used, audit.raw_response?.slice(0, 1000), JSON.stringify(audit.guards_passed), JSON.stringify(audit.guards_failed), audit.final_status, audit.final_evidence?.slice(0, 500));
-    } catch (e) { console.error(`[GradeAudit] Write error: ${e.message}`); }
+        .run(
+          uid, audit.bet_id, attemptNum + 1, Date.now(),
+          audit.sport_in || null, audit.sport_out || null, audit.reclassified || 0,
+          audit.is_parlay || 0, audit.leg_index ?? null, audit.leg_count ?? null,
+          audit.search_backend || null, audit.search_query || null,
+          audit.search_hits || 0, audit.search_duration_ms || 0,
+          audit.provider_used || null, (audit.raw_response || '').slice(0, 1000),
+          JSON.stringify(audit.guards_passed || []), JSON.stringify(audit.guards_failed || []),
+          audit.final_status || null, (audit.final_evidence || '').slice(0, 500)
+        );
+      console.log(`[GradeAudit] Written successfully: attempt ${attemptNum + 1}`);
+    } catch (e) { console.error(`[GradeAudit] Write FAILED: ${e.message}`); }
   }
 
   function earlyReturn(result) {
@@ -1005,7 +1016,7 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
     providers.push({ name: 'mistral', url: 'https://api.mistral.ai/v1/chat/completions', key: process.env.MISTRAL_API_KEY, model: 'mistral-small-latest' });
   }
 
-  if (providers.length === 0) return null;
+  if (providers.length === 0) return earlyReturn({ status: 'PENDING', evidence: 'No AI providers configured' });
 
   const prompt = `You MUST respond with valid JSON only. No prose, no markdown, no code fences.
 Grade this bet ONLY using the search results below. Today: ${today}. Bet placed: ${betDate}.
@@ -1072,13 +1083,13 @@ CRITICAL RULES:
 
   if (!raw) {
     console.error(`[AI Grader] All providers failed for bet ${bet.id?.slice(0, 8)}`);
-    return null;
+    return earlyReturn({ status: 'PENDING', evidence: 'All AI providers failed' });
   }
 
   let parsed;
   try { parsed = JSON.parse(raw); } catch (e) {
     console.error(`[AI Grader] JSON parse error: ${e.message} | raw: ${raw?.slice(0, 100)}`);
-    return null;
+    return earlyReturn({ status: 'PENDING', evidence: `JSON parse error: ${e.message}` });
   }
 
   const guardsLog = [];
