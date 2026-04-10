@@ -26,6 +26,20 @@ db.exec(`
   );
 `);
 
+// ── Twitter audit log table ──────────────────────────────────
+db.exec(`
+  CREATE TABLE IF NOT EXISTS twitter_audit_log (
+    id TEXT PRIMARY KEY,
+    tweet_id TEXT, handle TEXT, tweet_text TEXT, tweet_url TEXT,
+    has_media INTEGER DEFAULT 0, posted_at TEXT,
+    stage TEXT, reason TEXT, bet_id TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+`);
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_twitter_audit_handle ON twitter_audit_log(handle)'); } catch (_) {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_twitter_audit_stage ON twitter_audit_log(stage)'); } catch (_) {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_twitter_audit_created ON twitter_audit_log(created_at)'); } catch (_) {}
+
 // ── Processed tweets dedup table ──────────────────────────────
 db.exec(`
   CREATE TABLE IF NOT EXISTS processed_tweets (
@@ -40,6 +54,54 @@ try {
   if (!ubCols.includes('risk_amount')) db.exec('ALTER TABLE user_bets ADD COLUMN risk_amount REAL DEFAULT 1.0');
 } catch (_) { /* table may not exist yet */ }
 
+// ── Additive: season column on bets ─────────────────────────
+try {
+  const betCols = db.prepare("PRAGMA table_info('bets')").all().map(c => c.name);
+  if (!betCols.includes('season')) db.exec("ALTER TABLE bets ADD COLUMN season TEXT NOT NULL DEFAULT 'Beta'");
+} catch (_) { /* table may not exist yet */ }
+
+// ── Additive: ladder columns on bets ────────────────────────
+try {
+  const betCols2 = db.prepare("PRAGMA table_info('bets')").all().map(c => c.name);
+  if (!betCols2.includes('is_ladder')) db.exec('ALTER TABLE bets ADD COLUMN is_ladder INTEGER DEFAULT 0');
+  if (!betCols2.includes('ladder_step')) db.exec('ALTER TABLE bets ADD COLUMN ladder_step INTEGER DEFAULT 0');
+} catch (_) { /* table may not exist yet */ }
+
+// ── Additive: bot_health_log table ──────────────────────────
+db.exec(`CREATE TABLE IF NOT EXISTS bot_health_log (id TEXT PRIMARY KEY, report_type TEXT, section TEXT, metric TEXT, value REAL, details TEXT, created_at TEXT DEFAULT (datetime('now')))`);
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_health_log_type ON bot_health_log(report_type)'); } catch (_) {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_health_log_created ON bot_health_log(created_at)'); } catch (_) {}
+
+// ── Additive: evidence/graded_at/sport on parlay_legs ───────
+try {
+  const legCols = db.prepare("PRAGMA table_info('parlay_legs')").all().map(c => c.name);
+  if (!legCols.includes('evidence')) db.exec('ALTER TABLE parlay_legs ADD COLUMN evidence TEXT');
+  if (!legCols.includes('graded_at')) db.exec('ALTER TABLE parlay_legs ADD COLUMN graded_at TEXT');
+  if (!legCols.includes('sport')) db.exec('ALTER TABLE parlay_legs ADD COLUMN sport TEXT');
+} catch (_) {}
+
+// ── Additive: slipfeed_message_id on bets ───────────────────
+try {
+  const betCols3 = db.prepare("PRAGMA table_info('bets')").all().map(c => c.name);
+  if (!betCols3.includes('slipfeed_message_id')) db.exec('ALTER TABLE bets ADD COLUMN slipfeed_message_id TEXT');
+} catch (_) {}
+
+// ── Additive: source tweet fields on bets ───────────────────
+try {
+  const betCols4 = db.prepare("PRAGMA table_info('bets')").all().map(c => c.name);
+  if (!betCols4.includes('source_tweet_id')) db.exec('ALTER TABLE bets ADD COLUMN source_tweet_id TEXT');
+  if (!betCols4.includes('source_tweet_handle')) db.exec('ALTER TABLE bets ADD COLUMN source_tweet_handle TEXT');
+} catch (_) {}
+
+// ── Additive: grading_source_url on bets ────────────────────
+try {
+  const betCols5 = db.prepare("PRAGMA table_info('bets')").all().map(c => c.name);
+  if (!betCols5.includes('grading_source_url')) db.exec('ALTER TABLE bets ADD COLUMN grading_source_url TEXT');
+} catch (_) {}
+
+// ── Active season helper ────────────────────────────────────
+const ACTIVE_SEASON = process.env.ACTIVE_SEASON || 'Beta';
+
 // ── Prepared statements (fast) ──────────────────────────────
 const stmts = {
   getCapper:         db.prepare('SELECT * FROM cappers WHERE discord_id = ?'),
@@ -48,8 +110,8 @@ const stmts = {
   insertCapper:      db.prepare('INSERT INTO cappers (id, discord_id, display_name, avatar_url) VALUES (?, ?, ?, ?)'),
   insertCapperTwitter: db.prepare('INSERT INTO cappers (id, twitter_handle, display_name) VALUES (?, ?, ?)'),
 
-  insertBet: db.prepare(`INSERT INTO bets (id, capper_id, sport, league, bet_type, description, odds, units, event_date, source, source_url, source_channel_id, source_message_id, fingerprint, raw_text, review_status, wager, payout)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+  insertBet: db.prepare(`INSERT INTO bets (id, capper_id, sport, league, bet_type, description, odds, units, event_date, source, source_url, source_channel_id, source_message_id, fingerprint, raw_text, review_status, wager, payout, season, is_ladder, ladder_step)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   insertLeg: db.prepare('INSERT INTO parlay_legs (id, bet_id, description, odds) VALUES (?, ?, ?, ?)'),
   gradeBet:  db.prepare('UPDATE bets SET result = ?, profit_units = ?, grade = ?, grade_reason = ?, graded_at = datetime(\'now\') WHERE id = ?'),
   getBet:    db.prepare('SELECT * FROM bets WHERE id = ?'),
@@ -216,6 +278,8 @@ function createBet(betData) {
       betData.source_message_id || null, fingerprint, betData.raw_text || null,
       betData.review_status || 'confirmed',
       betData.wager || null, betData.payout || null,
+      betData.season || ACTIVE_SEASON,
+      betData.is_ladder ? 1 : 0, betData.ladder_step || 0,
     );
   } catch (err) {
     // Concurrent insert race: unique fingerprint already committed by another writer.
@@ -225,6 +289,13 @@ function createBet(betData) {
       if (existing) return { ...existing, _deduped: true };
     }
     throw err;
+  }
+  // Store optional source tweet fields (not in the main INSERT for backward compat)
+  if (betData.source_tweet_id || betData.source_tweet_handle) {
+    try {
+      db.prepare('UPDATE bets SET source_tweet_id = ?, source_tweet_handle = ? WHERE id = ?')
+        .run(betData.source_tweet_id || null, betData.source_tweet_handle || null, id);
+    } catch (_) {}
   }
   return { ...stmts.getBet.get(id), _deduped: false };
 }
@@ -275,16 +346,23 @@ function getCapperStats(capperId) {
         CAST(COUNT(CASE WHEN b.result = 'win' THEN 1 END) AS REAL) /
         MAX(COUNT(CASE WHEN b.result IN ('win','loss') THEN 1 END), 1) * 100, 1
       ) AS win_pct,
-      COALESCE(SUM(b.profit_units), 0) AS total_profit_units,
+      COALESCE(SUM(CASE WHEN b.result IN ('win','loss','push') THEN b.profit_units ELSE 0 END), 0) AS total_profit_units,
       ROUND(
-        COALESCE(SUM(b.profit_units), 0) /
-        MAX(SUM(CASE WHEN b.result IN ('win','loss') THEN b.units ELSE 0 END), 1) * 100, 1
+        COALESCE(SUM(CASE WHEN b.result IN ('win','loss','push') THEN b.profit_units ELSE 0 END), 0) /
+        MAX(SUM(CASE WHEN b.result IN ('win','loss') THEN MAX(b.units, 1) ELSE 0 END), 1) * 100, 1
       ) AS roi_pct
     FROM cappers c
-    LEFT JOIN bets b ON b.capper_id = c.id
+    LEFT JOIN bets b ON b.capper_id = c.id AND b.season = ?
     WHERE c.id = ?
     GROUP BY c.id
-  `).get(capperId);
+  `).get(ACTIVE_SEASON, capperId);
+
+  // Sanity cap: ROI over 500% is almost certainly a data bug
+  if (row && Math.abs(row.roi_pct) > 500) {
+    console.warn(`[ROI Alert] Abnormal ROI detected for capper ${row.display_name}: ${row.roi_pct}% (${row.wins}W-${row.losses}L, ${row.total_profit_units}u)`);
+    row.roi_pct = Math.min(Math.max(row.roi_pct, -500), 500);
+  }
+
   return row || null;
 }
 
@@ -293,7 +371,7 @@ function getLeaderboard(sortBy = 'total_profit_units', limit = 10) {
   const allowed = ['total_profit_units', 'roi_pct', 'win_pct', 'total_bets'];
   const col = allowed.includes(sortBy) ? sortBy : 'total_profit_units';
 
-  return db.prepare(`
+  const rows = db.prepare(`
     SELECT
       c.id, c.display_name, c.discord_id,
       COUNT(b.id) AS total_bets,
@@ -304,18 +382,27 @@ function getLeaderboard(sortBy = 'total_profit_units', limit = 10) {
         CAST(COUNT(CASE WHEN b.result = 'win' THEN 1 END) AS REAL) /
         MAX(COUNT(CASE WHEN b.result IN ('win','loss') THEN 1 END), 1) * 100, 1
       ) AS win_pct,
-      COALESCE(SUM(b.profit_units), 0) AS total_profit_units,
+      COALESCE(SUM(CASE WHEN b.result IN ('win','loss','push') THEN b.profit_units ELSE 0 END), 0) AS total_profit_units,
       ROUND(
-        COALESCE(SUM(b.profit_units), 0) /
-        MAX(SUM(CASE WHEN b.result IN ('win','loss') THEN b.units ELSE 0 END), 1) * 100, 1
+        COALESCE(SUM(CASE WHEN b.result IN ('win','loss','push') THEN b.profit_units ELSE 0 END), 0) /
+        MAX(SUM(CASE WHEN b.result IN ('win','loss') THEN MAX(b.units, 1) ELSE 0 END), 1) * 100, 1
       ) AS roi_pct
     FROM cappers c
-    LEFT JOIN bets b ON b.capper_id = c.id
+    LEFT JOIN bets b ON b.capper_id = c.id AND b.season = ?
     GROUP BY c.id
     HAVING COUNT(b.id) > 0
     ORDER BY ${col} DESC
     LIMIT ?
-  `).all(limit);
+  `).all(ACTIVE_SEASON, limit);
+
+  // Sanity cap all rows
+  for (const row of rows) {
+    if (Math.abs(row.roi_pct) > 500) {
+      console.warn(`[ROI Alert] Abnormal ROI: ${row.display_name} ${row.roi_pct}% (${row.wins}W-${row.losses}L)`);
+      row.roi_pct = Math.min(Math.max(row.roi_pct, -500), 500);
+    }
+  }
+  return rows;
 }
 
 // ── Bankroll ────────────────────────────────────────────────
@@ -338,13 +425,61 @@ function setBankroll(capperId, starting, unitSize) {
 
 // ── Twitter Tracking ────────────────────────────────────────
 function addTrackedTwitter(handle, guildId, channelId) {
-  const clean = handle.replace('@', '').toLowerCase();
-  stmts.insertTracked.run(uid(), clean, `@${clean}`, guildId, channelId);
+  const clean = handle.replace(/<[^>]*>/g, '').replace(/@/g, '').trim().toLowerCase();
+  if (!clean) return null;
+  stmts.insertTracked.run(uid(), clean, clean, guildId, channelId);
   return { twitter_handle: clean, guild_id: guildId, channel_id: channelId };
 }
 
 function getTrackedTwitterAccounts() {
   return stmts.getTracked.all();
+}
+
+function removeTrackedTwitter(handle) {
+  const clean = handle.replace(/<[^>]*>/g, '').replace(/@/g, '').trim().toLowerCase();
+  if (!clean) return 0;
+  const result = db.prepare('DELETE FROM tracked_twitter WHERE lower(twitter_handle) = ?').run(clean);
+  return result.changes;
+}
+
+// ── Twitter Audit Log ─────────────────────────────────────────
+const insertAudit = db.prepare(`INSERT INTO twitter_audit_log (id, tweet_id, handle, tweet_text, tweet_url, has_media, posted_at, stage, reason, bet_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+
+function logTweetAudit({ tweet_id, handle, tweet_text, tweet_url, has_media, posted_at, stage, reason, bet_id }) {
+  try {
+    insertAudit.run(uid(), tweet_id || '', handle || '', (tweet_text || '').slice(0, 500), tweet_url || '', has_media ? 1 : 0, posted_at || null, stage, reason || null, bet_id || null);
+  } catch (_) {}
+}
+
+function getAuditRecent(limit = 20) {
+  return db.prepare('SELECT * FROM twitter_audit_log ORDER BY created_at DESC LIMIT ?').all(limit);
+}
+function getAuditByHandle(handle, limit = 20) {
+  return db.prepare('SELECT * FROM twitter_audit_log WHERE lower(handle) = lower(?) ORDER BY created_at DESC LIMIT ?').all(handle, limit);
+}
+function getAuditRejected(limit = 20) {
+  return db.prepare("SELECT * FROM twitter_audit_log WHERE stage = 'bouncer_rejected' ORDER BY created_at DESC LIMIT ?").all(limit);
+}
+function getAuditStats() {
+  return db.prepare(`
+    SELECT stage, COUNT(*) as count FROM twitter_audit_log
+    WHERE created_at > datetime('now', '-24 hours')
+    GROUP BY stage ORDER BY count DESC
+  `).all();
+}
+function searchAudit(keyword, limit = 20) {
+  return db.prepare('SELECT * FROM twitter_audit_log WHERE tweet_text LIKE ? ORDER BY created_at DESC LIMIT ?').all(`%${keyword}%`, limit);
+}
+function purgeOldAuditLogs() {
+  return db.prepare("DELETE FROM twitter_audit_log WHERE created_at < datetime('now', '-7 days')").run().changes;
+}
+
+// ── Admin: purge tables (owner-only, called from /admin purge) ──
+const PURGEABLE_TABLES = ['bets', 'tracked_twitter', 'processed_tweets'];
+function purgeTable(tableName) {
+  if (!PURGEABLE_TABLES.includes(tableName)) return 0;
+  const result = db.prepare(`DELETE FROM ${tableName}`).run();
+  return result.changes;
 }
 
 function updateLastTweetId(handle, tweetId) {
@@ -588,6 +723,7 @@ function getUserBets(userId) {
 
 module.exports = {
   db,
+  ACTIVE_SEASON,
   getOrCreateCapper,
   getCapperByTwitter,
   getOrCreateCapperByTwitter,
@@ -603,6 +739,15 @@ module.exports = {
   setBankroll,
   addTrackedTwitter,
   getTrackedTwitterAccounts,
+  removeTrackedTwitter,
+  purgeTable,
+  logTweetAudit,
+  getAuditRecent,
+  getAuditByHandle,
+  getAuditRejected,
+  getAuditStats,
+  searchAudit,
+  purgeOldAuditLogs,
   updateLastTweetId,
   saveDailySnapshot,
   getLastScannedMessage,

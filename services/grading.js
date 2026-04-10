@@ -1,6 +1,7 @@
 const { getPendingBets, gradeBet, updateBankroll, saveDailySnapshot, getBankroll, db, payoutTailers } = require('./database');
 const { gradeBetAI } = require('./ai');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+
+const delay = ms => new Promise(res => setTimeout(res, ms));
 
 const ODDS_API_BASE = 'https://api.the-odds-api.com/v4';
 const API_KEY = process.env.ODDS_API_KEY;
@@ -35,35 +36,136 @@ const SPORT_MAP = {
   'TENNIS': 'tennis_atp_french_open',
 };
 
-// Data-driven alias table for high-frequency leagues first (NBA/NFL/MLB/NHL).
+// Complete alias table — ALL 124 teams across NBA/NFL/MLB/NHL
 const TEAM_ALIAS_ROWS = [
-  { team: 'los angeles lakers', aliases: ['lakers', 'lal', 'la lakers', 'lake show'], league: 'NBA' },
-  { team: 'golden state warriors', aliases: ['warriors', 'gsw', 'dubs'], league: 'NBA' },
+  // ── NBA (30) ──
+  { team: 'atlanta hawks', aliases: ['hawks', 'atl'], league: 'NBA' },
   { team: 'boston celtics', aliases: ['celtics', 'bos'], league: 'NBA' },
-  { team: 'new york knicks', aliases: ['knicks', 'nyk'], league: 'NBA' },
+  { team: 'brooklyn nets', aliases: ['nets', 'bkn'], league: 'NBA' },
+  { team: 'charlotte hornets', aliases: ['hornets', 'cha'], league: 'NBA' },
+  { team: 'chicago bulls', aliases: ['bulls', 'chi'], league: 'NBA' },
+  { team: 'cleveland cavaliers', aliases: ['cavaliers', 'cavs', 'cle'], league: 'NBA' },
   { team: 'dallas mavericks', aliases: ['mavericks', 'mavs', 'dal'], league: 'NBA' },
-  { team: 'phoenix suns', aliases: ['suns', 'phx'], league: 'NBA' },
+  { team: 'denver nuggets', aliases: ['nuggets', 'den'], league: 'NBA' },
+  { team: 'detroit pistons', aliases: ['pistons', 'det'], league: 'NBA' },
+  { team: 'golden state warriors', aliases: ['warriors', 'gsw', 'dubs'], league: 'NBA' },
+  { team: 'houston rockets', aliases: ['rockets', 'hou'], league: 'NBA' },
+  { team: 'indiana pacers', aliases: ['pacers', 'ind'], league: 'NBA' },
+  { team: 'los angeles clippers', aliases: ['clippers', 'lac'], league: 'NBA' },
+  { team: 'los angeles lakers', aliases: ['lakers', 'lal', 'lake show'], league: 'NBA' },
+  { team: 'memphis grizzlies', aliases: ['grizzlies', 'grizz', 'mem'], league: 'NBA' },
   { team: 'miami heat', aliases: ['heat', 'mia'], league: 'NBA' },
   { team: 'milwaukee bucks', aliases: ['bucks', 'mil'], league: 'NBA' },
-
-  { team: 'kansas city chiefs', aliases: ['chiefs', 'kc'], league: 'NFL' },
-  { team: 'san francisco 49ers', aliases: ['49ers', 'niners', 'sf'], league: 'NFL' },
-  { team: 'philadelphia eagles', aliases: ['eagles', 'phi'], league: 'NFL' },
-  { team: 'new york giants', aliases: ['giants', 'nyg'], league: 'NFL' },
-  { team: 'dallas cowboys', aliases: ['cowboys', 'dal'], league: 'NFL' },
-  { team: 'green bay packers', aliases: ['packers', 'gb'], league: 'NFL' },
-  { team: 'new england patriots', aliases: ['patriots', 'pats', 'ne'], league: 'NFL' },
-
-  { team: 'los angeles dodgers', aliases: ['dodgers', 'lad'], league: 'MLB' },
-  { team: 'new york yankees', aliases: ['yankees', 'nyy'], league: 'MLB' },
-  { team: 'boston red sox', aliases: ['red sox', 'bos'], league: 'MLB' },
-  { team: 'houston astros', aliases: ['astros', 'hou'], league: 'MLB' },
+  { team: 'minnesota timberwolves', aliases: ['timberwolves', 'wolves', 'min'], league: 'NBA' },
+  { team: 'new orleans pelicans', aliases: ['pelicans', 'pels', 'nop'], league: 'NBA' },
+  { team: 'new york knicks', aliases: ['knicks', 'nyk'], league: 'NBA' },
+  { team: 'oklahoma city thunder', aliases: ['thunder', 'okc'], league: 'NBA' },
+  { team: 'orlando magic', aliases: ['magic', 'orl'], league: 'NBA' },
+  { team: 'philadelphia 76ers', aliases: ['76ers', 'sixers', 'phi'], league: 'NBA' },
+  { team: 'phoenix suns', aliases: ['suns', 'phx'], league: 'NBA' },
+  { team: 'portland trail blazers', aliases: ['trail blazers', 'blazers', 'por'], league: 'NBA' },
+  { team: 'sacramento kings', aliases: ['kings', 'sac'], league: 'NBA' },
+  { team: 'san antonio spurs', aliases: ['spurs', 'sas'], league: 'NBA' },
+  { team: 'toronto raptors', aliases: ['raptors', 'tor'], league: 'NBA' },
+  { team: 'utah jazz', aliases: ['jazz', 'uta'], league: 'NBA' },
+  { team: 'washington wizards', aliases: ['wizards', 'wsh'], league: 'NBA' },
+  // ── MLB (30) ──
+  { team: 'arizona diamondbacks', aliases: ['diamondbacks', 'dbacks', 'ari'], league: 'MLB' },
   { team: 'atlanta braves', aliases: ['braves', 'atl'], league: 'MLB' },
-
-  { team: 'toronto maple leafs', aliases: ['maple leafs', 'leafs', 'tor'], league: 'NHL' },
-  { team: 'new york rangers', aliases: ['rangers', 'nyr'], league: 'NHL' },
-  { team: 'vegas golden knights', aliases: ['golden knights', 'vgk'], league: 'NHL' },
+  { team: 'baltimore orioles', aliases: ['orioles', 'bal'], league: 'MLB' },
+  { team: 'boston red sox', aliases: ['red sox', 'bos'], league: 'MLB' },
+  { team: 'chicago cubs', aliases: ['cubs', 'chc'], league: 'MLB' },
+  { team: 'chicago white sox', aliases: ['white sox', 'chw'], league: 'MLB' },
+  { team: 'cincinnati reds', aliases: ['reds', 'cin'], league: 'MLB' },
+  { team: 'cleveland guardians', aliases: ['guardians', 'cle'], league: 'MLB' },
+  { team: 'colorado rockies', aliases: ['rockies', 'col'], league: 'MLB' },
+  { team: 'detroit tigers', aliases: ['tigers', 'det'], league: 'MLB' },
+  { team: 'houston astros', aliases: ['astros', 'hou'], league: 'MLB' },
+  { team: 'kansas city royals', aliases: ['royals', 'kcr'], league: 'MLB' },
+  { team: 'los angeles angels', aliases: ['angels', 'laa'], league: 'MLB' },
+  { team: 'los angeles dodgers', aliases: ['dodgers', 'lad'], league: 'MLB' },
+  { team: 'miami marlins', aliases: ['marlins', 'mia'], league: 'MLB' },
+  { team: 'milwaukee brewers', aliases: ['brewers', 'mil'], league: 'MLB' },
+  { team: 'minnesota twins', aliases: ['twins', 'min'], league: 'MLB' },
+  { team: 'new york mets', aliases: ['mets', 'nym'], league: 'MLB' },
+  { team: 'new york yankees', aliases: ['yankees', 'nyy'], league: 'MLB' },
+  { team: 'oakland athletics', aliases: ['athletics', 'as', 'oak'], league: 'MLB' },
+  { team: 'philadelphia phillies', aliases: ['phillies', 'phi'], league: 'MLB' },
+  { team: 'pittsburgh pirates', aliases: ['pirates', 'pit'], league: 'MLB' },
+  { team: 'san diego padres', aliases: ['padres', 'sd'], league: 'MLB' },
+  { team: 'san francisco giants', aliases: ['giants', 'sf'], league: 'MLB' },
+  { team: 'seattle mariners', aliases: ['mariners', 'sea'], league: 'MLB' },
+  { team: 'st louis cardinals', aliases: ['cardinals', 'cards', 'stl'], league: 'MLB' },
+  { team: 'tampa bay rays', aliases: ['rays', 'tb'], league: 'MLB' },
+  { team: 'texas rangers', aliases: ['rangers', 'tex'], league: 'MLB' },
+  { team: 'toronto blue jays', aliases: ['blue jays', 'jays', 'tor'], league: 'MLB' },
+  { team: 'washington nationals', aliases: ['nationals', 'nats', 'wsh'], league: 'MLB' },
+  // ── NFL (32) ──
+  { team: 'arizona cardinals', aliases: ['cardinals', 'ari'], league: 'NFL' },
+  { team: 'atlanta falcons', aliases: ['falcons', 'atl'], league: 'NFL' },
+  { team: 'baltimore ravens', aliases: ['ravens', 'bal'], league: 'NFL' },
+  { team: 'buffalo bills', aliases: ['bills', 'buf'], league: 'NFL' },
+  { team: 'carolina panthers', aliases: ['panthers', 'car'], league: 'NFL' },
+  { team: 'chicago bears', aliases: ['bears', 'chi'], league: 'NFL' },
+  { team: 'cincinnati bengals', aliases: ['bengals', 'cin'], league: 'NFL' },
+  { team: 'cleveland browns', aliases: ['browns', 'cle'], league: 'NFL' },
+  { team: 'dallas cowboys', aliases: ['cowboys', 'dal'], league: 'NFL' },
+  { team: 'denver broncos', aliases: ['broncos', 'den'], league: 'NFL' },
+  { team: 'detroit lions', aliases: ['lions', 'det'], league: 'NFL' },
+  { team: 'green bay packers', aliases: ['packers', 'gb'], league: 'NFL' },
+  { team: 'houston texans', aliases: ['texans', 'hou'], league: 'NFL' },
+  { team: 'indianapolis colts', aliases: ['colts', 'ind'], league: 'NFL' },
+  { team: 'jacksonville jaguars', aliases: ['jaguars', 'jags', 'jax'], league: 'NFL' },
+  { team: 'kansas city chiefs', aliases: ['chiefs', 'kc'], league: 'NFL' },
+  { team: 'las vegas raiders', aliases: ['raiders', 'lvr'], league: 'NFL' },
+  { team: 'los angeles chargers', aliases: ['chargers', 'lac'], league: 'NFL' },
+  { team: 'los angeles rams', aliases: ['rams', 'lar'], league: 'NFL' },
+  { team: 'miami dolphins', aliases: ['dolphins', 'mia'], league: 'NFL' },
+  { team: 'minnesota vikings', aliases: ['vikings', 'min'], league: 'NFL' },
+  { team: 'new england patriots', aliases: ['patriots', 'pats', 'ne'], league: 'NFL' },
+  { team: 'new orleans saints', aliases: ['saints', 'no'], league: 'NFL' },
+  { team: 'new york giants', aliases: ['giants', 'nyg'], league: 'NFL' },
+  { team: 'new york jets', aliases: ['jets', 'nyj'], league: 'NFL' },
+  { team: 'philadelphia eagles', aliases: ['eagles', 'phi'], league: 'NFL' },
+  { team: 'pittsburgh steelers', aliases: ['steelers', 'pit'], league: 'NFL' },
+  { team: 'san francisco 49ers', aliases: ['49ers', 'niners', 'sf'], league: 'NFL' },
+  { team: 'seattle seahawks', aliases: ['seahawks', 'sea'], league: 'NFL' },
+  { team: 'tampa bay buccaneers', aliases: ['buccaneers', 'bucs', 'tb'], league: 'NFL' },
+  { team: 'tennessee titans', aliases: ['titans', 'ten'], league: 'NFL' },
+  { team: 'washington commanders', aliases: ['commanders', 'wsh'], league: 'NFL' },
+  // ── NHL (32) ──
+  { team: 'anaheim ducks', aliases: ['ducks', 'ana'], league: 'NHL' },
+  { team: 'arizona coyotes', aliases: ['coyotes', 'ari'], league: 'NHL' },
+  { team: 'boston bruins', aliases: ['bruins', 'bos'], league: 'NHL' },
+  { team: 'buffalo sabres', aliases: ['sabres', 'buf'], league: 'NHL' },
+  { team: 'calgary flames', aliases: ['flames', 'cgy'], league: 'NHL' },
+  { team: 'carolina hurricanes', aliases: ['hurricanes', 'canes', 'car'], league: 'NHL' },
+  { team: 'chicago blackhawks', aliases: ['blackhawks', 'hawks', 'chi'], league: 'NHL' },
+  { team: 'colorado avalanche', aliases: ['avalanche', 'avs', 'col'], league: 'NHL' },
+  { team: 'columbus blue jackets', aliases: ['blue jackets', 'cbj'], league: 'NHL' },
+  { team: 'dallas stars', aliases: ['stars', 'dal'], league: 'NHL' },
+  { team: 'detroit red wings', aliases: ['red wings', 'det'], league: 'NHL' },
   { team: 'edmonton oilers', aliases: ['oilers', 'edm'], league: 'NHL' },
+  { team: 'florida panthers', aliases: ['panthers', 'fla'], league: 'NHL' },
+  { team: 'los angeles kings', aliases: ['kings', 'lak'], league: 'NHL' },
+  { team: 'minnesota wild', aliases: ['wild', 'min'], league: 'NHL' },
+  { team: 'montreal canadiens', aliases: ['canadiens', 'habs', 'mtl'], league: 'NHL' },
+  { team: 'nashville predators', aliases: ['predators', 'preds', 'nsh'], league: 'NHL' },
+  { team: 'new jersey devils', aliases: ['devils', 'njd'], league: 'NHL' },
+  { team: 'new york islanders', aliases: ['islanders', 'isles', 'nyi'], league: 'NHL' },
+  { team: 'new york rangers', aliases: ['rangers', 'nyr'], league: 'NHL' },
+  { team: 'ottawa senators', aliases: ['senators', 'sens', 'ott'], league: 'NHL' },
+  { team: 'philadelphia flyers', aliases: ['flyers', 'phi'], league: 'NHL' },
+  { team: 'pittsburgh penguins', aliases: ['penguins', 'pens', 'pit'], league: 'NHL' },
+  { team: 'san jose sharks', aliases: ['sharks', 'sjs'], league: 'NHL' },
+  { team: 'seattle kraken', aliases: ['kraken', 'sea'], league: 'NHL' },
+  { team: 'st louis blues', aliases: ['blues', 'stl'], league: 'NHL' },
+  { team: 'tampa bay lightning', aliases: ['lightning', 'bolts', 'tbl'], league: 'NHL' },
+  { team: 'toronto maple leafs', aliases: ['maple leafs', 'leafs', 'tor'], league: 'NHL' },
+  { team: 'vancouver canucks', aliases: ['canucks', 'van'], league: 'NHL' },
+  { team: 'vegas golden knights', aliases: ['golden knights', 'knights', 'vgk'], league: 'NHL' },
+  { team: 'washington capitals', aliases: ['capitals', 'caps', 'wsh'], league: 'NHL' },
+  { team: 'winnipeg jets', aliases: ['jets', 'wpg'], league: 'NHL' },
 ];
 
 const ALIAS_TO_TEAMS = {};
@@ -290,6 +392,10 @@ function determineResult(bet, matchData) {
 
 // ── Main auto-grade cycle ───────────────────────────────────
 async function runAutoGrade(client) {
+  if (process.env.AUTOGRADER_DISABLED === 'true') {
+    console.log('[AutoGrade] DISABLED via env var — skipping cycle');
+    return { graded: 0 };
+  }
   console.log('[AutoGrade] Starting grading cycle...');
   const pending = await getPendingBets();
   if (pending.length === 0) {
@@ -308,28 +414,27 @@ async function runAutoGrade(client) {
   let gradedCount = 0;
   const gradedBets = [];
 
-  // ── Hardened Gemini Grading Loop with retry + backoff ──
-  const delay = ms => new Promise(res => setTimeout(res, ms));
-
+  // ── Hardened Grading Loop with retry + backoff ──
   for (const bet of pending) {
     const betAgeHours = (Date.now() - new Date(bet.created_at).getTime()) / (1000 * 60 * 60);
-    if (betAgeHours < 4) continue;
+    // Temporarily disabled for queue flush debugging
+    // if (betAgeHours < 4) continue;
 
     console.log(`[AutoGrade] Processing: "${bet.description?.slice(0, 50)}" | ${bet.sport} | Age: ${betAgeHours.toFixed(1)}h`);
 
     let retries = 3;
     let aiResult = null;
 
+    let hit429 = false;
     while (retries > 0) {
       try {
         aiResult = await gradePropWithAI(bet);
         break;
       } catch (error) {
         if (error.status === 429 || error.message?.includes('429')) {
-          const waitSec = (4 - retries) * 10;
-          console.warn(`[Rate Limit] Gemini 429. Retrying in ${waitSec}s... (${retries - 1} left)`);
-          await delay(waitSec * 1000);
-          retries--;
+          hit429 = true;
+          console.warn(`[Rate Limit] 429 hit — aborting grading cycle. Will retry next cron.`);
+          break; // Don't retry — abort the entire cycle
         } else {
           console.error(`[AutoGrade] Non-retryable error: ${error.message}`);
           break;
@@ -337,7 +442,17 @@ async function runAutoGrade(client) {
       }
     }
 
+    // 429 = abort entire cycle to preserve quota
+    if (hit429) {
+      console.log(`[AutoGrade] Cycle aborted after 429. Graded ${gradedCount} bet(s) before hitting limit.`);
+      break;
+    }
+
     if (aiResult && ['WIN', 'LOSS', 'PUSH', 'VOID'].includes(aiResult.status)) {
+      // Save grading source URL if provided
+      if (aiResult.source_url && bet.id) {
+        try { db.prepare('UPDATE bets SET grading_source_url = ? WHERE id = ?').run(aiResult.source_url, bet.id); } catch (_) {}
+      }
       const finalResult = await finalizeBetGrading(client, bet, aiResult.status, aiResult.evidence);
       if (finalResult) {
         gradedBets.push(finalResult);
@@ -345,6 +460,11 @@ async function runAutoGrade(client) {
       }
       await delay(2000); // Discord API spacing
     }
+
+    // Dynamic slow drip: faster when backlog is large, slower when small
+    const dripMs = pending.length > 20 ? 10000 : pending.length > 5 ? 20000 : 30000;
+    console.log(`[AutoGrade] Drip: ${dripMs / 1000}s (${pending.length} pending)`);
+    await delay(dripMs);
   }
 
   // ── 7-Day Smart Sweeper: only sweep standard bets, props handled by AI Grader ──
@@ -462,43 +582,550 @@ async function gradeFromCelebration(client, capperId, outcome, subjects) {
   return null; // No matching bet found
 }
 
-// ── AI Prop Grader (Gemini with Google Search) ──────────────
-// ── Pure AI Brain — returns ONLY { status, evidence }. No DB updates. ──
+// ── Extract the subject (player or team name) from a bet description ──
+// Aggressively strips EVERYTHING except the entity name.
+// "Manny Machado Less 1.5 Hits+Runs+RBIs" → "Manny Machado"
+function extractSubject(description) {
+  const firstLeg = (description || '')
+    .split(/[\r\n]+/)
+    .map(l => l.trim())
+    .filter(l => l.length > 0)[0] || description || '';
+
+  return firstLeg
+    .replace(/•/g, '')                          // bullet points
+    .replace(/\+/g, ' ')                        // "Hits+Runs+RBIs" → "Hits Runs RBIs"
+    .replace(/\b(over|under|less|more|o|u|alt)\b/gi, '') // direction words
+    .replace(/\d+\.?\d*/g, '')                  // ALL numbers (lines, odds, stats)
+    .replace(/\b(pts?|points?|reb|rebounds?|ast|assists?|stl|steals?|blk|blocks?|yds|yards?|tds?|touchdowns?|hr|home\s*runs?|hits?|runs?|rbis?|ks?|strikeouts?|sog|shots?|saves?|aces?|goals?|sacks?|receptions?|completions?|pass\s*yds|rush\s*yds|rec\s*yds)\b/gi, '') // ALL stat categories
+    .replace(/\b(ml|moneyline|spread|rl|pk|parlay|teaser|to win|to lose|1q|2q|3q|4q|1h|2h|fg|ft|prop|anytime|first|last|td|scorer)\b/gi, '') // market types
+    .replace(/[()[\]{}<>•·–—@#,;:/\\]/g, '')   // symbols
+    .replace(/\s+/g, ' ')                       // collapse whitespace
+    .trim();
+}
+
+// ── Search chain: DDG (free) → Brave (free tier) → Serper (if budget remains) ──
+
+function sanitizeQuery(query) {
+  return query
+    .replace(/\b([A-Z])\.\s*/g, '$1 ')  // "C. Flagg" → "C Flagg"
+    .replace(/\bOR\b/g, '')
+    .replace(/[,;:]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// User-Agent rotation to avoid blocks
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+];
+const randomUA = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+const decodeHTML = (s) => s.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#x27;/g, "'").replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+
+// ── Search backend circuit breaker ──
+let ddgFailCount = 0;
+let ddgCooldownUntil = 0;
+const DDG_MAX_FAILS = 3;
+const DDG_COOLDOWN_MS = 30 * 60 * 1000; // 30 min
+
+// DDG Lite with retry
+async function searchDDG(query) {
+  // Circuit breaker: skip if DDG has been failing
+  if (ddgFailCount >= DDG_MAX_FAILS && Date.now() < ddgCooldownUntil) {
+    console.log(`[DDG] Circuit breaker OPEN — skipping (${Math.round((ddgCooldownUntil - Date.now()) / 60000)}m remaining)`);
+    return [];
+  }
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const start = Date.now();
+    try {
+      const res = await fetch('https://lite.duckduckgo.com/lite/', {
+        method: 'POST',
+        signal: AbortSignal.timeout(15000),
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': randomUA() },
+        body: `q=${encodeURIComponent(query)}`,
+      });
+      const duration = Date.now() - start;
+
+      if (!res.ok) { console.log(`[Search] Backend=DDG | Result=HTTP_${res.status} | Duration=${duration}ms`); return []; }
+
+      const html = await res.text();
+      const results = [];
+      const rows = html.split('<tr>');
+      let currentTitle = '';
+      for (const row of rows) {
+        const linkMatch = row.match(/class="result-link"[^>]*>([^<]+)<\/a>/) || row.match(/href="[^"]*uddg[^"]*"[^>]*>([^<]+)<\/a>/);
+        const snippetMatch = row.match(/class="result-snippet"[^>]*>([\s\S]*?)<\/td>/);
+        if (linkMatch) currentTitle = decodeHTML(linkMatch[1]).trim();
+        if (snippetMatch) {
+          const snippet = decodeHTML(snippetMatch[1].replace(/<[^>]+>/g, '')).trim();
+          if (currentTitle || snippet) { results.push({ title: currentTitle, snippet }); currentTitle = ''; }
+        }
+        if (results.length >= 5) break;
+      }
+      if (results.length === 0) {
+        const links = [...html.matchAll(/<a[^>]*class="[^"]*result[^"]*"[^>]*>([^<]+)<\/a>/g)];
+        for (const m of links.slice(0, 5)) results.push({ title: decodeHTML(m[1]).trim(), snippet: '' });
+      }
+
+      console.log(`[Search] Backend=DDG | Result=SUCCESS | Duration=${duration}ms | Hits=${results.length}`);
+      ddgFailCount = 0; // Reset on success
+      return results;
+    } catch (err) {
+      const duration = Date.now() - start;
+      console.log(`[Search] Backend=DDG | Result=TIMEOUT | Duration=${duration}ms | Attempt=${attempt}/2`);
+      if (attempt < 2) await delay(3000); // Retry after 3s
+    }
+  }
+
+  ddgFailCount++;
+  if (ddgFailCount >= DDG_MAX_FAILS) {
+    ddgCooldownUntil = Date.now() + DDG_COOLDOWN_MS;
+    console.warn(`[DDG] Circuit breaker TRIPPED — ${DDG_MAX_FAILS} consecutive failures. Cooldown 30 min.`);
+  }
+  return [];
+}
+
+// Bing scrape with increased timeout
+async function searchBing(query) {
+  const start = Date.now();
+  try {
+    const res = await fetch(`https://www.bing.com/search?q=${encodeURIComponent(query)}`, {
+      signal: AbortSignal.timeout(15000),
+      headers: { 'User-Agent': randomUA() },
+    });
+    const duration = Date.now() - start;
+    if (!res.ok) { console.log(`[Search] Backend=Bing | Result=HTTP_${res.status} | Duration=${duration}ms`); return []; }
+
+    const html = await res.text();
+    const results = [];
+    const blocks = html.split('class="b_algo"');
+    for (const block of blocks.slice(1, 6)) {
+      const titleMatch = block.match(/<a[^>]*>([^<]+)<\/a>/);
+      const snippetMatch = block.match(/class="b_caption"[^>]*>[\s\S]*?<p[^>]*>([\s\S]*?)<\/p>/);
+      const title = titleMatch ? decodeHTML(titleMatch[1]).trim() : '';
+      const snippet = snippetMatch ? decodeHTML(snippetMatch[1].replace(/<[^>]+>/g, '')).trim() : '';
+      if (title || snippet) results.push({ title, snippet });
+    }
+    console.log(`[Search] Backend=Bing | Result=SUCCESS | Duration=${duration}ms | Hits=${results.length}`);
+    return results;
+  } catch (err) {
+    console.log(`[Search] Backend=Bing | Result=TIMEOUT | Duration=${Date.now() - start}ms`);
+    return [];
+  }
+}
+
+// Brave Search API — free tier 2K queries/month
+async function searchBrave(query) {
+  if (!process.env.BRAVE_API_KEY) return [];
+  const start = Date.now();
+  try {
+    const res = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=5`, {
+      headers: { 'Accept': 'application/json', 'X-Subscription-Token': process.env.BRAVE_API_KEY },
+      signal: AbortSignal.timeout(15000),
+    });
+    const duration = Date.now() - start;
+    if (!res.ok) { console.log(`[Search] Backend=Brave | Result=HTTP_${res.status} | Duration=${duration}ms`); return []; }
+    const data = await res.json();
+    const results = (data.web?.results || []).slice(0, 5).map(r => ({ title: r.title || '', snippet: r.description || '' }));
+    console.log(`[Search] Backend=Brave | Result=SUCCESS | Duration=${duration}ms | Hits=${results.length}`);
+    return results;
+  } catch (err) {
+    console.log(`[Search] Backend=Brave | Result=ERROR | Duration=${Date.now() - start}ms | ${err.message}`);
+    return [];
+  }
+}
+
+// Serper — only if key set (exhausted free tier, paid only)
+async function searchSerper(query) {
+  if (!process.env.SERPER_API_KEY) return [];
+  try {
+    const res = await fetch('https://google.serper.dev/search', {
+      method: 'POST',
+      headers: { 'X-API-KEY': process.env.SERPER_API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ q: query, num: 5 }),
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    const results = [];
+    if (data.answerBox?.answer) results.push({ title: 'Answer', snippet: data.answerBox.answer });
+    for (const r of (data.organic || []).slice(0, 5)) results.push({ title: r.title || '', snippet: r.snippet || '' });
+    return results;
+  } catch (_) { return []; }
+}
+
+// Master search: Brave (reliable API) → DDG (free, may timeout) → Bing → Serper
+async function searchWeb(query) {
+  const clean = sanitizeQuery(query);
+  console.log(`[Search] Query: "${clean.slice(0, 80)}"`);
+
+  // Brave first — most reliable, has free tier
+  let results = await searchBrave(clean);
+  if (results.length > 0) return results;
+
+  // DDG second — free but often times out
+  await delay(1000);
+  results = await searchDDG(clean);
+  if (results.length > 0) return results;
+
+  // Bing third — free scrape
+  await delay(1000);
+  results = await searchBing(clean);
+  if (results.length > 0) return results;
+
+  // Serper last resort (exhausted free tier)
+  results = await searchSerper(clean);
+  return results;
+}
+
+// ── Parlay dispatcher — routes to leg-by-leg or single-bet grading ──
 async function gradePropWithAI(bet) {
-  if (!process.env.GEMINI_API_KEY) {
-    console.log(`[AI Grader] Skipped — no GEMINI_API_KEY`);
+  // Reclassify sport FIRST (before any search or team extraction)
+  const { reclassifySport } = require('./ai');
+  const origSport = bet.sport;
+  if (bet.sport && bet.description) {
+    bet.sport = reclassifySport(bet.sport, bet.description);
+    if (bet.sport !== origSport) {
+      console.log(`[AI Grader] RECLASSIFIED: ${origSport} → ${bet.sport} for "${bet.description?.slice(0, 50)}"`);
+    }
+  }
+
+  // Load legs if this is a parlay
+  const betType = (bet.bet_type || '').toLowerCase();
+  if (betType === 'parlay' || betType === 'sgp') {
+    const legs = db.prepare('SELECT * FROM parlay_legs WHERE bet_id = ? ORDER BY created_at').all(bet.id);
+    if (legs.length > 1) {
+      console.log(`[AI Grader] Parlay detected: ${legs.length} legs for bet ${bet.id?.slice(0, 8)}`);
+      return await gradeParlay(bet, legs);
+    }
+  }
+  return await gradeSingleBet(bet);
+}
+
+// ── Parlay grader — grades each leg independently then computes result ──
+async function gradeParlay(parlayBet, legs) {
+  const { inferLegSport } = require('./ai');
+  const legResults = [];
+
+  for (let i = 0; i < legs.length; i++) {
+    const leg = legs[i];
+    const legSport = inferLegSport(leg.description) || parlayBet.sport || 'Unknown';
+    console.log(`[AI Grader] Parlay leg ${i + 1}/${legs.length}: "${leg.description?.slice(0, 50)}" | Sport: ${legSport}`);
+
+    const legBet = {
+      id: `${parlayBet.id}-leg${i + 1}`,
+      description: leg.description,
+      sport: legSport,
+      event_date: parlayBet.event_date,
+      created_at: parlayBet.created_at,
+      bet_type: 'straight',
+    };
+
+    const result = await gradeSingleBet(legBet);
+    const status = result?.status || 'PENDING';
+    const evidence = result?.evidence || 'No result';
+    legResults.push({ leg, status, evidence });
+
+    // Save per-leg result
+    try {
+      db.prepare('UPDATE parlay_legs SET result = ?, evidence = ?, graded_at = datetime(\'now\') WHERE id = ?')
+        .run(status.toLowerCase(), evidence.slice(0, 500), leg.id);
+    } catch (_) {}
+
+    // 5s drip between legs
+    if (i < legs.length - 1) await delay(5000);
+  }
+
+  // Compute parlay result
+  const statuses = legResults.map(lr => lr.status);
+  const losses = statuses.filter(s => s === 'LOSS').length;
+  const pendings = statuses.filter(s => s === 'PENDING').length;
+  const wins = statuses.filter(s => s === 'WIN').length;
+  const voids = statuses.filter(s => s === 'VOID' || s === 'PUSH').length;
+
+  const summary = legResults.map((lr, i) =>
+    `Leg ${i + 1}: ${lr.status} — ${lr.leg.description?.slice(0, 50)} (${lr.evidence?.slice(0, 60)})`
+  ).join('\n');
+
+  if (losses > 0) return { status: 'LOSS', evidence: `Parlay LOSS — ${losses} leg(s) lost.\n${summary}` };
+  if (pendings > 0) return { status: 'PENDING', evidence: `Parlay PENDING — ${pendings} leg(s) unresolved.\n${summary}` };
+  if (wins === legResults.length) return { status: 'WIN', evidence: `Parlay WIN — all ${wins} legs hit.\n${summary}` };
+  if (voids === legResults.length) return { status: 'VOID', evidence: `Parlay VOID — all legs voided.\n${summary}` };
+  return { status: 'WIN', evidence: `Parlay WIN (reduced) — ${wins} won, ${voids} voided.\n${summary}` };
+}
+
+// ── Single-bet grader — ANTI-HALLUCINATION HARDENED ────────────
+async function gradeSingleBet(bet) {
+  const today = new Date().toISOString().split('T')[0];
+  const betDate = bet.created_at ? new Date(bet.created_at).toISOString().split('T')[0] : today;
+
+  // ── GUARD 1: No event date ──
+  if (!bet.event_date && !bet.created_at) {
+    console.log(`[AI Grader] SKIP no date: ${bet.id?.slice(0, 8)}`);
+    return { status: 'PENDING', evidence: 'No event date — cannot determine if game has occurred' };
+  }
+
+  // ── GUARD 2: Parse and validate event date ──
+  const eventDate = bet.event_date || bet.created_at;
+  const eventTime = new Date(eventDate).getTime();
+  if (!eventTime || isNaN(eventTime)) {
+    console.log(`[AI Grader] SKIP bad date: ${bet.id?.slice(0, 8)} event_date="${eventDate}"`);
+    return { status: 'PENDING', evidence: `Invalid event date: ${eventDate}` };
+  }
+
+  const eventDay = new Date(eventDate).toISOString().split('T')[0];
+  if (eventDay > today) {
+    console.log(`[AI Grader] SKIP future: ${bet.id?.slice(0, 8)} event=${eventDay} today=${today}`);
+    return { status: 'PENDING', evidence: 'Game has not started yet' };
+  }
+
+  // ── GUARD 3: Too recent — game may still be in progress ──
+  const hoursSinceEvent = (Date.now() - eventTime) / (1000 * 60 * 60);
+  console.log(`[AI Grader] Time check: ${bet.id?.slice(0, 8)} event=${eventDate} hours_since=${hoursSinceEvent.toFixed(2)}`);
+  if (hoursSinceEvent < 3) {
+    console.log(`[AI Grader] SKIP too recent: ${bet.id?.slice(0, 8)} ${hoursSinceEvent.toFixed(1)}h ago`);
+    return { status: 'PENDING', evidence: `Event was ${hoursSinceEvent.toFixed(1)}h ago — too soon to grade` };
+  }
+
+  // Sport reclassification already done in gradePropWithAI dispatcher
+
+  // ── Extract teams from bet for validation later ──
+  const sportContext = normalizeSportContext(bet.sport);
+  const { matchedTeams: betTeams } = findMentionedTeams(bet.description, sportContext);
+  const betTeamList = [...betTeams];
+  console.log(`[AI Grader] Bet teams: [${betTeamList.join(', ')}] | Sport: ${sportContext || '?'}`);
+
+  // ── Step 1: Web search — use "team1 vs team2" format for precision ──
+  let searchResults = [];
+  let searchSnippets = '';
+  try {
+    const dateObj = new Date(eventDate);
+    const dateStr = dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+    const sport = bet.sport || '';
+
+    // Build precise query
+    let query;
+    if (betTeamList.length >= 2) {
+      const t1 = betTeamList[0].split(' ').pop();
+      const t2 = betTeamList[1].split(' ').pop();
+      query = `${t1} vs ${t2} ${sport} final score ${dateStr}`;
+    } else if (betTeamList.length === 1) {
+      // Single-team bet: "Cavs -1.5" — search for the team's game on that date
+      const teamName = betTeamList[0].split(' ').pop();
+      query = `${teamName} ${sport} game ${dateStr} final score`;
+    } else {
+      const subject = extractSubject(bet.description);
+      query = `${subject} ${sport} final score ${dateStr}`;
+    }
+    console.log(`[AI Grader] Searching: "${query.slice(0, 80)}"`);
+    searchResults = await searchWeb(query);
+
+    const snippets = [];
+    for (const r of searchResults) {
+      if (r.title) snippets.push(r.title);
+      if (r.snippet) snippets.push(`  ${r.snippet}`);
+    }
+    if (snippets.length > 0) {
+      searchSnippets = snippets.join('\n');
+      console.log(`[AI Grader] Got ${searchResults.length} result(s)`);
+    }
+  } catch (err) {
+    console.warn(`[AI Grader] Search failed: ${err.message}`);
+  }
+
+  // ── GUARD 4: NO SEARCH RESULTS = PENDING. NEVER call AI without evidence. ──
+  if (searchResults.length === 0 || !searchSnippets) {
+    console.log(`[AI Grader] NO SEARCH RESULTS for ${bet.id?.slice(0, 8)} — returning PENDING (will not call AI)`);
+    return { status: 'PENDING', evidence: 'No search results available — game may not have completed yet' };
+  }
+
+  // ── Step 2: Provider chain — ordered by reliability (llama8b proven, qwen demoted) ──
+  const providers = [];
+  if (process.env.GROQ_API_KEY) {
+    providers.push({ name: 'groq-llama8b', url: 'https://api.groq.com/openai/v1/chat/completions', key: process.env.GROQ_API_KEY, model: 'llama-3.1-8b-instant' });
+    providers.push({ name: 'groq-kimi', url: 'https://api.groq.com/openai/v1/chat/completions', key: process.env.GROQ_API_KEY, model: 'moonshotai/kimi-k2-instruct' });
+  }
+  if (process.env.CEREBRAS_API_KEY) {
+    providers.push({ name: 'cerebras', url: 'https://api.cerebras.ai/v1/chat/completions', key: process.env.CEREBRAS_API_KEY, model: 'llama3.1-8b' });
+  }
+  if (process.env.GROQ_API_KEY) {
+    providers.push({ name: 'groq-qwen', url: 'https://api.groq.com/openai/v1/chat/completions', key: process.env.GROQ_API_KEY, model: 'qwen/qwen3-32b' });
+  }
+  if (process.env.OPENROUTER_API_KEY) {
+    providers.push({ name: 'openrouter', url: 'https://openrouter.ai/api/v1/chat/completions', key: process.env.OPENROUTER_API_KEY, model: 'meta-llama/llama-3.3-70b-instruct:free' });
+  }
+  if (process.env.MISTRAL_API_KEY) {
+    providers.push({ name: 'mistral', url: 'https://api.mistral.ai/v1/chat/completions', key: process.env.MISTRAL_API_KEY, model: 'mistral-small-latest' });
+  }
+
+  if (providers.length === 0) return null;
+
+  const prompt = `You MUST respond with valid JSON only. No prose, no markdown, no code fences.
+Grade this bet ONLY using the search results below. Today: ${today}. Bet placed: ${betDate}.
+Bet: "${bet.description}" | Sport: ${bet.sport || '?'}
+
+Search results:
+${searchSnippets.slice(0, 1500)}
+
+Required JSON format:
+{"status": "WIN", "evidence": "Final score Lakers 118 Nuggets 112 per ESPN"}
+
+status must be exactly one of: "WIN", "LOSS", "PUSH", "VOID", "PENDING"
+evidence must reference specific scores or stats from the search results above.
+
+CRITICAL RULES:
+- Cite specific numbers from search results. If no final score found for this game on ${betDate}, return PENDING.
+- DO NOT invent scores. If unsure, return PENDING.`;
+
+  let raw = null;
+  let winnerProvider = null;
+  let backoffMs = 3000;
+
+  for (const provider of providers) {
+    try {
+      console.log(`[AI Grader] Trying ${provider.name} (${provider.model})...`);
+      const res = await fetch(provider.url, {
+        method: 'POST',
+        signal: AbortSignal.timeout(20000),
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${provider.key}` },
+        body: JSON.stringify({
+          model: provider.model,
+          messages: [{ role: 'user', content: prompt }],
+          response_format: { type: 'json_object' },
+          temperature: 0,
+          max_tokens: 200,
+        }),
+      });
+
+      if (res.status === 429) {
+        console.warn(`[AI Grader] ${provider.name} 429 — backoff ${backoffMs}ms`);
+        await delay(backoffMs);
+        backoffMs = Math.min(backoffMs * 2, 30000);
+        continue;
+      }
+      if (!res.ok) {
+        const errText = (await res.text()).slice(0, 200);
+        console.warn(`[AI Grader] ${provider.name} HTTP ${res.status}: ${errText}`);
+        continue;
+      }
+
+      const data = await res.json();
+      raw = data.choices?.[0]?.message?.content || null;
+      if (raw) {
+        winnerProvider = provider.name;
+        console.log(`[AI Grader] Winner: ${provider.name} | Raw (${raw.length} chars): ${raw.slice(0, 500)}`);
+        break;
+      }
+    } catch (err) {
+      console.warn(`[AI Grader] ${provider.name} error: ${err.message}`);
+    }
+  }
+
+  if (!raw) {
+    console.error(`[AI Grader] All providers failed for bet ${bet.id?.slice(0, 8)}`);
     return null;
   }
 
-  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-  const model = genAI.getGenerativeModel({
-    model: 'gemini-2.0-flash',
-    tools: [{ googleSearch: {} }],
-  });
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch (e) {
+    console.error(`[AI Grader] JSON parse error: ${e.message} | raw: ${raw?.slice(0, 100)}`);
+    return null;
+  }
 
-  const today = new Date().toISOString().split('T')[0];
+  const guardsLog = [];
+  console.log(`[AI Grader] Running post-AI guards on ${bet.id?.slice(0, 8)} | status=${parsed.status} | sport=${bet.sport}`);
 
-  const prompt = `You are a sharp sports betting grader. Today's date is ${today}.
-Grade this sports bet. Search the web for the final box score or results.
+  if (parsed.status === 'WIN' || parsed.status === 'LOSS') {
+    // ── GUARD 5: Score hallucination — fabricated scores ──
+    const scorePattern = /\b(\d{2,3})\s*[-–]\s*(\d{2,3})\b/;
+    const evidenceScore = parsed.evidence?.match(scorePattern);
+    if (evidenceScore) {
+      const s1 = evidenceScore[1], s2 = evidenceScore[2];
+      if (!searchSnippets.includes(s1) && !searchSnippets.includes(s2)) {
+        console.warn(`[AI Grader] GUARD5 FAIL: ${bet.id?.slice(0, 8)} | score ${s1}-${s2} NOT in snippets`);
+        return { status: 'PENDING', evidence: `HALLUCINATION: AI claimed ${s1}-${s2} but not in search results` };
+      }
+      guardsLog.push('G5:score_ok');
+    }
 
-Bet: "${bet.description}"
-Sport: ${bet.sport || 'Unknown'}
-Date Placed: ${bet.created_at}
+    // ── GUARD 6: Soft hallucination phrases ──
+    const SOFT_HALLUCINATIONS = ['can be inferred', 'cannot be determined', 'not specified', 'unclear from', 'not explicitly', 'unable to find', 'based on context', 'reasonable to assume', 'likely won', 'likely lost', 'probably', 'appears to have', 'seems to have', 'i believe', 'my assessment'];
+    const evidenceLower = (parsed.evidence || '').toLowerCase();
+    const softMatch = SOFT_HALLUCINATIONS.find(p => evidenceLower.includes(p));
+    if (softMatch) {
+      console.warn(`[AI Grader] GUARD6 FAIL: ${bet.id?.slice(0, 8)} | soft hallucination: "${softMatch}"`);
+      return { status: 'PENDING', evidence: `Soft hallucination: AI said "${softMatch}" — refusing to grade without concrete evidence` };
+    }
+    guardsLog.push('G6:no_soft_halluc');
 
-Return exactly in this JSON format:
-{
-  "status": "WIN" | "LOSS" | "PUSH" | "VOID" | "PENDING",
-  "evidence": "A 1-sentence explanation of why you gave this grade (e.g. 'LeBron scored 26 points, over 25.5 hits')."
-}
+    // ── GUARD 7: Team-name verification (team sports) ──
+    if (betTeamList.length >= 1) {
+      const combinedEvidence = `${parsed.evidence || ''} ${searchSnippets}`;
+      const { matchedTeams: evidenceTeams } = findMentionedTeams(combinedEvidence, sportContext);
+      const evidenceTeamList = [...evidenceTeams];
+      const missingTeams = betTeamList.filter(bt => !evidenceTeamList.includes(bt));
+      if (missingTeams.length > 0) {
+        console.warn(`[AI Grader] GUARD7 FAIL: ${bet.id?.slice(0, 8)} | Missing: [${missingTeams.map(t => t.split(' ').pop()).join(', ')}]`);
+        return { status: 'PENDING', evidence: `Team mismatch: [${missingTeams.map(t => t.split(' ').pop()).join(', ')}] not in evidence` };
+      }
+      guardsLog.push('G7:teams_ok');
+    }
 
-NOTE:
-- Use "VOID" if the player did not play (e.g., late scratch) or the game was canceled.
-- Only use "PENDING" if the game has literally not finished yet or hasn't started.`;
+    // ── GUARD 8: Player-name verification (individual sports) ──
+    const INDIVIDUAL_SPORTS = ['TENNIS', 'GOLF', 'MMA', 'UFC', 'BOXING'];
+    if (INDIVIDUAL_SPORTS.includes((bet.sport || '').toUpperCase())) {
+      // Extract player names: capitalized words before betting keywords
+      const words = (bet.description || '').split(/\s+/);
+      const players = [];
+      let name = [];
+      for (const w of words) {
+        if (/^[A-Z][a-z]+/.test(w) && !/^(ML|Over|Under|Win|Lose)$/.test(w)) { name.push(w); }
+        else if (name.length > 0) { players.push(name.join(' ')); name = []; }
+      }
+      if (name.length > 0) players.push(name.join(' '));
 
-  const result = await model.generateContent(prompt);
-  const cleanJson = result.response.text().replace(/```json/g, '').replace(/```/g, '').trim();
-  const parsed = JSON.parse(cleanJson);
-  console.log(`[AI Grader] Bet ID ${bet.id?.slice(0, 8)} | Status: ${parsed.status} | Evidence: ${parsed.evidence}`);
+      const missingPlayers = players.filter(p => {
+        const last = p.split(' ').pop().toLowerCase();
+        return last.length >= 4 && !evidenceLower.includes(last) && !searchSnippets.toLowerCase().includes(last);
+      });
+      if (missingPlayers.length > 0) {
+        console.warn(`[AI Grader] GUARD8 FAIL: ${bet.id?.slice(0, 8)} | Player(s) [${missingPlayers.join(', ')}] not in evidence`);
+        return { status: 'PENDING', evidence: `Player [${missingPlayers.join(', ')}] not in evidence — likely wrong match` };
+      }
+      guardsLog.push('G8:players_ok');
+    }
+
+    // ── GUARD 9: Cross-sport contamination ──
+    // If bet sport is Tennis but evidence mentions NBA/MLB teams, wrong match
+    if (bet.sport && betTeamList.length === 0) {
+      const { matchedTeams: evidenceTeams } = findMentionedTeams(parsed.evidence || '', null);
+      const evidenceTeamList = [...evidenceTeams];
+      if (evidenceTeamList.length > 0) {
+        // Evidence has team names but bet has no teams — likely cross-sport contamination
+        const teamSports = evidenceTeamList.map(t => TEAM_TO_LEAGUE[t]).filter(Boolean);
+        const betSportUpper = (bet.sport || '').toUpperCase();
+        if (teamSports.length > 0 && !teamSports.includes(betSportUpper)) {
+          console.warn(`[AI Grader] GUARD9 FAIL: ${bet.id?.slice(0, 8)} | Bet sport=${betSportUpper} but evidence has ${teamSports[0]} teams`);
+          return { status: 'PENDING', evidence: `Cross-sport: bet is ${betSportUpper} but evidence references ${teamSports[0]} teams` };
+        }
+      }
+      guardsLog.push('G9:sport_ok');
+    }
+  }
+
+  console.log(`[AI Grader] Guards passed: [${guardsLog.join(', ')}]`);
+
+  // Ensure evidence is never empty
+  if (!parsed.evidence || parsed.evidence.trim().length === 0) {
+    if (parsed.status === 'PENDING') {
+      parsed.evidence = 'AI returned PENDING with no explanation — insufficient data in search results';
+    } else {
+      parsed.evidence = `AI graded ${parsed.status} via ${winnerProvider || 'unknown'} but provided no evidence`;
+    }
+  }
+
+  console.log(`[AI Grader] Bet ID ${bet.id?.slice(0, 8)} | Status: ${parsed.status} | Evidence: ${parsed.evidence?.slice(0, 120)}`);
   return parsed;
 }
 
@@ -523,7 +1150,13 @@ async function finalizeBetGrading(client, bet, status, evidence) {
   // Pay out community tailers (void = refund)
   const tailerCount = payoutTailers(bet.id, bet.odds || -110, resultLower === 'void' ? 'push' : resultLower);
 
-  // Post ticker
+  // Post to #slip-receipts
+  if (client) {
+    const { postGradedResult } = require('./dashboard');
+    await postGradedResult(client, bet, resultLower, profitUnits, evidence);
+  }
+
+  // Post ticker (community tailers)
   if (tailerCount > 0 && client) {
     await postResultTicker(client, bet, resultLower, tailerCount);
   }
@@ -532,12 +1165,13 @@ async function finalizeBetGrading(client, bet, status, evidence) {
   return { bet, result: resultLower, profitUnits, grade: { grade: resultLower === 'win' ? 'B' : 'D', reason: evidence } };
 }
 
-// ── Result Ticker — announce graded bets to dashboard ────────
+// ── Result Ticker — announce graded bets to #slip-receipts ──
 async function postResultTicker(client, bet, status, tailerCount) {
   try {
-    const dashId = process.env.PUBLIC_CHANNEL_ID || process.env.DASHBOARD_CHANNEL_ID;
-    if (!dashId) return;
-    const channel = await client.channels.fetch(dashId).catch(() => null);
+    // Route to receipts channel (dashboard is scoreboard-only)
+    const tickerId = process.env.RECEIPTS_CHANNEL_ID || process.env.SLIP_FEED_CHANNEL_ID;
+    if (!tickerId) return;
+    const channel = await client.channels.fetch(tickerId).catch(() => null);
     if (!channel) return;
 
     const isWin = status === 'win';
@@ -572,8 +1206,13 @@ async function postResultTicker(client, bet, status, tailerCount) {
 module.exports = {
   runAutoGrade,
   gradeFromCelebration,
+  finalizeBetGrading,
   gradePropWithAI,
+  gradeBet: finalizeBetGrading,
   calcProfit,
+  delay,
+  findMentionedTeams,
+  normalizeSportContext,
   fetchScores,
   determineResult,
   aggregateParlayResults,

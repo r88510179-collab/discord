@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════
 // Multi-LLM AI Service — rotates between providers
-// Priority: Gemini → Groq → Mistral → OpenRouter (all free tiers)
+// Priority: Cerebras → Gemini → Groq → Mistral → OpenRouter
 // ═══════════════════════════════════════════════════════════
 
 const { normalizeDescription, normalizePlayer } = require('./normalization');
@@ -23,25 +23,32 @@ const PROVIDERS = {
   },
   groq: {
     url: 'https://api.groq.com/openai/v1/chat/completions',
-    get model() { return process.env.GROQ_TEXT_MODEL || 'llama-3.3-70b-versatile'; },
-    get visionModel() { return process.env.GROQ_MODEL || 'llama-3.2-11b-vision-preview'; },
+    get model() { return process.env.GROQ_TEXT_MODEL || 'llama-3.1-8b-instant'; },
+    get visionModel() { return process.env.GROQ_VISION_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct'; },
     keyEnv: 'GROQ_API_KEY',
-    format: 'openai',
-    supportsImages: true,
-  },
-  mistral: {
-    url: 'https://api.mistral.ai/v1/chat/completions',
-    get model() { return process.env.MISTRAL_TEXT_MODEL || 'mistral-small-latest'; },
-    get visionModel() { return process.env.MISTRAL_MODEL || 'pixtral-12b-2409'; },
-    keyEnv: 'MISTRAL_API_KEY',
     format: 'openai',
     supportsImages: true,
   },
   openrouter: {
     url: 'https://openrouter.ai/api/v1/chat/completions',
     get model() { return process.env.OPENROUTER_TEXT_MODEL || 'meta-llama/llama-3.3-70b-instruct:free'; },
-    get visionModel() { return process.env.OPENROUTER_MODEL || 'google/gemini-2.0-flash-lite-preview-02-05:free'; },
+    get visionModel() { return process.env.OPENROUTER_MODEL || 'qwen/qwen3.6-plus-preview:free'; },
     keyEnv: 'OPENROUTER_API_KEY',
+    format: 'openai',
+    supportsImages: true,
+  },
+  cerebras: {
+    url: 'https://api.cerebras.ai/v1/chat/completions',
+    get model() { return process.env.CEREBRAS_MODEL || 'llama3.1-8b'; },
+    keyEnv: 'CEREBRAS_API_KEY',
+    format: 'openai',
+    supportsImages: false,
+  },
+  mistral: {
+    url: 'https://api.mistral.ai/v1/chat/completions',
+    get model() { return process.env.MISTRAL_TEXT_MODEL || 'mistral-small-latest'; },
+    get visionModel() { return process.env.MISTRAL_MODEL || 'pixtral-12b-2409'; },
+    keyEnv: 'MISTRAL_API_KEY',
     format: 'openai',
     supportsImages: true,
   },
@@ -110,8 +117,10 @@ async function callOpenAI(provider, prompt, system, imageBase64, mediaType) {
     bodyPayload.response_format = { type: 'json_object' };
   }
 
+  // 15s timeout — if provider hangs, abort and fall through to next in waterfall
   const res = await fetch(provider.url, {
     method: 'POST',
+    signal: AbortSignal.timeout(15000),
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${provider.key}`,
@@ -121,6 +130,8 @@ async function callOpenAI(provider, prompt, system, imageBase64, mediaType) {
   if (!res.ok) {
     const errBody = (await res.text()).substring(0, 200);
     console.error(`[${provider.name}] HTTP ${res.status} (model: ${model}): ${errBody}`);
+    // 429 cooldown — give APIs breathing room before next provider attempt
+    if (res.status === 429) await new Promise(r => setTimeout(r, 2000));
     return null;
   }
   const data = await res.json();
@@ -141,12 +152,14 @@ async function callGemini(provider, prompt, system, imageBase64, mediaType) {
   };
   const res = await fetch(url, {
     method: 'POST',
+    signal: AbortSignal.timeout(15000),
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
   if (!res.ok) {
     const errText = (await res.text()).substring(0, 200);
     console.error(`[gemini] HTTP ${res.status} (model: ${provider.model}): ${errText}`);
+    if (res.status === 429) await new Promise(r => setTimeout(r, 2000));
     return null;
   }
   const data = await res.json();
@@ -224,6 +237,30 @@ async function callLLM(prompt, system, imageBase64, mediaType) {
       console.error(`[${provider.name}] Stack: ${err.stack?.split('\n')[1]?.trim() || 'n/a'}`);
     }
   }
+  // ── Last resort: if we had an image but ALL vision providers failed,
+  // retry text-only providers with just the prompt (drop the image).
+  // This lets Cerebras handle OCR text when Gemini/Groq/OpenRouter are all down.
+  if (hasImage) {
+    console.warn(`[AI] All vision providers failed — retrying text-only (dropping image)...`);
+    for (const provider of sorted) {
+      if (provider.supportsImages) continue; // already tried these with image
+      try {
+        console.log(`[AI] Text fallback: ${provider.name} model=${provider.model}`);
+        const result = await withRetry(async () => {
+          return await callOpenAI(provider, prompt, system, null, null);
+        }, provider.name);
+        if (result) {
+          console.log(`[AI] Text fallback winner: ${provider.name}`);
+          result._provider = provider.name;
+          result._mode = 'text-fallback';
+          return result;
+        }
+      } catch (err) {
+        console.error(`[AI] Text fallback ${provider.name} failed: ${err.message}`);
+      }
+    }
+  }
+
   console.error(`[AI] All ${sorted.length} providers failed (hasImage: ${hasImage})`);
   return null;
 }
@@ -249,11 +286,16 @@ async function processImageForAI(imageUrl) {
     }
     imageHashCache.set(fileHash, Date.now());
 
-    // Prune expired entries periodically (every 100 new images)
-    if (imageHashCache.size % 100 === 0) {
+    // Aggressively prune: every 20 images OR if cache exceeds 500 entries
+    if (imageHashCache.size % 20 === 0 || imageHashCache.size > 500) {
       const now = Date.now();
       for (const [hash, ts] of imageHashCache) {
         if (now - ts > IMAGE_DEDUP_WINDOW) imageHashCache.delete(hash);
+      }
+      // Hard cap: if still over 500 after pruning, drop oldest half
+      if (imageHashCache.size > 500) {
+        const entries = [...imageHashCache.entries()].sort((a, b) => a[1] - b[1]);
+        for (let i = 0; i < entries.length / 2; i++) imageHashCache.delete(entries[i][0]);
       }
     }
 
@@ -275,7 +317,10 @@ async function processImageForAI(imageUrl) {
       return null;
     }
 
-    return { base64: optimized.toString('base64'), mediaType: 'image/jpeg' };
+    const result = { base64: optimized.toString('base64'), mediaType: 'image/jpeg' };
+    // Hint GC to free the raw buffer (can be 5-10MB per image)
+    if (typeof global.gc === 'function') global.gc();
+    return result;
   } catch (err) {
     console.log(`[AI] Image processing error: ${err.message}`);
     return null;
@@ -517,16 +562,28 @@ async function parseBetText(text, imageUrl) {
   }
 
   const sys = `You are a STRICT sports betting parser. Return ONLY valid JSON.
-${imageBase64 ? '\nVISION MODE ACTIVE: A betting slip image has been attached. You MUST read the attached image to extract the exact player names, props, and lines. Combine this with the tweet text to build a perfectly accurate, bulleted list for multi-leg bets. The image is the PRIMARY source of truth — the text is supplementary context. If the image and text conflict, trust the image.' : ''}
+${imageBase64 ? `
+VISION MODE ACTIVE: A betting slip image has been attached. You MUST read the attached image to extract the exact player names, props, and lines. Combine this with the tweet text to build a perfectly accurate, bulleted list for multi-leg bets. The image is the PRIMARY source of truth — the text is supplementary context. If the image and text conflict, trust the image.
+
+CRITICAL MULTI-EXTRACTION RULE: This image may contain MULTIPLE betting slips or a single slip with many legs. You MUST extract EVERY SINGLE LEG visible — do NOT stop at the first one. If you see 10 green checkmarks, output ALL 10 legs in the legs array. If the image contains 2 separate tickets, output 2 bet objects in the bets array. Scan the ENTIRE image top to bottom. If the ticket shows it is a "winner" (green checkmarks, "Won", "Cashed", "Settled - Won"), set ticket_status to "winner" and still extract all legs so we can auto-grade them. If it shows a loss (red X, "Lost"), set ticket_status to "loser".
+
+LADDER DETECTION: If the image says "LADDER", "CHALLENGE", "$X to $Y", "Step X", or "Day X", set is_ladder to true and ladder_step to the visible step number (default 1). BUT you MUST still verify there is a REAL BET present — a specific team, player, or line being wagered on (e.g., "Lakers -3", "Kawhi 6+ Rebounds", "Over 220.5"). If the image only shows payouts, ladder steps, promotional graphics, or challenge text with NO specific teams/players/lines to bet on, return type "ignore" with is_bet false. Never invent placeholder picks like "$50 Ladder Challenge" — a valid pick MUST name the entity being wagered on.` : ''}
 
 RESPONSE TYPE 1 — New Bet:
 If the text contains a clear actionable bet (team/player + line/odds + prediction):
 
 PARLAY example (multiple legs):
-{"type":"bet","is_bet":true,"bets":[{"sport":"NCAAB","league":"March Madness","bet_type":"parlay","description":"• Gonzaga -6.5\\n• Houston ML","odds":180,"units":2.0,"wager":50,"payout":90.06,"event_date":null,"legs":[{"description":"Gonzaga -6.5","odds":-110,"team":"Gonzaga","line":"-6.5","type":"spread"},{"description":"Houston ML","odds":-150,"team":"Houston","line":"ML","type":"moneyline"}],"props":[]}]}
+{"type":"bet","is_bet":true,"ticket_status":"new","bets":[{"sport":"NCAAB","league":"March Madness","bet_type":"parlay","description":"• Gonzaga -6.5\\n• Houston ML","odds":180,"units":2.0,"wager":50,"payout":90.06,"event_date":null,"legs":[{"description":"Gonzaga -6.5","odds":-110,"team":"Gonzaga","line":"-6.5","type":"spread"},{"description":"Houston ML","odds":-150,"team":"Houston","line":"ML","type":"moneyline"}],"props":[]}]}
 
 STRAIGHT example (single bet — still use legs array with 1 entry):
-{"type":"bet","is_bet":true,"bets":[{"sport":"NBA","league":"NBA","bet_type":"straight","description":"Lakers -3.5","odds":-110,"units":1.0,"wager":null,"payout":null,"event_date":null,"legs":[{"description":"Lakers -3.5","odds":-110,"team":"Lakers","line":"-3.5","type":"spread"}],"props":[]}]}
+{"type":"bet","is_bet":true,"ticket_status":"new","bets":[{"sport":"NBA","league":"NBA","bet_type":"straight","description":"Lakers -3.5","odds":-110,"units":1.0,"wager":null,"payout":null,"event_date":null,"legs":[{"description":"Lakers -3.5","odds":-110,"team":"Lakers","line":"-3.5","type":"spread"}],"props":[]}]}
+
+TICKET STATUS DETECTION (CRITICAL for images):
+Every response MUST include "ticket_status": "new" | "winner" | "loser".
+- "new" = a standard ungraded/pending bet slip (no result indicators).
+- "winner" = the image/text shows a COMPLETED WINNING bet — look for: green checkmarks (✅), "Won", "Winner", "Cashed", "Returned $", "Settled - Won", "Finished", payout amounts, green highlighting.
+- "loser" = the image/text shows a COMPLETED LOSING bet — look for: red X marks (❌), "Lost", "Settled - Lost", "Loser", red highlighting.
+If the ticket is "winner" or "loser", still extract ALL legs/bets from the image so we can match and grade them. Extract ALL slips if the image contains multiple tickets.
 
 CRITICAL FORMAT RULES:
 - EVERY bet MUST have a "legs" array, even single straight bets (1 leg).
@@ -594,8 +651,9 @@ Output strictly valid JSON. Do not include markdown formatting, do not include \
     };
   }
 
-  // Type 4: Ignore (not a bet)
-  if (parsed.is_bet === false || parsed.type === 'ignore') {
+  // Type 4: Ignore (not a bet) — handle string "false" from AI
+  const isBet = parsed.is_bet === true || String(parsed.is_bet).toLowerCase() === 'true';
+  if (!isBet || parsed.type === 'ignore') {
     return { type: 'ignore', is_bet: false, bets: [] };
   }
 
@@ -650,9 +708,30 @@ async function extractPickFromTweet(tweetText, capperName) {
 
     const prompt = `You are a sports betting parser. Read this tweet from @${capperName}: "${tweetText}"
 
-1. If it does NOT contain a clear sports pick, return exactly: {"status": "NULL"}
-2. If it's marketing/promo ("VIP", "RT", "Discount", "LIVE NOW"), return: {"status": "NULL"}
-3. If it DOES contain a pick, extract it into this JSON format:
+DECISION LOGIC (follow this exact order):
+
+STEP 1 — CHECK FOR BETTING STRUCTURE FIRST:
+Does the tweet contain ANY of these explicit betting signals?
+  - Team/player + spread + odds (e.g., "Nuggets -3.5 (-105)")
+  - Team + ML + odds (e.g., "Celtics ML +145")
+  - Player + stat line with over/under (e.g., "Jokic over 28.5 -110")
+  - Parlay with 2+ legs that have lines or odds (e.g., "+1009 NRFI Parlay")
+  - Sportsbook odds format (e.g., "+5097 odds", "(+210)")
+  - Units stated (e.g., "5u", "3 units")
+If YES → this is a VALID pick. Parse it. Do NOT reject just because celebration words like "LOCK", "BANG", "BOOM", "Dinger", "let's go", "keep rolling" are also present. Cappers commonly mix hype language with real picks.
+
+STEP 2 — ONLY if no betting structure found, check for rejection:
+  - Pure celebration with NO odds/line/spread: "Nice W on X!", "BOOM another cash!" → NULL
+  - Past results/recaps: "X/Y record", "win rate", "this week" → NULL
+  - Marketing: "VIP", "RT & reply", "Discount", "Subscribe" → NULL
+  - Motivational only: "Let's have fun", "Happy Monday", "Foot on the gas" → NULL
+  - Player name with NO line, NO odds → NULL
+
+STEP 3 — SETTLED CHECK:
+  - If ALL picks have ✅ checkmarks next to them → NULL (settled recap, not new picks)
+  - If SOME picks have no checkmarks → VALID (parse the unsettled ones)
+
+Return {"status": "NULL"} if rejected, or extract into this JSON if valid:
 {
   "status": "VALID",
   "sport": "NBA/NFL/MLB/etc",
@@ -660,13 +739,30 @@ async function extractPickFromTweet(tweetText, capperName) {
   "description": "Cleaned up pick",
   "odds": "-110 or N/A",
   "units": 1,
-  "legs": [{"description": "Leg text", "odds": -110}]
+  "legs": [{"description": "Leg text", "odds": -110}],
+  "is_ladder": false,
+  "ladder_step": 0
 }
-For parlays, populate legs. For straights, use a single-entry legs array.`;
+For parlays, populate legs. For straights, use a single-entry legs array.
+
+LADDER DETECTION: A ladder is multiple INDEPENDENT straight bets on the same player at escalating lines (e.g., "Player 5+ Ks (-195) 4u, Player 6+ Ks (+115) 3u, Player 7+ Ks (+210) 2u"). A ladder is NOT a parlay — each step stands alone.
+
+If the tweet contains "Ladder", "🪜", or lists the same player at multiple escalating stat lines with different odds/units, return:
+{
+  "status": "VALID",
+  "is_ladder": true,
+  "sport": "MLB",
+  "ladder_steps": [
+    {"description": "Bubba Chandler 5+ Ks", "odds": -195, "units": 4, "ladder_step": 1},
+    {"description": "Bubba Chandler 6+ Ks", "odds": 115, "units": 3, "ladder_step": 2},
+    {"description": "Bubba Chandler 7+ Ks", "odds": 210, "units": 2, "ladder_step": 3}
+  ]
+}
+Each step MUST have its own description, odds, and units. Extract ALL steps visible — do not stop at the first one. If it's a simple challenge ("$25 to $1000 Step 3") with only one pick, use the normal single-bet format with is_ladder: true and ladder_step: 3.`;
 
     const response = await groq.chat.completions.create({
       messages: [{ role: 'user', content: prompt }],
-      model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+      model: process.env.GROQ_MODEL || 'llama-3.1-8b-instant',
       temperature: 0,
       response_format: { type: 'json_object' },
     });
@@ -685,4 +781,182 @@ For parlays, populate legs. For straights, use a single-entry legs array.`;
   }
 }
 
-module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, AMBIGUITY_THRESHOLD };
+// ── Centralized pre-filter: reject settled recaps before hitting AI ──
+// Returns 'valid', 'reject_settled', or 'reject_recap'
+// CRITICAL: Settled check runs FIRST, before structure check
+function evaluateTweet(text) {
+  const STRUCTURE = [
+    /[+-]\d{3,}/,                          // odds: +150, -110, +5097
+    /\b\d+\.?\d*\s*u\b/i,                 // units: 5u
+    /\b\d+\s*units?\b/i,                  // "3 units"
+    /\b(over|under|o|u)\s*\d+\.?\d*/i,    // over/under
+    /[+-]\d+\.?\d*\s*\(/,                 // spread with parens: -3.5 (-110)
+    /\b\w+\s+(ml|moneyline)\b/i,          // team ML
+    /\b(parlay|sgp|same game|nrfi|yrfi)\b/i, // parlay/prop types
+    /\(\s*[+-]\d{3,}\s*\)/,               // odds in parens: (+145)
+    /\b[A-Z][a-z]+\s+[+-]\d+\.?\d*/,      // "Lakers -3.5"
+    /\bML\s*[+-]\d+/i,                    // "ML +145"
+    /\d+\.5\b/,                            // half-point lines: 22.5, 3.5
+  ];
+
+  console.log(`[evaluateTweet] Called | len=${text.length} | "${text.slice(0, 80)}..."`);
+
+  const SETTLED_MARKERS = /✅|❌|⚪|✔|✓|☑/;
+
+  // Celebration headers that indicate this is a recap of settled bets
+  const WIN_HEADERS = [
+    /^\d+-\d+\s+(ON|on)\s+\w+/,           // "1-0 ON UCL"
+    /^STOP\s+PLAYING/i,                    // "STOP PLAYING WITH ME"
+    /^BAANGG+/i,                           // "BAANGGGG"
+    /^CASH(ED)?\b/i,                       // "CASHED"
+    /^WHAT\s+A\s+(NIGHT|DAY|WIN)/i,        // "What a night"
+    /^EASY\s+(W|MONEY|WIN)/i,              // "Easy W"
+    /^BOOM+/i,                             // "BOOOM"
+    /\d+\s+(for|of)\s+\d+\s+(today|tonight|yesterday)/i, // "4 for 5 today"
+  ];
+
+  const lines = text.split(/[\n]+/).map(l => l.trim()).filter(l => l.length > 0);
+  const bettingLines = lines.filter(l => STRUCTURE.some(p => p.test(l)));
+  const settledLines = bettingLines.filter(l => SETTLED_MARKERS.test(l));
+
+  // ── STEP 1: SETTLED CHECK (runs before structure check) ──
+  if (bettingLines.length > 0 && settledLines.length === bettingLines.length) {
+    console.log(`[evaluateTweet] REJECT SETTLED: all ${bettingLines.length} betting line(s) have settled markers | "${text.slice(0, 60)}..."`);
+    return 'reject_settled';
+  }
+
+  // Celebration header + ANY settled marker = settled recap
+  const firstLine = lines[0] || '';
+  const hasWinHeader = WIN_HEADERS.some(p => p.test(firstLine));
+  if (hasWinHeader && settledLines.length > 0) {
+    console.log(`[evaluateTweet] REJECT SETTLED (celebration header + ✅): "${firstLine.slice(0, 40)}..." | ${settledLines.length} settled`);
+    return 'reject_settled';
+  }
+
+  // ── STEP 2: STRUCTURE CHECK ──
+  const hasBettingStructure = bettingLines.length > 0;
+  if (hasBettingStructure) {
+    console.log(`[evaluateTweet] ✅ VALID: ${bettingLines.length} betting line(s), ${settledLines.length} settled | "${text.slice(0, 60)}..."`);
+    return 'valid';
+  }
+
+  console.log(`[evaluateTweet] ❌ NO STRUCTURE: "${text.slice(0, 60)}..."`);
+  return 'reject_recap';
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Anti-hallucination post-parse validation
+// ═══════════════════════════════════════════════════════════════
+
+const SPORT_SEASONS = {
+  'NFL':   { start: [9, 1], end: [2, 15] },
+  'NCAAF': { start: [8, 15], end: [1, 15] },
+  'NBA':   { start: [10, 15], end: [6, 30] },
+  'NCAAB': { start: [11, 1], end: [4, 10] },
+  'MLB':   { start: [3, 20], end: [11, 5] },
+  'NHL':   { start: [10, 1], end: [6, 30] },
+  'WNBA':  { start: [5, 1], end: [10, 31] },
+};
+
+function isInSeason(sport) {
+  const season = SPORT_SEASONS[sport?.toUpperCase()];
+  if (!season) return true; // Unknown/year-round sports pass
+  const now = new Date();
+  const m = now.getMonth() + 1, d = now.getDate();
+  const [sm, sd] = season.start, [em, ed] = season.end;
+  // Handle year-wrap (e.g., NFL Sep→Feb)
+  if (sm <= em) return (m > sm || (m === sm && d >= sd)) && (m < em || (m === em && d <= ed));
+  return (m > sm || (m === sm && d >= sd)) || (m < em || (m === em && d <= ed));
+}
+
+const FORBIDDEN_PLACEHOLDERS = [
+  'missing legs', 'capper hid the picks', 'in a link or missing image',
+  'unknown pick', 'tbd', 'placeholder', 'no picks found',
+];
+
+// Sport reclassification — catch misclassified sports at intake
+const SPORT_TEAM_MAP = {
+  'MLB': ['yankees','red sox','dodgers','cubs','pirates','reds','brewers','phillies','mets','braves','astros','rangers','mariners','angels','royals','tigers','twins','white sox','guardians','blue jays','rays','orioles','rockies','padres','diamondbacks','cardinals','nationals','marlins'],
+  'NBA': ['lakers','celtics','warriors','heat','knicks','bulls','nets','rockets','spurs','suns','clippers','thunder','nuggets','jazz','blazers','kings','cavaliers','cavs','pistons','pacers','bucks','sixers','hawks','hornets','magic','wizards','raptors','timberwolves','grizzlies','mavs','mavericks','pelicans'],
+  'NFL': ['chiefs','rams','eagles','cowboys','giants','jets','patriots','dolphins','bills','steelers','ravens','browns','bengals','colts','titans','jaguars','texans','broncos','raiders','chargers','vikings','packers','bears','lions','seahawks','49ers','saints','falcons','panthers','buccaneers','bucs','commanders'],
+  'NHL': ['rangers','islanders','devils','bruins','canadiens','maple leafs','senators','sabres','panthers','lightning','capitals','penguins','flyers','blue jackets','red wings','blackhawks','wild','blues','predators','stars','avalanche','golden knights','kings','ducks','sharks','kraken','oilers','flames','canucks','hurricanes'],
+};
+
+function reclassifySport(parsedSport, description) {
+  console.log(`[Guard:Reclassify] Checking sport=${parsedSport} desc="${(description || '').slice(0, 60)}"`);
+  const desc = (description || '').toLowerCase();
+  const matchedSports = new Set();
+
+  for (const [sport, keywords] of Object.entries(SPORT_TEAM_MAP)) {
+    for (const kw of keywords) {
+      if (desc.includes(kw)) { matchedSports.add(sport); break; }
+    }
+  }
+
+  // Multi-sport parlay — never reclassify, keep original
+  if (matchedSports.size > 1) {
+    console.log(`[Guard:Reclassify] Multi-sport detected: [${[...matchedSports].join(',')}] — keeping ${parsedSport}`);
+    return parsedSport;
+  }
+
+  // Single different sport detected — reclassify
+  if (matchedSports.size === 1) {
+    const detected = [...matchedSports][0];
+    if (detected !== (parsedSport || '').toUpperCase()) {
+      console.log(`[Guard:Reclassify] Reclassified: ${parsedSport} → ${detected}`);
+      return detected;
+    }
+  }
+
+  return parsedSport;
+}
+
+// Infer sport from a single leg description
+function inferLegSport(legDescription) {
+  const desc = (legDescription || '').toLowerCase();
+  for (const [sport, keywords] of Object.entries(SPORT_TEAM_MAP)) {
+    for (const kw of keywords) {
+      if (desc.includes(kw)) return sport;
+    }
+  }
+  return null;
+}
+
+function validateParsedBet(pick, sourceText) {
+  const issues = [];
+  const desc = (pick.description || '').toLowerCase();
+  const src = (sourceText || '').toLowerCase();
+
+  // Check forbidden placeholders
+  if (FORBIDDEN_PLACEHOLDERS.some(p => desc.includes(p))) {
+    issues.push(`Placeholder text: "${desc.slice(0, 60)}"`);
+    return { valid: false, issues, reason: 'placeholder' };
+  }
+
+  // Check sport seasonality
+  if (pick.sport && !isInSeason(pick.sport)) {
+    issues.push(`${pick.sport} is out of season`);
+    return { valid: false, issues, reason: 'offseason' };
+  }
+
+  // Cross-reference: check that key entities in parsed bet appear in source
+  if (src.length > 10 && desc.length > 10) {
+    // Extract significant words from description (4+ chars, not common betting terms)
+    const betWords = desc.match(/\b[a-z]{4,}\b/g) || [];
+    const NOISE = new Set(['over', 'under', 'moneyline', 'spread', 'parlay', 'straight', 'units', 'pick', 'lock', 'play', 'game', 'total', 'points', 'tonight', 'today', 'first', 'half', 'quarter', 'goal', 'assist', 'score', 'more', 'less', 'with']);
+    const keyWords = betWords.filter(w => !NOISE.has(w) && w.length >= 4);
+
+    // At least one key entity word should appear in source
+    if (keyWords.length >= 2) {
+      const matchCount = keyWords.filter(w => src.includes(w)).length;
+      if (matchCount === 0) {
+        issues.push(`No key entities from bet found in source text. Bet words: [${keyWords.slice(0, 5).join(', ')}]`);
+        return { valid: false, issues, reason: 'entity_mismatch' };
+      }
+    }
+  }
+
+  return { valid: true, issues };
+}
+
+module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, evaluateTweet, validateParsedBet, reclassifySport, inferLegSport, isInSeason, AMBIGUITY_THRESHOLD };

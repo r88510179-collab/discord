@@ -19,6 +19,7 @@ primary_region = 'iad'
   source = 'bettracker_data'
   destination = '/data'
 
+# 512MB needed for Vision AI image buffers + Discord.js cache + SQLite
 [[vm]]
   size = 'shared-cpu-1x'
-  memory = '256mb'
+  memory = '512mb'

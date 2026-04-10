@@ -11,58 +11,13 @@ app.use(express.json());
 app.get('/', (req, res) => res.status(200).send('OK'));
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
-// ── Tweet Webhook Endpoint (Apify / Scraper integration) ─────
-app.post('/webhook/tweet', async (req, res) => {
-  try {
-    const { text, capper, author, tweetId } = req.body;
-    if (!text) return res.status(400).json({ error: 'Missing text field' });
+// ── API Routes (mobile ingest, health) ──
+const apiRoutes = require('./routes/api');
+app.use('/api', apiRoutes);
 
-    const capperName = capper || author || 'Unknown';
-    console.log(`[Webhook] Tweet from ${capperName}: "${text.slice(0, 80)}..."`);
-
-    // AI Bouncer: extract pick or reject noise
-    const { extractPickFromTweet } = require('./services/ai');
-    const pick = await extractPickFromTweet(text, capperName);
-
-    if (!pick) {
-      console.log(`[Webhook] Rejected — not a bet.`);
-      return res.json({ status: 'ignored', reason: 'not_a_bet' });
-    }
-
-    // Save to DB with needs_review + send to War Room
-    const { getOrCreateCapper, createBetWithLegs } = require('./services/database');
-    const { sendStagingEmbed } = require('./services/warRoom');
-
-    const capperId = capper || `twitter_${(author || 'unknown').toLowerCase()}`;
-    const capperRecord = getOrCreateCapper(capperId, capperName, null);
-
-    const saved = createBetWithLegs({
-      capper_id: capperRecord.id,
-      sport: pick.sport || 'Unknown',
-      bet_type: pick.type || 'straight',
-      description: pick.description,
-      odds: pick.odds ? parseInt(pick.odds, 10) : null,
-      units: pick.units || 1,
-      source: 'twitter_webhook',
-      raw_text: text.slice(0, 500),
-      review_status: 'needs_review',
-    }, pick.legs || []);
-
-    if (saved && !saved._deduped) {
-      // Send to War Room
-      const warRoomClient = global._discordClient;
-      if (warRoomClient) {
-        await sendStagingEmbed(warRoomClient, saved, capperName);
-      }
-      console.log(`[Webhook] Staged bet: "${pick.description?.slice(0, 50)}" from ${capperName}`);
-      return res.json({ status: 'staged', betId: saved.id });
-    }
-
-    return res.json({ status: 'duplicate' });
-  } catch (error) {
-    console.error('[Webhook] Error:', error.message);
-    return res.status(500).json({ error: error.message });
-  }
+// ── Legacy Apify webhook stub (returns 410 Gone) ──
+app.post('/api/webhooks/apify', (req, res) => {
+  res.status(410).json({ status: 'deprecated', message: 'Twitter ingestion moved to local poller' });
 });
 
 const port = process.env.PORT || 8080;
@@ -72,8 +27,49 @@ const { handleMessage } = require('./handlers/messageHandler');
 const { handleWarRoomInteraction } = require('./services/warRoom');
 const { handleGradeInteraction } = require('./handlers/gradeButtons');
 const { runAutoGrade } = require('./services/grading');
-const { pollCappers } = require('./services/twitter');
-const { postGradeSummary, postDailyLeaderboard } = require('./services/dashboard');
+// Twitter poller loaded dynamically in ClientReady handler
+const { postGradeSummary, postDailyLeaderboard, updateScoreboard } = require('./services/dashboard');
+const { postReport, checkCriticalAlerts, logCronRun } = require('./services/healthReport');
+
+// ── Slip-feed button handler ──
+async function handleSlipFeedInteraction(interaction) {
+  const [, action, betId] = interaction.customId.split(':');
+  const { db: database, upsertUserBet, ensureUserExists } = require('./services/database');
+
+  if (action === 'tail' || action === 'fade') {
+    ensureUserExists(interaction.user.id, interaction.user.username);
+    upsertUserBet(interaction.user.id, betId, action, 1);
+    await interaction.reply({ content: `${action === 'tail' ? '✅ Tailing' : '🔴 Fading'} this pick!`, ephemeral: true });
+    // Delete the slip-feed message (bet stays in DB)
+    try {
+      await interaction.message.delete();
+      database.prepare('UPDATE bets SET slipfeed_message_id = NULL WHERE id = ?').run(betId);
+    } catch (_) {}
+    return;
+  }
+
+  // Owner-only actions
+  if (process.env.OWNER_ID && interaction.user.id !== process.env.OWNER_ID) {
+    return interaction.reply({ content: '🚫 Owner only.', ephemeral: true });
+  }
+
+  if (action === 'delete') {
+    database.prepare('DELETE FROM parlay_legs WHERE bet_id = ?').run(betId);
+    database.prepare('DELETE FROM bets WHERE id = ?').run(betId);
+    await interaction.reply({ content: `🗑️ Bet \`${betId.slice(0, 8)}\` deleted.`, ephemeral: true });
+    try { await interaction.message.delete(); } catch (_) {}
+    return;
+  }
+
+  if (action === 'edit') {
+    // Reuse War Room edit modal
+    await handleWarRoomInteraction({
+      ...interaction,
+      customId: `war_edit:${betId}`,
+    });
+    return;
+  }
+}
 
 /**
  * Utility to extract bet data from a War Room embed.
@@ -153,6 +149,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
       return;
     }
+    // Slip-feed buttons (tail/fade/edit/delete)
+    if (interaction.customId.startsWith('slipfeed:')) {
+      try {
+        await handleSlipFeedInteraction(interaction);
+      } catch (err) {
+        console.error('[SlipFeed] Interaction error:', err.message);
+      }
+      return;
+    }
   }
 
   // Slash commands
@@ -179,13 +184,84 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 // ── Handle messages (auto-parse picks channel) ──────────────
-// Add your authorized channel IDs here
+// Channels can be added via .env: TRACKED_CHANNELS=id1,id2,id3
+// These hardcoded IDs are always included as a fallback baseline.
+//
+// ── Channel ID Reference ──────────────────────────────────────
+// SLIP CHANNELS (sport-specific):
+//   #cfb-cbb-slips            1487115407117652170
+//   #futbol-slips              1487115295310217357
+//   #golf-slips                1487115993938530395
+//   #mlb-slips                 1487115940956082196
+//   #nba-slips                 1487116040348500138
+//   #nfl-slips                 1487115847527829735
+//   #nhl-slips                 1487115893258453142
+//   #tennis-slips              1487115698206539888
+//   #tt-slips                  1487115798831960104
+//   #ufc-boxing-slips          1487115746793488424
+//
+// CAPPER CHANNELS (Twitter feeds & cappers):
+//   #gambling-twitter-dan      1284613965128925234
+//   #gambling-twitter-gavin    1284614717071032464
+//   #gambling-twitter-cody     1284613911055695893
+//   #gambling-twitter-harry    1284620792713318472
+//   #boogieman-slips           1282742197460144202
+//   #gallery-picks             1473345468716028044
+//   #gamescript-picks           1286934932769472646
+//   #gnp-slips                 1473343838587457626
+//   #ig-dave-picks             1473347391284576469
+//   #lockedin-slips            1473343783876821198
+//   #trent-slips               1484572863439704246
+//   #datdude-slips             1355182920163262664
+//   #degen-tail-slips          1282707049276244029
+//   #mez-slips                 1473341245500690473
+//   #smokke-slips              1473341333325217950
+//   #t-slips                   1473341563961606375
+//   #zooteid-slips             1473341435351929097
+//
+// SYSTEM (hardcoded baseline):
+//   #submit-picks              1488236820700594197
+//   #admin-log                 1486825605105192960
+// ───────────────────────────────────────────────────────────────
+const TRACKED_CHANNELS_ENV = process.env.TRACKED_CHANNELS
+  ? process.env.TRACKED_CHANNELS.split(',').map(id => id.trim()).filter(Boolean)
+  : [];
+
+const HUMAN_CHANNELS_ENV = process.env.HUMAN_SUBMISSION_CHANNEL_IDS
+  ? process.env.HUMAN_SUBMISSION_CHANNEL_IDS.split(',').map(id => id.trim()).filter(Boolean)
+  : [];
+
 const AUTHORIZED_CHANNELS = [
-  '1488236820700594197', // #submit-picks
-  '1486825605105192960', // #admin-log
+  ...new Set([
+    '1488236820700594197', // #submit-picks
+    '1486825605105192960', // #admin-log
+    ...(process.env.SUBMIT_CHANNEL_ID ? [process.env.SUBMIT_CHANNEL_ID] : []),
+    ...TRACKED_CHANNELS_ENV,
+    ...HUMAN_CHANNELS_ENV,
+  ]),
 ];
 
+// ── Blacklist: channels the bot should never process ──
+const IGNORED_CHANNELS = process.env.IGNORED_CHANNELS
+  ? process.env.IGNORED_CHANNELS.split(',').map(id => id.trim()).filter(Boolean)
+  : [];
+
+console.log(`[Config] Listening on ${AUTHORIZED_CHANNELS.length} channel(s):`, AUTHORIZED_CHANNELS);
+if (IGNORED_CHANNELS.length > 0) console.log(`[Config] Ignoring ${IGNORED_CHANNELS.length} channel(s):`, IGNORED_CHANNELS);
+
+// ── Human submission channel diagnostics ──
+const _humanChIds = (process.env.HUMAN_SUBMISSION_CHANNEL_IDS || '').split(',').filter(Boolean);
+console.log(`[Config] HUMAN_SUBMISSION_CHANNEL_IDS raw: "${process.env.HUMAN_SUBMISSION_CHANNEL_IDS || '(unset)'}"`);
+console.log(`[Config] HUMAN_SUBMISSION_CHANNEL_IDS parsed: ${JSON.stringify(_humanChIds)}`);
+// Check for overlap with IGNORED_CHANNELS
+for (const hc of _humanChIds) {
+  if (IGNORED_CHANNELS.includes(hc)) console.error(`[Config] WARNING: Human channel ${hc} is also in IGNORED_CHANNELS — it will be blocked!`);
+}
+
 client.on(Events.MessageCreate, async (message) => {
+  // 0. IMMEDIATELY ignore blacklisted channels (saves resources)
+  if (IGNORED_CHANNELS.includes(message.channel.id)) return;
+
   // 1. IMMEDIATELY ignore bots (prevents infinite loops)
   if (message.author.bot) return;
 
@@ -416,8 +492,36 @@ client.on(Events.MessageUpdate, (oldMsg, newMsg) => {
 });
 
 // ── Bot ready ───────────────────────────────────────────────
-client.once(Events.ClientReady, (c) => {
+client.once(Events.ClientReady, async (c) => {
   global._discordClient = client; // Expose for webhook endpoint
+
+  // ── Auto-register slash commands with Discord on every startup ──
+  try {
+    const commandData = [...client.commands.values()].map(cmd => cmd.data.toJSON());
+    const guildId = process.env.DISCORD_GUILD_ID;
+    if (guildId) {
+      await client.application.commands.set(commandData, guildId);
+      console.log(`🚀 Slash commands refreshed with Discord! (${commandData.length} guild commands)`);
+    } else {
+      await client.application.commands.set(commandData);
+      console.log(`🚀 Slash commands refreshed globally! (${commandData.length} commands)`);
+    }
+  } catch (err) {
+    console.error('[Commands] Failed to register slash commands:', err.message);
+  }
+
+  // ── Verify human submission channel permissions ──
+  const _hcIds = (process.env.HUMAN_SUBMISSION_CHANNEL_IDS || '').split(',').filter(Boolean);
+  for (const chId of _hcIds) {
+    try {
+      const ch = await client.channels.fetch(chId);
+      const perms = ch.permissionsFor(client.user);
+      console.log(`[Config] Human channel #${ch.name} (${chId}): view=${perms?.has('ViewChannel')} read=${perms?.has('ReadMessageHistory')}`);
+    } catch (e) {
+      console.error(`[Config] ERROR fetching human channel ${chId}: ${e.message}`);
+    }
+  }
+
   console.log('');
   console.log('╔═══════════════════════════════════════════════╗');
   console.log('║   🎰  ZoneTracker — Discord Bot  🎰       ║');
@@ -431,31 +535,112 @@ client.once(Events.ClientReady, (c) => {
   // ── Schedule auto-grading ─────────────────────────────────
   const gradeInterval = process.env.AUTO_GRADE_INTERVAL_MINUTES || 15;
   cron.schedule(`*/${gradeInterval} * * * *`, async () => {
+    const start = Date.now();
     try {
-      console.log('[Cron] Running auto-grade...');
+      console.log(`[AutoGrader] ═══ Cycle started at ${new Date().toISOString()} ═══`);
+      const { getPendingBets } = require('./services/database');
+      const pendingCount = getPendingBets().length;
+      console.log(`[AutoGrader] Found ${pendingCount} pending bet(s) to process`);
+
       const results = await runAutoGrade(client);
+      const duration = Date.now() - start;
+      console.log(`[AutoGrader] ═══ Cycle complete: graded ${results.graded}, duration ${duration}ms ═══`);
+
       if (results.graded > 0) {
-        console.log(`[Cron] Auto-graded ${results.graded} bets`);
         await postGradeSummary(client, results);
       }
+      logCronRun('auto-grader', duration);
     } catch (err) {
-      console.error('[Cron] Auto-grade error:', err.message);
+      console.error(`[AutoGrader] ═══ Cycle CRASHED: ${err.message} ═══`);
+      console.error(err.stack?.split('\n').slice(0, 3).join('\n'));
     }
   });
 
-  // ── Schedule Twitter/X scraping (every 10 minutes) ──────────
-  if (process.env.TWITTER_USERNAME && process.env.TWITTER_CAPPER_HANDLES) {
-    cron.schedule('*/10 * * * *', async () => {
+  // ── Twitter/X Poller (every 2h, twitterapi.io, credit-conserving) ──
+  if (process.env.TWITTERAPI_KEY || process.env.APITWITTER_KEY) {
+    const { pollCappers } = require('./services/twitter');
+    // Every 2 hours at :10 — active hours gate is inside pollCappers
+    cron.schedule('10 */2 * * *', async () => {
+      const start = Date.now();
       try {
         await pollCappers(client);
+        logCronRun('twitter-poller', Date.now() - start);
       } catch (err) {
         console.error('[Cron] Twitter poll error:', err.message);
       }
     });
-    console.log('🐦 Twitter/X scraping enabled (every 10 min)');
+    // Initial poll 90s after startup
+    setTimeout(() => {
+      const { pollCappers: poll } = require('./services/twitter');
+      poll(client).catch(e => console.error('[Twitter Poller Init]', e.message));
+    }, 90000);
+    console.log('🐦 Twitter/X poller enabled (every 2h, active hours only, twitterapi.io)');
   } else {
-    console.log('⚠️  Twitter scraping disabled (no TWITTER_USERNAME or TWITTER_CAPPER_HANDLES)');
+    console.log('⚠️  Twitter poller disabled (no TWITTERAPI_KEY)');
   }
+
+  // ── Scoreboard: reactive + hourly heartbeat ────────────────
+  // Scoreboard updates reactively on new picks and graded results.
+  // Hourly heartbeat ensures it stays fresh even during quiet periods.
+  cron.schedule('0 * * * *', async () => {
+    try {
+      await updateScoreboard(client, { force: true });
+    } catch (err) {
+      console.error('[Cron] Scoreboard heartbeat error:', err.message);
+    }
+  });
+  // Initial scoreboard post on startup (30s delay for channel cache)
+  setTimeout(() => updateScoreboard(client, { force: true }).catch(e => console.error('[Scoreboard Init]', e.message)), 30000);
+  console.log('📊 Live scoreboard enabled (reactive + hourly heartbeat)');
+
+  // ── Stale bet repost (every 30 min) ───────────────────────
+  // Catches pending bets the auto-grader missed — reposts to #slip-feed
+  cron.schedule('15,45 * * * *', async () => {
+    try {
+      const { db: database } = require('./services/database');
+      const { postNewPick } = require('./services/dashboard');
+      const staleBets = database.prepare(`
+        SELECT b.*, c.display_name AS capper_name
+        FROM bets b LEFT JOIN cappers c ON b.capper_id = c.id
+        WHERE b.result = 'pending'
+          AND b.slipfeed_message_id IS NULL
+          AND b.review_status = 'confirmed'
+          AND b.created_at < datetime('now', '-2 hours')
+        ORDER BY b.created_at ASC
+        LIMIT 10
+      `).all();
+
+      if (staleBets.length === 0) return;
+      console.log(`[Cron] Reposting ${staleBets.length} stale bet(s) to #slip-feed...`);
+
+      for (const bet of staleBets) {
+        await postNewPick(client, bet, bet.capper_name || 'Unknown', bet.source_url);
+      }
+      console.log(`[Cron] Stale bets reposted: ${staleBets.length}`);
+    } catch (err) {
+      console.error('[Cron] Stale bet repost error:', err.message);
+    }
+  });
+  console.log('⏰ Stale bet repost enabled (every 30 min at :15/:45)');
+
+  // ── Health Reports ────────────────────────────────────────
+  // Hourly pulse at :05
+  cron.schedule('5 * * * *', async () => {
+    try { await postReport(client, 'pulse', 1); } catch (e) { console.error('[Health] Pulse error:', e.message); }
+  });
+  // Daily full report at 9:00 AM ET (13:00 UTC)
+  cron.schedule('0 13 * * *', async () => {
+    try { await postReport(client, 'full', 24); } catch (e) { console.error('[Health] Daily error:', e.message); }
+  });
+  // Weekly deep audit at 10:00 AM ET Sundays (14:00 UTC)
+  cron.schedule('0 14 * * 0', async () => {
+    try { await postReport(client, 'weekly', 168); } catch (e) { console.error('[Health] Weekly error:', e.message); }
+  });
+  // Critical alert check every 5 min
+  cron.schedule('*/5 * * * *', async () => {
+    try { await checkCriticalAlerts(client); } catch (_) {}
+  });
+  console.log('🏥 Health reports enabled (hourly pulse, daily full, weekly audit, critical alerts)');
 
   console.log(`⚡ Auto-grading every ${gradeInterval} min`);
 
@@ -503,9 +688,10 @@ client.once(Events.ClientReady, (c) => {
         )
         .setTimestamp();
 
-      const dashId = process.env.PUBLIC_CHANNEL_ID || process.env.DASHBOARD_CHANNEL_ID;
-      if (dashId) {
-        const ch = await client.channels.fetch(dashId).catch(() => null);
+      // Route recap to #slip-receipts (dashboard is scoreboard-only)
+      const recapChId = process.env.RECEIPTS_CHANNEL_ID || process.env.SLIP_FEED_CHANNEL_ID;
+      if (recapChId) {
+        const ch = await client.channels.fetch(recapChId).catch(() => null);
         if (ch) await ch.send({ embeds: [recapEmbed] });
       }
       console.log('[Cron] Daily recap posted');
@@ -523,15 +709,33 @@ client.once(Events.ClientReady, (c) => {
       database.transaction(() => {
         database.prepare("DELETE FROM bets WHERE result = 'archived' AND created_at < datetime('now', '-90 days')").run();
         database.prepare('DELETE FROM user_bets WHERE bet_id NOT IN (SELECT id FROM bets)').run();
+        database.prepare("DELETE FROM processed_tweets WHERE processed_at < datetime('now', '-30 days')").run();
+        database.prepare("DELETE FROM twitter_audit_log WHERE created_at < datetime('now', '-7 days')").run();
+        database.prepare("DELETE FROM bot_health_log WHERE created_at < datetime('now', '-90 days')").run();
       })();
       database.exec('VACUUM');
-      console.log('[Cron] DB Purge & VACUUM complete.');
+      console.log('[Cron] DB Purge & VACUUM complete (includes 7-day audit log cleanup).');
     } catch (err) {
       console.error('[Cron] Purge error:', err.message);
     }
   });
   console.log('🧹 90-day DB purge at 3:30 AM UTC');
 
+  // ── Daily preventive restart at 4 AM ET (8 AM UTC) ────────
+  // Stopgap until memory leak is fully resolved
+  cron.schedule('0 8 * * *', () => {
+    console.log('[Cron] Scheduled daily restart for memory hygiene');
+    if (process.env.OWNER_ID && client) {
+      client.users.fetch(process.env.OWNER_ID)
+        .then(o => o.send('🔄 **Scheduled restart** — daily 4 AM ET memory hygiene. Back in ~30s.'))
+        .catch(() => {});
+    }
+    setTimeout(() => process.exit(0), 5000); // Fly.io auto-restarts
+  });
+  console.log('🔄 Daily restart at 4 AM ET (memory hygiene)');
+
+  console.log('[Config] Grader path: runAutoGrade → gradePropWithAI(reclassify + parlay dispatch) → gradeSingleBet/gradeParlay → finalizeBetGrading');
+  console.log(`[Config] /api/mobile-ingest: ${process.env.MOBILE_SCRAPER_SECRET ? 'ENABLED' : 'DISABLED (no MOBILE_SCRAPER_SECRET)'}`);
   console.log('🚀 Bot is ready!\n');
 });
 

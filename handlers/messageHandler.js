@@ -1,10 +1,10 @@
-const { parseBetText, parseBetSlipImage } = require('../services/ai');
+const { parseBetText, parseBetSlipImage, evaluateTweet, validateParsedBet } = require('../services/ai');
 const { getOrCreateCapper, createBetWithLegs, isDuplicateBet, isAuditMode, findPendingBetBySubject, gradeBet: gradeBetRecord, getBankroll, updateBankroll } = require('../services/database');
 const { betEmbed } = require('../utils/embeds');
 const { postPickTracked } = require('../services/dashboard');
 const { sendStagingEmbed } = require('../services/warRoom');
 const { extractTextFromImage } = require('../services/ocr');
-const { gradeFromCelebration } = require('../services/grading');
+const { gradeFromCelebration, finalizeBetGrading, calcProfit } = require('../services/grading');
 
 // ── Dedup guard: prevent double-processing of the same Discord message ──
 const processedMessages = new Set();
@@ -12,6 +12,11 @@ const processedMessages = new Set();
 // ── Strict Mode alert cooldowns: prevent spamming admin_log ──
 const alertCooldowns = new Map();
 const COOLDOWN_DURATION = 5 * 60 * 1000; // 5 minutes
+// Prune stale cooldowns every 10 min to prevent unbounded growth
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of alertCooldowns) { if (now - v > COOLDOWN_DURATION * 2) alertCooldowns.delete(k); }
+}, 10 * 60 * 1000);
 
 // ── Message Aggregation Buffer ──────────────────────────────────
 // TweetShift sends text + image as separate messages a split-second apart.
@@ -154,6 +159,47 @@ function looksLikePick(text) {
   return signals >= 2;
 }
 
+// ── Merge multiple image-extracted bets into a single parlay ──
+// When 7 images each produce 1 bet, combine into 1 parlay with 7 legs.
+function mergeBetsIntoParlay(bets) {
+  const allLegs = [];
+  let sport = 'Unknown';
+  let totalOdds = null;
+  let totalUnits = 1;
+  const descriptions = [];
+
+  for (const bet of bets) {
+    if (bet.sport && bet.sport !== 'Unknown') sport = bet.sport;
+    if (bet.units && bet.units > totalUnits) totalUnits = bet.units;
+    if (bet.odds) totalOdds = bet.odds; // use last non-null odds as parlay odds
+
+    // Add individual bet as a leg
+    if (bet.legs?.length > 0) {
+      allLegs.push(...bet.legs);
+      for (const leg of bet.legs) {
+        if (leg.description) descriptions.push(`• ${leg.description}`);
+      }
+    } else if (bet.description) {
+      allLegs.push({ description: bet.description, odds: bet.odds || null, team: null, line: null, type: 'unknown' });
+      descriptions.push(`• ${bet.description}`);
+    }
+  }
+
+  return {
+    sport,
+    league: bets[0]?.league || null,
+    bet_type: allLegs.length > 1 ? 'parlay' : 'straight',
+    description: descriptions.join('\n'),
+    odds: totalOdds,
+    units: totalUnits,
+    wager: bets[0]?.wager || null,
+    payout: bets[0]?.payout || null,
+    event_date: bets[0]?.event_date || null,
+    legs: allLegs,
+    _confidence: 'low',
+  };
+}
+
 function getPicksChannels() {
   const raw = process.env.PICKS_CHANNEL_IDS || '';
   return raw.split(',').map(id => id.trim()).filter(Boolean);
@@ -169,14 +215,18 @@ function globalPipelineGuard(message) {
 
   const isSlipChannel = message.channel.id === process.env.SLIP_FEED_CHANNEL_ID;
   const isPicksChannel = picksWhitelist.includes(message.channel.id);
+  const isSubmitChannel = process.env.SUBMIT_CHANNEL_ID && message.channel.id === process.env.SUBMIT_CHANNEL_ID;
+  const humanChannelIds = (process.env.HUMAN_SUBMISSION_CHANNEL_IDS || '').split(',').map(id => id.trim()).filter(Boolean);
+  const isHumanChannel = humanChannelIds.includes(message.channel.id);
   const isBot = message.author?.bot || !!message.webhookId;
-  const authorized = isSlipChannel || isPicksChannel;
+  const authorized = isSlipChannel || isPicksChannel || isSubmitChannel || isHumanChannel;
 
   return {
     authorized,
     context: {
       isPicksChannel,
       isSlipChannel,
+      isHumanChannel,
       isBot,
       channelName: message.channel?.name || 'unknown',
       channelId: message.channel.id,
@@ -324,7 +374,7 @@ async function scanImage(imageUrl, mediaType) {
 // Used by both the /slip command and the slip feed channel listener.
 // Returns { bets: [...saved], ocrText } or null on failure.
 async function processSlipImage(client, imageUrl, capperId, capperName, opts = {}) {
-  const { channelId, messageId, sourceUrl } = opts;
+  const { channelId, messageId, sourceUrl, contextHints } = opts;
 
   // ── Stage 1: OCR — extract raw text from image ──
   let ocrText = '';
@@ -338,9 +388,16 @@ async function processSlipImage(client, imageUrl, capperId, capperName, opts = {
 
   // ── Stage 2: AI Vision — send image + OCR text to Gemini/fallback ──
   console.log(`[SlipPipeline] Stage 2: Sending image + OCR text to AI Vision...`);
+  let contextLine = '';
+  if (contextHints?.capper || contextHints?.sport) {
+    const parts = [];
+    if (contextHints.capper) parts.push(`capper: '${contextHints.capper}'`);
+    if (contextHints.sport) parts.push(`sport: '${contextHints.sport}'`);
+    contextLine = `\n\nHINT: The user has indicated this slip belongs to ${parts.join(' and ')}. Use this to guide your extraction.`;
+  }
   const prompt = ocrText.length > 10
-    ? `Read the attached betting slip image AND the following OCR text to extract all bets:\n\n${ocrText}`
-    : 'Read the attached betting slip image and extract all bets, players, lines, and odds.';
+    ? `Read the attached betting slip image AND the following OCR text to extract all bets:\n\n${ocrText}${contextLine}`
+    : `Read the attached betting slip image and extract all bets, players, lines, and odds.${contextLine}`;
   const parsed = await parseBetText(prompt, imageUrl);
 
   if (!parsed.bets || parsed.bets.length === 0) {
@@ -497,6 +554,9 @@ async function handleAutoGrade(message, fullText) {
 }
 
 async function handleMessage(message, { isUpdate = false } = {}) {
+  // ═══ TRACE: log EVERY message the bot sees (remove after debugging) ═══
+  console.log(`[MessageHandler] ENTRY | ch=${message.channel?.name || message.channel?.id} | author=${message.author?.username} | bot=${message.author?.bot} | content=${message.content?.length || 0} | att=${message.attachments?.size || 0} | embeds=${message.embeds?.length || 0} | isUpdate=${isUpdate}`);
+
   if (!message.guild) return;
 
   // ═══ PARTIAL FETCH: ensure forwarded/partial messages are fully loaded ═══
@@ -554,8 +614,10 @@ async function handleMessage(message, { isUpdate = false } = {}) {
   if (slipHandled) return;
 
   const picksChannels = getPicksChannels();
-  if (picksChannels.length === 0) return;
-  if (!picksChannels.includes(message.channel.id)) return;
+  const humanSubChannels = (process.env.HUMAN_SUBMISSION_CHANNEL_IDS || '').split(',').map(id => id.trim()).filter(Boolean);
+  const isInPicksOrHuman = picksChannels.includes(message.channel.id) || humanSubChannels.includes(message.channel.id);
+  if (picksChannels.length === 0 && humanSubChannels.length === 0) return;
+  if (!isInPicksOrHuman) return;
 
   // ═══ GUARD 2: Resolve channel mapping (for capper attribution) ═══
   const twitterMap = getTwitterCapperMap();
@@ -577,6 +639,27 @@ async function handleMessage(message, { isUpdate = false } = {}) {
   const hasText = fullContent.length > 0;
   const images = getImageAttachments(message);
   const hasImages = images.length > 0;
+
+  // ═══ GUARD: Image-only messages from non-cappers are ignored ═══
+  // BYPASS: #submit-picks, HUMAN_SUBMISSION_CHANNEL_IDS, sportsbook URLs
+  const isSubmitChannel = process.env.SUBMIT_CHANNEL_ID && message.channel.id === process.env.SUBMIT_CHANNEL_ID;
+  const humanChannels = (process.env.HUMAN_SUBMISSION_CHANNEL_IDS || '').split(',').map(id => id.trim()).filter(Boolean);
+  const isHumanSubmitChannel = humanChannels.includes(message.channel.id);
+  const SPORTSBOOK_URLS = /share\.hardrock\.bet|draftkings\.com|sportsbook\.fanduel\.com|caesars\.com\/sportsbook|betmgm\.com|prizepicks\.com|underdogfantasy\.com/i;
+  const hasSportsbookUrl = SPORTSBOOK_URLS.test(fullContent);
+  if (hasImages && !hasText && !isSubmitChannel && !isHumanSubmitChannel && !hasSportsbookUrl) {
+    const isBot = message.author.bot || !!message.webhookId;
+    const capperIds = (process.env.CAPPER_DISCORD_IDS || '').split(',').map(id => id.trim()).filter(Boolean);
+    const isWhitelisted = isMappedChannel || isBot || capperIds.includes(message.author.id);
+    if (!isWhitelisted) {
+      console.log(`[Guard] Ignored image-only msg from non-capper ${message.author.tag} in #${message.channel.name}`);
+      return;
+    }
+  }
+  // Also allow through if text has sportsbook URL (even without images — embed will load later)
+  if (hasSportsbookUrl && !hasImages) {
+    console.log(`[Pipeline] Sportsbook URL detected from ${message.author.tag} — waiting for embed unfurl`);
+  }
 
   console.log(`[DEBUG] Msg in #${message.channel.name} | Attachments: ${message.attachments.size} | Snapshots: ${message.messageSnapshots?.size || 0} | Images Extracted: ${images.length}`);
 
@@ -610,16 +693,83 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
     const allBets = [];
     const reviewBets = [];
 
+    // Extract source tweet data from Discord embed URLs (TweetShift/FixTwitter)
+    let sourceTweetId = null;
+    let sourceTweetHandle = null;
+    for (const embed of (message.embeds || [])) {
+      const url = embed.url || '';
+      const match = url.match(/(?:x\.com|twitter\.com)\/([^/]+)\/status\/(\d+)/);
+      if (match) {
+        sourceTweetHandle = match[1].toLowerCase();
+        sourceTweetId = match[2];
+        break;
+      }
+    }
+
     // Hard Scrub the text
     const cleanText = hardScrub(fullText);
 
-    // Get image URL for Gemini Vision (bypasses OCR entirely)
-    const imageUrl = hasImages ? combinedImages[0].url : null;
+    // ═══ Multi-image loop: process EVERY image attachment, not just the first ═══
+    const imageUrls = hasImages ? combinedImages.map(img => img.url) : [];
+    const textPrompt = cleanText || 'Read the attached betting slip image and extract all bets.';
 
-    if (cleanText.length > 5 || imageUrl) {
-      console.log(`[DEBUG] Sending to AI. Text length: ${cleanText.length} | hasImage: ${!!imageUrl} | preview: "${cleanText.slice(0, 100)}"`);
-      const parsed = await parseBetText(cleanText || 'Read the attached betting slip image and extract all bets.', imageUrl);
-      console.log(`[DEBUG] AI Response: type=${parsed.type || 'bet'} is_bet=${parsed.is_bet} bets=${parsed.bets?.length || 0}`);
+    // Merge results from all images into a single parsed object
+    let parsed = { type: 'ignore', is_bet: false, bets: [], ticket_status: 'new' };
+
+    if (cleanText.length > 5 || imageUrls.length > 0) {
+      // ── Pre-filter: check BOTH combined text AND outer wrapper for settled markers ──
+      // Outer wrapper = message.content (before embed text). If wrapper has ✅, this is a recap.
+      const outerText = hardScrub(combinedRawText.split('\n')[0] || '');
+      if (/✅|❌|✔|✓/.test(outerText)) {
+        console.log(`[Filter] Outer wrapper has settled marker: "${outerText.slice(0, 60)}" — rejecting`);
+        return;
+      }
+      if (cleanText.length > 5) {
+        const preCheck = evaluateTweet(cleanText);
+        if (preCheck === 'reject_settled') {
+          console.log(`[Filter] Pre-filter: settled recap (all ✅) — skipping AI`);
+          return;
+        }
+      }
+
+      if (imageUrls.length <= 1) {
+        // Single image (or text-only) — normal path
+        const imageUrl = imageUrls[0] || null;
+        console.log(`[DEBUG] Sending to AI. Text length: ${cleanText.length} | hasImage: ${!!imageUrl} | preview: "${cleanText.slice(0, 100)}"`);
+        parsed = await parseBetText(textPrompt, imageUrl);
+      } else {
+        // Multiple images — process each sequentially then merge
+        console.log(`[DEBUG] Processing ${imageUrls.length} images sequentially...`);
+        const mergedBets = [];
+        let mergedTicketStatus = 'new';
+        let mergedType = 'ignore';
+
+        for (let i = 0; i < imageUrls.length; i++) {
+          console.log(`[DEBUG] Image ${i + 1}/${imageUrls.length}: ${imageUrls[i].slice(0, 60)}...`);
+          const imgParsed = await parseBetText(textPrompt, imageUrls[i]);
+          console.log(`[DEBUG] Image ${i + 1} result: type=${imgParsed.type} bets=${imgParsed.bets?.length || 0} ticket_status=${imgParsed.ticket_status || 'new'}`);
+
+          if (imgParsed.bets?.length > 0) mergedBets.push(...imgParsed.bets);
+          // Promote type: bet > result > untracked_win > ignore
+          if (imgParsed.type === 'bet' || imgParsed.is_bet) mergedType = 'bet';
+          else if (imgParsed.type === 'result' && mergedType !== 'bet') mergedType = 'result';
+          // Promote ticket_status: winner/loser overrides new
+          if (imgParsed.ticket_status === 'winner' || imgParsed.ticket_status === 'loser') {
+            mergedTicketStatus = imgParsed.ticket_status;
+          }
+          // Carry forward result/untracked_win fields
+          if (imgParsed.type === 'result' || imgParsed.type === 'untracked_win') {
+            parsed = imgParsed; // keep the last non-bet result for handling below
+          }
+        }
+
+        // If any image had bets, merge them all
+        if (mergedBets.length > 0) {
+          parsed = { type: mergedType, is_bet: true, bets: mergedBets, ticket_status: mergedTicketStatus };
+        }
+      }
+
+      console.log(`[DEBUG] AI Response: type=${parsed.type || 'bet'} is_bet=${parsed.is_bet} bets=${parsed.bets?.length || 0} ticket_status=${parsed.ticket_status || 'new'}`);
 
       // Auto-grade detection
       if (parsed.type === 'result') {
@@ -642,6 +792,51 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
         return;
       }
 
+      // ═══ TICKET STATUS: Auto-grade winning/losing recap slips ═══
+      // Vision AI detected a completed ticket — match to pending bets and grade instantly
+      if (parsed.ticket_status === 'winner' || parsed.ticket_status === 'loser') {
+        const outcome = parsed.ticket_status === 'winner' ? 'win' : 'loss';
+        console.log(`[RecapSlip] Detected ${parsed.ticket_status} ticket with ${parsed.bets?.length || 0} bet(s) from ${capperInfo.name}`);
+
+        let graded = 0;
+        for (const bet of (parsed.bets || [])) {
+          // Build search terms from legs or description
+          const searchTerms = [];
+          if (bet.legs?.length > 0) {
+            for (const leg of bet.legs) {
+              if (leg.team) searchTerms.push(leg.team);
+              if (leg.description) searchTerms.push(leg.description.split(/[•\n]/)[0].trim());
+            }
+          }
+          if (bet.description) {
+            const firstLine = bet.description.split(/[\n•]/)[0].trim();
+            if (firstLine.length > 3) searchTerms.push(firstLine);
+          }
+
+          if (searchTerms.length === 0) continue;
+
+          // Try capper-specific match first
+          const contextResult = await gradeFromCelebration(message.client, capper.id, outcome, searchTerms);
+          if (contextResult) {
+            graded++;
+            console.log(`[RecapSlip] Graded ${outcome.toUpperCase()}: "${searchTerms[0]?.slice(0, 40)}"`);
+            continue;
+          }
+
+          // Fallback: global search
+          const globalResult = await autoGradeBet(message.client, outcome, searchTerms);
+          if (globalResult) graded++;
+        }
+
+        if (graded > 0) {
+          await safeReact(message, parsed.ticket_status === 'winner' ? '✅' : '❌');
+          console.log(`[RecapSlip] Auto-graded ${graded} bet(s) as ${outcome.toUpperCase()} — skipped Serper search`);
+        } else {
+          console.log(`[RecapSlip] No matching pending bets found for ${parsed.ticket_status} ticket`);
+        }
+        return;
+      }
+
       // Not a bet — silently ignore
       if (parsed.is_bet === false) {
         console.log(`[Filter] AI rejected as non-bet: ${cleanText.substring(0, 60)}...`);
@@ -649,8 +844,22 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
       }
 
       if (parsed.bets?.length > 0) {
-        for (const bet of parsed.bets) {
+        // Multi-image merge: if multiple images produced multiple bets from same capper,
+        // combine all legs into one parlay entry instead of N separate bets.
+        const betsToSave = (imageUrls.length > 1 && parsed.bets.length > 1)
+          ? [mergeBetsIntoParlay(parsed.bets)]
+          : parsed.bets;
+
+        const hasAnyImage = imageUrls.length > 0;
+        for (const bet of betsToSave) {
           if (isDuplicateBet(capper.id, bet.description)) continue;
+
+          // Anti-hallucination: validate parsed bet against source content
+          const validation = validateParsedBet(bet, cleanText);
+          if (!validation.valid) {
+            console.warn(`[MessageHandler] HALLUCINATION BLOCKED: ${validation.reason} | ${validation.issues.join('; ')}`);
+            continue;
+          }
 
           const auditOn = isAuditMode();
           const reviewStatus = (auditOn || bet._confidence === 'low') ? 'needs_review' : 'confirmed';
@@ -662,10 +871,12 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
             odds: bet.odds, units: Math.min(bet.units || 1, 50),
             wager: bet.wager || null, payout: bet.payout || null,
             event_date: bet.event_date,
-            source: imageUrl ? 'vision_slip' : source,
+            source: hasAnyImage ? 'vision_slip' : source,
             source_url: message.url || null,
             source_channel_id: message.channel.id,
             source_message_id: message.id,
+            source_tweet_id: sourceTweetId,
+            source_tweet_handle: sourceTweetHandle,
             raw_text: cleanText.slice(0, 500),
             review_status: reviewStatus,
           }, bet.legs || []);
@@ -682,8 +893,9 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
 
     if (allBets.length > 0) {
       await safeReact(message, '✅');
+      // All bets route through War Room now — blue "Pick Tracked" embed removed to prevent double-post
       for (const bet of allBets) {
-        await postPickTracked(message.client, bet, capperInfo.name, message.channel.name, capperInfo.source);
+        await sendStagingEmbed(message.client, bet, capperInfo.name, message.url);
       }
     }
 
@@ -693,8 +905,11 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
       for (const bet of reviewBets) {
         await sendStagingEmbed(message.client, bet, capperInfo.name, message.url);
       }
-      // Inbox Zero: clean up #submit-picks after staging
-      try { await message.delete(); } catch (_) { /* Missing perms or already deleted */ }
+      // Inbox Zero: only delete originals in #submit-picks — leave capper channels untouched
+      const submitChannel = process.env.SUBMIT_PICKS_CHANNEL_ID || '1488236820700594197';
+      if (message.channel.id === submitChannel) {
+        try { await message.delete(); } catch (_) { /* Missing perms or already deleted */ }
+      }
     }
   } catch (err) {
     // Silently ignore duplicate image detections

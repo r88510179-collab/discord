@@ -9,7 +9,7 @@ const {
   ModalBuilder, TextInputBuilder, TextInputStyle,
 } = require('discord.js');
 const { approveBet, rejectBet, updateBetFields, getBetLegs, getBetProps, getCapperStats, getBankroll, db, createBet, updateBankroll, upsertUserBet, getSentimentCounts } = require('./database');
-const { postPickTracked } = require('./dashboard');
+const { postNewPick } = require('./dashboard');
 const { shopLine, formatLineShop, extractTeamFromDescription } = require('./odds');
 const { calculateOptimalBet } = require('./bankroll');
 const { COLORS } = require('../utils/embeds');
@@ -173,6 +173,16 @@ async function sendStagingEmbed(client, bet, capperName, sourceUrl) {
       .setStyle(ButtonStyle.Danger),
   ];
 
+  // Add "Split to Singles" button for parlays
+  if (bet.bet_type === 'parlay') {
+    adminButtons.push(
+      new ButtonBuilder()
+        .setCustomId(`war_split:${bet.id}`)
+        .setLabel('Split to Singles')
+        .setStyle(ButtonStyle.Secondary),
+    );
+  }
+
   // Construct source URL fallback from bet metadata if not provided
   const resolvedUrl = sourceUrl
     || (bet.source_channel_id && bet.source_message_id
@@ -215,7 +225,38 @@ async function sendStagingEmbed(client, bet, capperName, sourceUrl) {
 async function handleWarRoomInteraction(interaction) {
   // Handle buttons
   if (interaction.isButton()) {
-    const [action, betId] = interaction.customId.split(':');
+    const [action, ...rest] = interaction.customId.split(':');
+    const betId = rest.join(':'); // handles comma-separated IDs for ladders
+
+    // ── Ladder batch approve ──
+    if (action === 'war_ladder_approve') {
+      await interaction.deferReply({ ephemeral: true });
+      const betIds = betId.split(',').filter(Boolean);
+      let approved = 0;
+      for (const id of betIds) {
+        const result = approveBet(id);
+        if (result) approved++;
+      }
+      await interaction.message.delete().catch(() => {});
+      await interaction.editReply({ content: `✅ Approved **${approved}/${betIds.length}** ladder steps.` });
+      // Post each to #slip-feed
+      for (const id of betIds) {
+        const bet = db.prepare('SELECT b.*, c.display_name AS capper_name FROM bets b LEFT JOIN cappers c ON b.capper_id = c.id WHERE b.id = ?').get(id);
+        if (bet) await postNewPick(interaction.client, bet, bet.capper_name);
+      }
+      return true;
+    }
+
+    // ── Ladder batch reject ──
+    if (action === 'war_ladder_reject') {
+      const betIds = betId.split(',').filter(Boolean);
+      for (const id of betIds) {
+        try { rejectBet(id); } catch (_) {}
+      }
+      await interaction.reply({ content: `❌ Rejected ${betIds.length} ladder steps.`, ephemeral: true });
+      await interaction.message.delete().catch(() => {});
+      return true;
+    }
 
     if (action === 'war_approve') {
       await interaction.deferReply({ ephemeral: true });
@@ -226,79 +267,11 @@ async function handleWarRoomInteraction(interaction) {
           return interaction.editReply({ content: 'Bet not found or already confirmed.' });
         }
 
-        // Forward to private dashboard
-        await postPickTracked(
-          interaction.client, bet, bet.capper_name || 'Unknown',
-          'war-room', 'discord',
-        );
+        // Forward to #slip-feed
+        await postNewPick(interaction.client, bet, bet.capper_name || 'Unknown');
 
-      // Post to Public Community Feed with Tail/Fade buttons only
-      const publicChannelId = process.env.PUBLIC_CHANNEL_ID || process.env.DASHBOARD_CHANNEL_ID;
-      if (publicChannelId) {
-        try {
-          const pubChannel = await interaction.client.channels.fetch(publicChannelId).catch(() => null);
-          if (pubChannel) {
-            // Build capper stats line
-            let statsText = 'First graded bet!';
-            try {
-              const cs = getCapperStats(bet.capper_id);
-              if (cs && ((cs.wins || 0) + (cs.losses || 0)) > 0) {
-                const w = cs.wins || 0, l = cs.losses || 0, p = cs.pushes || 0;
-                const pct = (w + l) > 0 ? Math.round((w / (w + l)) * 100) : 0;
-                const prof = (cs.total_profit_units || 0).toFixed(2);
-                const hot = pct >= 65 && prof > 0 && (w + l) >= 5;
-                statsText = `${hot ? ' ' : ''}**Record:** ${w}-${l}-${p} (${pct}%) | **Profit:** ${prof > 0 ? '+' : ''}${prof}u`;
-              }
-            } catch (_) { /* silent */ }
-
-            // Generate AI hype insight
-            let aiTake = '';
-            try {
-              const { GoogleGenerativeAI } = require('@google/generative-ai');
-              if (process.env.GEMINI_API_KEY) {
-                const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-                const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
-                const prompt = `You are a sharp sports betting analyst. Write exactly ONE sentence (max 20 words) hyping up or analyzing this bet for a Discord community.\nCapper: ${bet.capper_name || 'Unknown'} (Win Rate: ${statsText})\nBet: ${bet.description} (${bet.sport})\nMake it punchy, sharp, and fun. No hashtags.`;
-                const aiResult = await model.generateContent(prompt);
-                aiTake = `**AI Take:** *"${aiResult.response.text().trim()}"*`;
-              }
-            } catch (_) {
-              aiTake = `**AI Take:** *"Riding with ${bet.capper_name || 'Unknown'} on this one!"*`;
-            }
-
-            const pubEmbed = new EmbedBuilder()
-              .setTitle(`New Play from ${bet.capper_name || 'Unknown'}`)
-              .setColor(COLORS.success)
-              .addFields(
-                { name: 'Sport', value: bet.sport || 'Unknown', inline: true },
-                { name: 'Type', value: (bet.bet_type || 'straight').toUpperCase(), inline: true },
-                { name: 'Odds', value: String(bet.odds ?? 'N/A'), inline: true },
-                { name: 'Description', value: bet.description || 'N/A' },
-                { name: 'Capper History', value: statsText, inline: false },
-              );
-
-            if (aiTake) {
-              pubEmbed.addFields({ name: '\u200B', value: aiTake, inline: false });
-            }
-            pubEmbed.setTimestamp();
-
-            const pubRow = new ActionRowBuilder().addComponents(
-              new ButtonBuilder()
-                .setCustomId(`war_tail:${bet.id}`)
-                .setLabel('Tail')
-                .setStyle(ButtonStyle.Success),
-              new ButtonBuilder()
-                .setCustomId(`war_fade:${bet.id}`)
-                .setLabel('Fade')
-                .setStyle(ButtonStyle.Danger),
-            );
-
-            await pubChannel.send({ embeds: [pubEmbed], components: [pubRow] });
-          }
-        } catch (err) {
-          console.log(`[WarRoom] Public feed error: ${err.message}`);
-        }
-      }
+      // Bet routing: postNewPick already sends to #slip-feed with buttons.
+      // No second post needed — dashboard is scoreboard-only.
 
       // Delete the War Room staging embed and confirm
       await interaction.message.delete().catch(() => {});
@@ -327,11 +300,16 @@ async function handleWarRoomInteraction(interaction) {
         .setValue(currentBet?.sport || '')
         .setRequired(true);
 
-      const typeInput = new TextInputBuilder()
-        .setCustomId('bet_type')
-        .setLabel('Bet Type (straight, parlay, prop)')
+      // Fetch capper name for pre-fill
+      const capperRow = currentBet?.capper_id
+        ? db.prepare('SELECT display_name FROM cappers WHERE id = ?').get(currentBet.capper_id)
+        : null;
+
+      const capperInput = new TextInputBuilder()
+        .setCustomId('capper_name')
+        .setLabel('Capper Name')
         .setStyle(TextInputStyle.Short)
-        .setValue(currentBet?.bet_type || 'straight')
+        .setValue(capperRow?.display_name || '')
         .setRequired(true);
 
       const descInput = new TextInputBuilder()
@@ -356,14 +334,118 @@ async function handleWarRoomInteraction(interaction) {
         .setRequired(true);
 
       modal.addComponents(
+        new ActionRowBuilder().addComponents(capperInput),
         new ActionRowBuilder().addComponents(sportInput),
-        new ActionRowBuilder().addComponents(typeInput),
         new ActionRowBuilder().addComponents(descInput),
         new ActionRowBuilder().addComponents(oddsInput),
         new ActionRowBuilder().addComponents(unitsInput),
       );
 
       await interaction.showModal(modal);
+      return true;
+    }
+
+    // ── Split parlay into individual single bets ──
+    if (action === 'war_split') {
+      await interaction.deferReply({ ephemeral: true });
+      try {
+        const originalBet = db.prepare('SELECT * FROM bets WHERE id = ?').get(betId);
+        if (!originalBet) {
+          return interaction.editReply({ content: 'Bet not found.' });
+        }
+
+        const legs = getBetLegs(betId);
+        if (!legs || legs.length === 0) {
+          // No legs table entries — try splitting description by newlines/bullets
+          const descLegs = (originalBet.description || '')
+            .split(/[\n•]+/)
+            .map(l => l.trim())
+            .filter(l => l.length > 2);
+
+          if (descLegs.length <= 1) {
+            return interaction.editReply({ content: 'This bet has no legs to split.' });
+          }
+
+          // Create individual bets from description lines
+          const newBets = [];
+          for (const legDesc of descLegs) {
+            const saved = createBet({
+              capper_id: originalBet.capper_id,
+              sport: originalBet.sport,
+              league: originalBet.league,
+              bet_type: 'straight',
+              description: legDesc,
+              odds: originalBet.odds || null,
+              units: originalBet.units || 1,
+              source: originalBet.source,
+              source_url: originalBet.source_url,
+              source_channel_id: originalBet.source_channel_id,
+              source_message_id: originalBet.source_message_id,
+              raw_text: legDesc,
+              review_status: 'needs_review',
+              season: originalBet.season,
+              is_ladder: originalBet.is_ladder,
+              ladder_step: originalBet.ladder_step,
+            });
+            if (saved && !saved._deduped) newBets.push(saved);
+          }
+
+          // Delete the original parlay
+          db.prepare('DELETE FROM parlay_legs WHERE bet_id = ?').run(betId);
+          db.prepare('DELETE FROM bets WHERE id = ?').run(betId);
+
+          // Send each new single bet to War Room
+          const capperName = db.prepare('SELECT display_name FROM cappers WHERE id = ?').get(originalBet.capper_id)?.display_name || 'Unknown';
+          for (const bet of newBets) {
+            await sendStagingEmbed(interaction.client, bet, capperName, originalBet.source_url);
+          }
+
+          await interaction.message.delete().catch(() => {});
+          await interaction.editReply({ content: `✅ Split into **${newBets.length}** individual bet(s). Each sent to War Room.` });
+          return true;
+        }
+
+        // Has structured legs — use those
+        const newBets = [];
+        for (const leg of legs) {
+          const saved = createBet({
+            capper_id: originalBet.capper_id,
+            sport: originalBet.sport,
+            league: originalBet.league,
+            bet_type: 'straight',
+            description: leg.description,
+            odds: leg.odds || originalBet.odds || null,
+            units: originalBet.units || 1,
+            source: originalBet.source,
+            source_url: originalBet.source_url,
+            source_channel_id: originalBet.source_channel_id,
+            source_message_id: originalBet.source_message_id,
+            raw_text: leg.description,
+            review_status: 'needs_review',
+            season: originalBet.season,
+            is_ladder: originalBet.is_ladder,
+            ladder_step: originalBet.ladder_step,
+          });
+          if (saved && !saved._deduped) newBets.push(saved);
+        }
+
+        // Delete the original parlay + its legs
+        db.prepare('DELETE FROM parlay_legs WHERE bet_id = ?').run(betId);
+        db.prepare('DELETE FROM bets WHERE id = ?').run(betId);
+
+        // Send each new single bet to War Room
+        const capperName = db.prepare('SELECT display_name FROM cappers WHERE id = ?').get(originalBet.capper_id)?.display_name || 'Unknown';
+        for (const bet of newBets) {
+          await sendStagingEmbed(interaction.client, bet, capperName, originalBet.source_url);
+        }
+
+        await interaction.message.delete().catch(() => {});
+        await interaction.editReply({ content: `✅ Split **${legs.length}-leg parlay** into **${newBets.length}** individual bet(s). Each sent to War Room.` });
+        console.log(`[WarRoom] Split parlay ${betId.slice(0, 8)} into ${newBets.length} singles`);
+      } catch (err) {
+        console.error('[WarRoom] Split error:', err.message);
+        await interaction.editReply({ content: `❌ Split failed: ${err.message}` }).catch(() => {});
+      }
       return true;
     }
 
@@ -511,8 +593,8 @@ async function handleWarRoomInteraction(interaction) {
   // Handle edit modal submission
   if (interaction.isModalSubmit() && interaction.customId.startsWith('war_modal:')) {
     const betId = interaction.customId.split(':')[1];
+    const newCapper = interaction.fields.getTextInputValue('capper_name').trim();
     const newSport = interaction.fields.getTextInputValue('sport').trim();
-    const newType = interaction.fields.getTextInputValue('bet_type').trim();
     const newDesc = interaction.fields.getTextInputValue('description').trim();
     const oddsStr = interaction.fields.getTextInputValue('odds').trim();
     const unitsStr = interaction.fields.getTextInputValue('units').trim();
@@ -521,8 +603,16 @@ async function handleWarRoomInteraction(interaction) {
 
     // Update all editable fields
     if (newDesc || newOdds) {
-      db.prepare('UPDATE bets SET sport = ?, bet_type = ?, description = ?, odds = COALESCE(?, odds), units = COALESCE(?, units) WHERE id = ?')
-        .run(newSport || 'Unknown', newType || 'straight', newDesc, newOdds, newUnits, betId);
+      db.prepare('UPDATE bets SET sport = ?, description = ?, odds = COALESCE(?, odds), units = COALESCE(?, units) WHERE id = ?')
+        .run(newSport || 'Unknown', newDesc, newOdds, newUnits, betId);
+
+      // Update capper display name if changed
+      if (newCapper) {
+        const bet = db.prepare('SELECT capper_id FROM bets WHERE id = ?').get(betId);
+        if (bet?.capper_id) {
+          db.prepare('UPDATE cappers SET display_name = ? WHERE id = ?').run(newCapper, bet.capper_id);
+        }
+      }
 
       const current = db.prepare('SELECT * FROM bets WHERE id = ?').get(betId);
 
@@ -611,4 +701,55 @@ async function sendUntrackedWinEmbed(client, data) {
   await channel.send({ embeds: [embed], components: [row] });
 }
 
-module.exports = { sendStagingEmbed, handleWarRoomInteraction, sendUntrackedWinEmbed };
+/**
+ * Send a grouped ladder embed to War Room.
+ * Shows all steps in one embed with a single "Approve All" button.
+ */
+async function sendLadderEmbed(client, ladderBets, capperName, sourceUrl, sport) {
+  const channelId = process.env.WAR_ROOM_CHANNEL_ID || process.env.ADMIN_LOG_CHANNEL_ID;
+  if (!channelId) return;
+  const channel = await client.channels.fetch(channelId).catch(() => null);
+  if (!channel) return;
+
+  const fmtOdds = (o) => o == null ? 'N/A' : (o > 0 ? `+${o}` : `${o}`);
+  const totalUnits = ladderBets.reduce((sum, b) => sum + (b.units || 1), 0);
+
+  const stepLines = ladderBets.map((bet, i) => {
+    const step = bet.ladder_step || (i + 1);
+    return `\`Step ${step}\` **${bet.description}** ${fmtOdds(bet.odds)} — ${bet.units || 1}u`;
+  });
+
+  const betIds = ladderBets.map(b => b.id);
+
+  const embed = new EmbedBuilder()
+    .setTitle(`🪜 Ladder Challenge (${ladderBets.length} Steps)`)
+    .setColor(0xFFA500)
+    .addFields(
+      { name: 'Capper', value: capperName || 'Unknown', inline: true },
+      { name: 'Sport', value: sport || 'Unknown', inline: true },
+      { name: 'Total Risk', value: `${totalUnits.toFixed(1)}u across ${ladderBets.length} steps`, inline: true },
+      { name: 'Steps', value: stepLines.join('\n') || 'No steps' },
+    )
+    .setFooter({ text: `Bet IDs: ${betIds.map(id => id.slice(0, 6)).join(', ')}` })
+    .setTimestamp();
+
+  if (sourceUrl) embed.setURL(sourceUrl);
+
+  // Encode all bet IDs as comma-separated in the button custom ID
+  const idsPayload = betIds.join(',');
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`war_ladder_approve:${idsPayload}`)
+      .setLabel(`Approve All ${ladderBets.length} Steps`)
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`war_ladder_reject:${idsPayload}`)
+      .setLabel('Reject All')
+      .setStyle(ButtonStyle.Danger),
+  );
+
+  await channel.send({ embeds: [embed], components: [row] });
+  console.log(`[WarRoom] Ladder embed sent: ${ladderBets.length} steps from ${capperName}`);
+}
+
+module.exports = { sendStagingEmbed, handleWarRoomInteraction, sendUntrackedWinEmbed, sendLadderEmbed };
