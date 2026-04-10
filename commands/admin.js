@@ -53,7 +53,11 @@ module.exports = {
         .setDescription('List tracked, ignored, and unmonitored channels'))
     .addSubcommand(sub =>
       sub.setName('snapshot')
-        .setDescription('Full bot state snapshot for fast triage')),
+        .setDescription('Full bot state snapshot for fast triage'))
+    .addSubcommand(sub =>
+      sub.setName('grade-audit')
+        .setDescription('Show grading audit trail for a bet')
+        .addStringOption(opt => opt.setName('bet_id').setDescription('Bet ID (first 8 chars ok)').setRequired(true))),
 
   async execute(interaction) {
     const sub = interaction.options.getSubcommand();
@@ -280,6 +284,46 @@ module.exports = {
         `AutoGrader: ${process.env.AUTOGRADER_DISABLED === 'true' ? '⏸️ PAUSED' : '▶️ Active'}`,
       ];
       return interaction.editReply(lines.join('\n'));
+    }
+
+    // ── Grade audit: show grading trail for a bet ──
+    if (sub === 'grade-audit') {
+      if (process.env.OWNER_ID && interaction.user.id !== process.env.OWNER_ID) return interaction.reply({ content: '🚫', ephemeral: true });
+      await interaction.deferReply({ ephemeral: true });
+      const partialId = interaction.options.getString('bet_id');
+      const { db } = require('../services/database');
+      const { EmbedBuilder } = require('discord.js');
+      const rows = db.prepare('SELECT * FROM grading_audit WHERE bet_id LIKE ? ORDER BY timestamp ASC').all(`${partialId}%`);
+      if (rows.length === 0) return interaction.editReply(`No audit rows for bet \`${partialId}\`.`);
+
+      const bet = db.prepare('SELECT description, sport, result FROM bets WHERE id LIKE ?').get(`${partialId}%`);
+      const embed = new EmbedBuilder()
+        .setTitle(`🔍 Grade Audit: ${partialId}`)
+        .setColor(0x3498DB)
+        .setDescription(`**Bet:** ${bet?.description?.slice(0, 80) || '?'}\n**Sport:** ${bet?.sport || '?'} | **Result:** ${bet?.result || '?'}\n**Attempts:** ${rows.length}`)
+        .setTimestamp();
+
+      // Show last 5 attempts as fields
+      const show = rows.slice(-5);
+      for (const r of show) {
+        const ts = new Date(r.timestamp).toISOString().slice(0, 19).replace('T', ' ');
+        const sport = r.reclassified ? `${r.sport_in}→${r.sport_out}` : (r.sport_out || '?');
+        const guards_p = r.guards_passed ? JSON.parse(r.guards_passed).join(',') : '';
+        const guards_f = r.guards_failed ? JSON.parse(r.guards_failed).join(',') : '';
+        const lines = [
+          `**Time:** ${ts} | **#${r.attempt_num}**`,
+          `**Sport:** ${sport}${r.is_parlay ? ` | Leg ${(r.leg_index ?? 0) + 1}/${r.leg_count}` : ''}`,
+          `**Search:** ${r.search_backend || '?'} ${r.search_hits || 0} hits (${r.search_duration_ms || 0}ms)`,
+          `**Provider:** ${r.provider_used || 'none'}`,
+          guards_p ? `**Guards OK:** ${guards_p}` : '',
+          guards_f ? `**Guards FAIL:** ${guards_f}` : '',
+          `**Status:** ${r.final_status || '?'}`,
+          `**Evidence:** ${(r.final_evidence || '').slice(0, 120)}`,
+        ].filter(Boolean);
+        embed.addFields({ name: `Attempt ${r.attempt_num}`, value: lines.join('\n').slice(0, 1000) });
+      }
+      if (rows.length > 5) embed.setFooter({ text: `Showing last 5 of ${rows.length} attempts` });
+      return interaction.editReply({ embeds: [embed] });
     }
 
     // ── Snapshot: full bot state for fast triage ──

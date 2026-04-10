@@ -822,7 +822,7 @@ async function gradeParlay(parlayBet, legs) {
       bet_type: 'straight',
     };
 
-    const result = await gradeSingleBet(legBet);
+    const result = await gradeSingleBet(legBet, { is_parlay: 1, leg_index: i, leg_count: legs.length });
     const status = result?.status || 'PENDING';
     const evidence = result?.evidence || 'No result';
     legResults.push({ leg, status, evidence });
@@ -856,14 +856,52 @@ async function gradeParlay(parlayBet, legs) {
 }
 
 // ── Single-bet grader — ANTI-HALLUCINATION HARDENED ────────────
-async function gradeSingleBet(bet) {
+async function gradeSingleBet(bet, _auditCtx = {}) {
   const today = new Date().toISOString().split('T')[0];
   const betDate = bet.created_at ? new Date(bet.created_at).toISOString().split('T')[0] : today;
+
+  // Audit context — populated throughout, written at end
+  const audit = {
+    bet_id: bet.id || 'unknown',
+    sport_in: bet.sport || null,
+    sport_out: null,
+    reclassified: 0,
+    is_parlay: _auditCtx.is_parlay || 0,
+    leg_index: _auditCtx.leg_index ?? null,
+    leg_count: _auditCtx.leg_count ?? null,
+    search_backend: null,
+    search_query: null,
+    search_hits: 0,
+    search_duration_ms: 0,
+    provider_used: null,
+    raw_response: null,
+    guards_passed: [],
+    guards_failed: [],
+    final_status: null,
+    final_evidence: null,
+  };
+
+  function writeAudit() {
+    try {
+      const uid = require('crypto').randomBytes(8).toString('hex');
+      const attemptNum = db.prepare('SELECT COUNT(*) as c FROM grading_audit WHERE bet_id = ?').get(audit.bet_id)?.c || 0;
+      db.prepare(`INSERT INTO grading_audit (id, bet_id, attempt_num, timestamp, sport_in, sport_out, reclassified, is_parlay, leg_index, leg_count, search_backend, search_query, search_hits, search_duration_ms, provider_used, raw_response, guards_passed, guards_failed, final_status, final_evidence) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(uid, audit.bet_id, attemptNum + 1, Date.now(), audit.sport_in, audit.sport_out, audit.reclassified, audit.is_parlay, audit.leg_index, audit.leg_count, audit.search_backend, audit.search_query, audit.search_hits, audit.search_duration_ms, audit.provider_used, audit.raw_response?.slice(0, 1000), JSON.stringify(audit.guards_passed), JSON.stringify(audit.guards_failed), audit.final_status, audit.final_evidence?.slice(0, 500));
+    } catch (e) { console.error(`[GradeAudit] Write error: ${e.message}`); }
+  }
+
+  function earlyReturn(result) {
+    audit.final_status = result.status;
+    audit.final_evidence = result.evidence;
+    audit.sport_out = bet.sport;
+    writeAudit();
+    return result;
+  }
 
   // ── GUARD 1: No event date ──
   if (!bet.event_date && !bet.created_at) {
     console.log(`[AI Grader] SKIP no date: ${bet.id?.slice(0, 8)}`);
-    return { status: 'PENDING', evidence: 'No event date — cannot determine if game has occurred' };
+    return earlyReturn({ status: 'PENDING', evidence: 'No event date — cannot determine if game has occurred' });
   }
 
   // ── GUARD 2: Parse and validate event date ──
@@ -871,13 +909,13 @@ async function gradeSingleBet(bet) {
   const eventTime = new Date(eventDate).getTime();
   if (!eventTime || isNaN(eventTime)) {
     console.log(`[AI Grader] SKIP bad date: ${bet.id?.slice(0, 8)} event_date="${eventDate}"`);
-    return { status: 'PENDING', evidence: `Invalid event date: ${eventDate}` };
+    return earlyReturn({ status: 'PENDING', evidence: `Invalid event date: ${eventDate}` });
   }
 
   const eventDay = new Date(eventDate).toISOString().split('T')[0];
   if (eventDay > today) {
     console.log(`[AI Grader] SKIP future: ${bet.id?.slice(0, 8)} event=${eventDay} today=${today}`);
-    return { status: 'PENDING', evidence: 'Game has not started yet' };
+    return earlyReturn({ status: 'PENDING', evidence: 'Game has not started yet' });
   }
 
   // ── GUARD 3: Too recent — game may still be in progress ──
@@ -885,10 +923,12 @@ async function gradeSingleBet(bet) {
   console.log(`[AI Grader] Time check: ${bet.id?.slice(0, 8)} event=${eventDate} hours_since=${hoursSinceEvent.toFixed(2)}`);
   if (hoursSinceEvent < 3) {
     console.log(`[AI Grader] SKIP too recent: ${bet.id?.slice(0, 8)} ${hoursSinceEvent.toFixed(1)}h ago`);
-    return { status: 'PENDING', evidence: `Event was ${hoursSinceEvent.toFixed(1)}h ago — too soon to grade` };
+    return earlyReturn({ status: 'PENDING', evidence: `Event was ${hoursSinceEvent.toFixed(1)}h ago — too soon to grade` });
   }
 
   // Sport reclassification already done in gradePropWithAI dispatcher
+  audit.sport_out = bet.sport;
+  audit.reclassified = (audit.sport_in !== bet.sport) ? 1 : 0;
 
   // ── Extract teams from bet for validation later ──
   const sportContext = normalizeSportContext(bet.sport);
@@ -919,7 +959,13 @@ async function gradeSingleBet(bet) {
       query = `${subject} ${sport} final score ${dateStr}`;
     }
     console.log(`[AI Grader] Searching: "${query.slice(0, 80)}"`);
+    audit.search_query = query;
+    const searchStart = Date.now();
     searchResults = await searchWeb(query);
+    audit.search_duration_ms = Date.now() - searchStart;
+    audit.search_hits = searchResults.length;
+    // Determine which backend was used (first one that returned results)
+    audit.search_backend = searchResults.length > 0 ? 'chain' : 'none';
 
     const snippets = [];
     for (const r of searchResults) {
@@ -937,7 +983,7 @@ async function gradeSingleBet(bet) {
   // ── GUARD 4: NO SEARCH RESULTS = PENDING. NEVER call AI without evidence. ──
   if (searchResults.length === 0 || !searchSnippets) {
     console.log(`[AI Grader] NO SEARCH RESULTS for ${bet.id?.slice(0, 8)} — returning PENDING (will not call AI)`);
-    return { status: 'PENDING', evidence: 'No search results available — game may not have completed yet' };
+    return earlyReturn({ status: 'PENDING', evidence: 'No search results available — game may not have completed yet' });
   }
 
   // ── Step 2: Provider chain — ordered by reliability (llama8b proven, qwen demoted) ──
@@ -1014,6 +1060,8 @@ CRITICAL RULES:
       raw = data.choices?.[0]?.message?.content || null;
       if (raw) {
         winnerProvider = provider.name;
+        audit.provider_used = provider.name;
+        audit.raw_response = raw;
         console.log(`[AI Grader] Winner: ${provider.name} | Raw (${raw.length} chars): ${raw.slice(0, 500)}`);
         break;
       }
@@ -1044,7 +1092,8 @@ CRITICAL RULES:
       const s1 = evidenceScore[1], s2 = evidenceScore[2];
       if (!searchSnippets.includes(s1) && !searchSnippets.includes(s2)) {
         console.warn(`[AI Grader] GUARD5 FAIL: ${bet.id?.slice(0, 8)} | score ${s1}-${s2} NOT in snippets`);
-        return { status: 'PENDING', evidence: `HALLUCINATION: AI claimed ${s1}-${s2} but not in search results` };
+        audit.guards_failed.push('G5:score_hallucination');
+        return earlyReturn({ status: 'PENDING', evidence: `HALLUCINATION: AI claimed ${s1}-${s2} but not in search results` });
       }
       guardsLog.push('G5:score_ok');
     }
@@ -1055,7 +1104,8 @@ CRITICAL RULES:
     const softMatch = SOFT_HALLUCINATIONS.find(p => evidenceLower.includes(p));
     if (softMatch) {
       console.warn(`[AI Grader] GUARD6 FAIL: ${bet.id?.slice(0, 8)} | soft hallucination: "${softMatch}"`);
-      return { status: 'PENDING', evidence: `Soft hallucination: AI said "${softMatch}" — refusing to grade without concrete evidence` };
+      audit.guards_failed.push('G6:soft_hallucination');
+      return earlyReturn({ status: 'PENDING', evidence: `Soft hallucination: AI said "${softMatch}" — refusing to grade without concrete evidence` });
     }
     guardsLog.push('G6:no_soft_halluc');
 
@@ -1067,7 +1117,8 @@ CRITICAL RULES:
       const missingTeams = betTeamList.filter(bt => !evidenceTeamList.includes(bt));
       if (missingTeams.length > 0) {
         console.warn(`[AI Grader] GUARD7 FAIL: ${bet.id?.slice(0, 8)} | Missing: [${missingTeams.map(t => t.split(' ').pop()).join(', ')}]`);
-        return { status: 'PENDING', evidence: `Team mismatch: [${missingTeams.map(t => t.split(' ').pop()).join(', ')}] not in evidence` };
+        audit.guards_failed.push('G7:team_mismatch');
+        return earlyReturn({ status: 'PENDING', evidence: `Team mismatch: [${missingTeams.map(t => t.split(' ').pop()).join(', ')}] not in evidence` });
       }
       guardsLog.push('G7:teams_ok');
     }
@@ -1091,7 +1142,8 @@ CRITICAL RULES:
       });
       if (missingPlayers.length > 0) {
         console.warn(`[AI Grader] GUARD8 FAIL: ${bet.id?.slice(0, 8)} | Player(s) [${missingPlayers.join(', ')}] not in evidence`);
-        return { status: 'PENDING', evidence: `Player [${missingPlayers.join(', ')}] not in evidence — likely wrong match` };
+        audit.guards_failed.push('G8:player_mismatch');
+        return earlyReturn({ status: 'PENDING', evidence: `Player [${missingPlayers.join(', ')}] not in evidence — likely wrong match` });
       }
       guardsLog.push('G8:players_ok');
     }
@@ -1107,13 +1159,15 @@ CRITICAL RULES:
         const betSportUpper = (bet.sport || '').toUpperCase();
         if (teamSports.length > 0 && !teamSports.includes(betSportUpper)) {
           console.warn(`[AI Grader] GUARD9 FAIL: ${bet.id?.slice(0, 8)} | Bet sport=${betSportUpper} but evidence has ${teamSports[0]} teams`);
-          return { status: 'PENDING', evidence: `Cross-sport: bet is ${betSportUpper} but evidence references ${teamSports[0]} teams` };
+          audit.guards_failed.push('G9:cross_sport');
+          return earlyReturn({ status: 'PENDING', evidence: `Cross-sport: bet is ${betSportUpper} but evidence references ${teamSports[0]} teams` });
         }
       }
       guardsLog.push('G9:sport_ok');
     }
   }
 
+  audit.guards_passed = guardsLog;
   console.log(`[AI Grader] Guards passed: [${guardsLog.join(', ')}]`);
 
   // Ensure evidence is never empty
@@ -1126,7 +1180,7 @@ CRITICAL RULES:
   }
 
   console.log(`[AI Grader] Bet ID ${bet.id?.slice(0, 8)} | Status: ${parsed.status} | Evidence: ${parsed.evidence?.slice(0, 120)}`);
-  return parsed;
+  return earlyReturn(parsed);
 }
 
 // ── Finalize: DB update + capper bankroll + tailer payouts + ticker ──
