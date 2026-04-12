@@ -42,6 +42,9 @@ Grader logs show 100% HTTP 402 responses from Brave backend. DDG circuit breaker
 ### Snapshot Brave health check is wrong
 /admin snapshot reports "Brave: healthy" while actual calls return HTTP 402. The circuit tracker only detects timeouts, not HTTP error codes. Fix: track 4xx/5xx responses as circuit failures. Show real last-success timestamp per backend.
 
+### Action-keyword validation (P2 follow-up to sport consistency)
+Current validateLegSportConsistency() only checks team keywords. Player-only props with cross-sport action words (e.g. "Matt Turner Goalie Saves" in a LoL parlay, "Emmet Sheehan Pitching" in a Soccer parlay) can evade detection if no team names appear. Add a second validator that checks action/prop keywords per sport: soccer=goalie saves/corners/yellow card, mlb=pitching/strikeouts/RBIs, nba=rebounds/assists/PRAs, nhl=saves/shots on goal, etc. Action-keyword mismatch against declared parlay sport = reject.
+
 ## Ingestion Expansion
 
 ### DubClub email → Discord bridge
