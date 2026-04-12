@@ -915,12 +915,14 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
     return earlyReturn({ status: 'PENDING', evidence: 'No event date — cannot determine if game has occurred' });
   }
 
-  // ── GUARD 2: Parse and validate event date ──
-  const eventDate = bet.event_date || bet.created_at;
+  // ── GUARD 2: Parse and validate event date (with normalization) ──
+  const { normalizeEventDate } = require('./ai');
+  const rawEventDate = bet.event_date || bet.created_at;
+  const eventDate = normalizeEventDate(rawEventDate) || rawEventDate;
   const eventTime = new Date(eventDate).getTime();
   if (!eventTime || isNaN(eventTime)) {
-    console.log(`[AI Grader] SKIP bad date: ${bet.id?.slice(0, 8)} event_date="${eventDate}"`);
-    return earlyReturn({ status: 'PENDING', evidence: `Invalid event date: ${eventDate}` });
+    console.log(`[AI Grader] SKIP bad date: ${bet.id?.slice(0, 8)} event_date="${rawEventDate}" normalized="${eventDate}"`);
+    return earlyReturn({ status: 'PENDING', evidence: `Invalid event date: ${rawEventDate}` });
   }
 
   const eventDay = new Date(eventDate).toISOString().split('T')[0];

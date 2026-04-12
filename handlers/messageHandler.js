@@ -417,7 +417,12 @@ async function processSlipImage(client, imageUrl, capperId, capperName, opts = {
   // ── Stage 4: Save to DB + send to War Room ──
   const saved = [];
   for (const bet of parsed.bets) {
-    // Dedup handled by createBetWithLegs fingerprint — isDuplicateBet removed (false positives)
+    // Anti-hallucination: validate parsed bet against source content
+    const slipValidation = validateParsedBet(bet, ocrText || '');
+    if (!slipValidation.valid) {
+      console.log(`[Parser] SLIP bet REJECTED: ${slipValidation.reason} | desc="${(bet.description || '').slice(0, 80)}"`);
+      continue;
+    }
 
     const record = await createBetWithLegs({
       capper_id: capperId,

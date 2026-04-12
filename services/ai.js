@@ -880,6 +880,11 @@ const SPORT_TEAM_MAP = {
   'NBA': ['lakers','celtics','warriors','heat','knicks','bulls','nets','rockets','spurs','suns','clippers','thunder','nuggets','jazz','blazers','kings','cavaliers','cavs','pistons','pacers','bucks','sixers','hawks','hornets','magic','wizards','raptors','timberwolves','grizzlies','mavs','mavericks','pelicans'],
   'NFL': ['chiefs','rams','eagles','cowboys','giants','jets','patriots','dolphins','bills','steelers','ravens','browns','bengals','colts','titans','jaguars','texans','broncos','raiders','chargers','vikings','packers','bears','lions','seahawks','49ers','saints','falcons','panthers','buccaneers','bucs','commanders'],
   'NHL': ['rangers','islanders','devils','bruins','canadiens','maple leafs','senators','sabres','panthers','lightning','capitals','penguins','flyers','blue jackets','red wings','blackhawks','wild','blues','predators','stars','avalanche','golden knights','kings','ducks','sharks','kraken','oilers','flames','canucks','hurricanes'],
+  'SOCCER': ['manchester united','man utd','manchester city','man city','liverpool','chelsea','arsenal','tottenham','spurs','real madrid','barcelona','atletico madrid','bayern munich','dortmund','psg','paris saint-germain','juventus','inter milan','ac milan','napoli','roma','lafc','la galaxy','inter miami','nycfc','goalie saves','goal scorer','anytime scorer','both teams to score','btts','corners','yellow cards','clean sheet'],
+  'LOL': ['lcs','lec','lck','lpl','worlds','msi','first blood','dragons slain','barons slain','towers destroyed'],
+  'TENNIS': ['australian open','french open','wimbledon','us open','atp','wta','masters 1000','total games','sets won','aces','double faults','break points','straight sets','fantasy score'],
+  'GOLF': ['masters','pga championship','open championship','ryder cup','top 5 finish','top 10 finish','top 20 finish','make the cut','miss the cut','hole-in-one','tournament winner','first-round leader'],
+  'MMA': ['wins by ko','wins by tko','wins by submission','wins by decision','fight goes the distance','round over','round under','ufc'],
 };
 
 function reclassifySport(parsedSport, description) {
@@ -1027,4 +1032,69 @@ function isSportsbookBrand(text) {
   return false;
 }
 
-module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, evaluateTweet, validateParsedBet, validateLegSportConsistency, isSportsbookBrand, reclassifySport, inferLegSport, isInSeason, AMBIGUITY_THRESHOLD };
+// ── Event date normalization — handles sportsbook formats ──────
+function normalizeEventDate(raw) {
+  if (!raw) return null;
+  if (typeof raw !== 'string') raw = String(raw);
+
+  const tryISO = new Date(raw);
+  if (!isNaN(tryISO.getTime()) && raw.length > 8) return tryISO.toISOString();
+
+  const now = new Date();
+  const yr = now.getFullYear();
+  let m;
+
+  // "Thu Apr 2 @ 10:30pm" / "Mon Apr 2 10:30pm"
+  m = raw.match(/(\w{3})\s+(\w{3})\s+(\d{1,2})(?:\s*@\s*|\s+)(\d{1,2}):?(\d{0,2})\s*(am|pm)/i);
+  if (m) {
+    const attempt = new Date(`${m[2]} ${m[3]} ${yr} ${m[4]}:${m[5] || '00'} ${m[6]}`);
+    if (!isNaN(attempt.getTime())) {
+      if (attempt.getTime() < now.getTime() - 7 * 24 * 3600000) attempt.setFullYear(yr + 1);
+      return attempt.toISOString();
+    }
+  }
+
+  // "3:10PM ET" / "3:10 PM ET"
+  m = raw.match(/^(\d{1,2}):(\d{2})\s*(am|pm)/i);
+  if (m) {
+    const attempt = new Date();
+    let h = parseInt(m[1]);
+    if (m[3].toLowerCase() === 'pm' && h !== 12) h += 12;
+    if (m[3].toLowerCase() === 'am' && h === 12) h = 0;
+    attempt.setHours(h, parseInt(m[2]), 0, 0);
+    return attempt.toISOString();
+  }
+
+  // "THU 6:29AM ET"
+  m = raw.match(/(mon|tue|wed|thu|fri|sat|sun)\s+(\d{1,2}):(\d{2})\s*(am|pm)/i);
+  if (m) {
+    const days = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
+    const target = days[m[1].toLowerCase().slice(0, 3)];
+    const attempt = new Date();
+    const diff = (target - attempt.getDay() + 7) % 7;
+    attempt.setDate(attempt.getDate() + (diff === 0 ? 7 : diff));
+    let h = parseInt(m[2]);
+    if (m[4].toLowerCase() === 'pm' && h !== 12) h += 12;
+    if (m[4].toLowerCase() === 'am' && h === 12) h = 0;
+    attempt.setHours(h, parseInt(m[3]), 0, 0);
+    return attempt.toISOString();
+  }
+
+  // "4/12/26 5:00 PM"
+  m = raw.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})\s+(\d{1,2}):(\d{2})\s*(am|pm)/i);
+  if (m) {
+    let year = parseInt(m[3]);
+    if (year < 100) year += 2000;
+    const attempt = new Date(year, parseInt(m[1]) - 1, parseInt(m[2]));
+    let h = parseInt(m[4]);
+    if (m[6].toLowerCase() === 'pm' && h !== 12) h += 12;
+    if (m[6].toLowerCase() === 'am' && h === 12) h = 0;
+    attempt.setHours(h, parseInt(m[5]), 0, 0);
+    return attempt.toISOString();
+  }
+
+  console.warn(`[normalizeEventDate] Could not parse: "${raw}"`);
+  return null;
+}
+
+module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, evaluateTweet, validateParsedBet, validateLegSportConsistency, isSportsbookBrand, reclassifySport, inferLegSport, isInSeason, normalizeEventDate, AMBIGUITY_THRESHOLD };
