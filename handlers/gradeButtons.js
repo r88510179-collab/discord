@@ -2,7 +2,7 @@
 // Handles grade_win, grade_loss, grade_push, grade_void button clicks
 
 const { EmbedBuilder, MessageFlags } = require('discord.js');
-const { gradeBet, getBankroll, updateBankroll, saveDailySnapshot } = require('../services/database');
+const { gradeBet, getBankroll, updateBankroll, saveDailySnapshot, db } = require('../services/database');
 const { calcProfit } = require('../services/grading');
 const { postBetGraded } = require('../services/dashboard');
 const { COLORS, fmtUnits } = require('../utils/embeds');
@@ -55,14 +55,17 @@ async function handleGradeInteraction(interaction) {
     return interaction.reply({ content: `Could not grade bet \`${betId.slice(0, 8)}\`. It may already be graded.`, flags: MessageFlags.Ephemeral });
   }
 
+  // Fetch updated bet for bankroll + embed fields
+  const bet = db.prepare('SELECT * FROM bets WHERE id = ?').get(betId);
+
   // Update bankroll if capper has one
-  if (graded.capper_id) {
-    const bankroll = getBankroll(graded.capper_id);
+  if (bet?.capper_id) {
+    const bankroll = getBankroll(bet.capper_id);
     if (bankroll) {
       const dollarAmount = profitUnits * parseFloat(bankroll.unit_size);
-      updateBankroll(graded.capper_id, dollarAmount);
+      updateBankroll(bet.capper_id, dollarAmount);
     }
-    saveDailySnapshot(graded.capper_id);
+    saveDailySnapshot(bet.capper_id);
   }
 
   // Build graded embed (replace original)
@@ -71,8 +74,8 @@ async function handleGradeInteraction(interaction) {
     .setColor(display.color)
     .addFields(
       { name: 'Capper', value: capperName, inline: true },
-      { name: 'Sport', value: graded.sport || 'Unknown', inline: true },
-      { name: 'Description', value: descField?.value || graded.description || 'N/A' },
+      { name: 'Sport', value: bet?.sport || 'Unknown', inline: true },
+      { name: 'Description', value: descField?.value || bet?.description || 'N/A' },
       { name: 'Odds', value: `${odds > 0 ? '+' : ''}${odds}`, inline: true },
       { name: 'P/L', value: fmtUnits(profitUnits), inline: true },
       { name: 'Graded by', value: interaction.user.displayName, inline: true },

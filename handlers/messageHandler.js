@@ -528,7 +528,7 @@ async function autoGradeBet(client, outcome, subjects) {
   }
 
   console.log(`[AutoGrade] Graded bet ${bet.id.slice(0, 8)} as ${result} (${profitUnits.toFixed(2)}u)`);
-  return graded;
+  return bet;
 }
 
 // Handle celebration messages by parsing them for grading signals
