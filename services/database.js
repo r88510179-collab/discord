@@ -350,6 +350,10 @@ function createBetWithLegs(betData, legs) {
 
 function gradeBetRecord(betId, result, profitUnits, grade, gradeReason) {
   stmts.gradeBet.run(result, profitUnits, grade, gradeReason, betId);
+  // Auto-confirm: if a needs_review bet gets graded with a final result, promote to confirmed
+  if (result && result !== 'pending') {
+    db.prepare("UPDATE bets SET review_status = 'confirmed' WHERE id = ? AND review_status = 'needs_review'").run(betId);
+  }
   return stmts.getBet.get(betId);
 }
 
@@ -387,10 +391,9 @@ function getCapperStats(capperId) {
     GROUP BY c.id
   `).get(ACTIVE_SEASON, capperId);
 
-  // Sanity cap: ROI over 500% is almost certainly a data bug
+  // Log abnormal ROI but display real value (no cap)
   if (row && Math.abs(row.roi_pct) > 500) {
-    console.warn(`[ROI Alert] Abnormal ROI detected for capper ${row.display_name}: ${row.roi_pct}% (${row.wins}W-${row.losses}L, ${row.total_profit_units}u)`);
-    row.roi_pct = Math.min(Math.max(row.roi_pct, -500), 500);
+    console.warn(`[ROI Alert] Abnormal ROI for ${row.display_name}: ${row.roi_pct}% (${row.wins}W-${row.losses}L, ${row.total_profit_units}u)`);
   }
 
   return row || null;
@@ -425,11 +428,10 @@ function getLeaderboard(sortBy = 'total_profit_units', limit = 10) {
     LIMIT ?
   `).all(ACTIVE_SEASON, limit);
 
-  // Sanity cap all rows
+  // Log abnormal ROI but display real value (no cap)
   for (const row of rows) {
     if (Math.abs(row.roi_pct) > 500) {
       console.warn(`[ROI Alert] Abnormal ROI: ${row.display_name} ${row.roi_pct}% (${row.wins}W-${row.losses}L)`);
-      row.roi_pct = Math.min(Math.max(row.roi_pct, -500), 500);
     }
   }
   return rows;

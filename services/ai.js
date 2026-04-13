@@ -814,6 +814,26 @@ function evaluateTweet(text) {
 
   console.log(`[evaluateTweet] Called | len=${text.length} | "${text.slice(0, 80)}..."`);
 
+  // ── STEP 0: Junk/promo pattern rejection (no AI cost) ──
+  const JUNK_PATTERNS = [
+    /\d+\s+PASSES?\s+LEFT/i,              // "5 PASSES LEFT" — subscription sales
+    /\bcard\s+break\b/i,                   // Whatnot card break streams
+    /premium\s+social\s+sportsbook/i,      // LockedIn promo template
+    /\bonyx\s+odds\b/i,                    // Onyx Odds promo
+    /\btwo\s+independent\s+picks\b/i,      // vague placeholder
+    /MISSING LEGS|hid the picks/i,         // AI placeholder text
+  ];
+  if (JUNK_PATTERNS.some(p => p.test(text))) {
+    console.log(`[evaluateTweet] JUNK REJECTED: "${text.slice(0, 60)}..."`);
+    return 'reject_recap';
+  }
+  // Reject tweets that are >50% URL by character count
+  const urlChars = (text.match(/https?:\/\/\S+/g) || []).join('').length;
+  if (text.length > 10 && urlChars / text.length > 0.5) {
+    console.log(`[evaluateTweet] URL-HEAVY REJECTED: ${Math.round(urlChars / text.length * 100)}% URLs`);
+    return 'reject_recap';
+  }
+
   const SETTLED_MARKERS = /✅|❌|⚪|✔|✓|☑/;
 
   // Celebration headers that indicate this is a recap of settled bets

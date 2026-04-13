@@ -512,7 +512,7 @@ async function gradeFromCelebration(client, capperId, outcome, subjects) {
 
   // Find oldest pending bet from this capper that matches any subject
   const pendingBets = db.prepare(
-    "SELECT * FROM bets WHERE capper_id = ? AND result = 'pending' AND review_status = 'confirmed' ORDER BY created_at ASC",
+    "SELECT * FROM bets WHERE capper_id = ? AND result = 'pending' AND review_status IN ('confirmed', 'needs_review') ORDER BY created_at ASC",
   ).all(capperId);
 
   if (pendingBets.length === 0) return null;
@@ -521,6 +521,8 @@ async function gradeFromCelebration(client, capperId, outcome, subjects) {
   if (!result) return null;
 
   for (const bet of pendingBets) {
+    // Defensive: skip if somehow already graded between query and now
+    if (bet.result && bet.result !== 'pending') continue;
     const desc = (bet.description || '').toLowerCase();
 
     for (const subject of subjects) {
@@ -534,6 +536,12 @@ async function gradeFromCelebration(client, capperId, outcome, subjects) {
       if (match) {
         const profitUnits = calcProfit(bet.odds || -110, bet.units || 1, result);
         await gradeBet(bet.id, result, profitUnits, result === 'win' ? 'B' : 'D', `Auto-graded from capper celebration: ${subject}`);
+
+        // Auto-confirm if was needs_review
+        if (bet.review_status === 'needs_review') {
+          db.prepare("UPDATE bets SET review_status = 'confirmed' WHERE id = ?").run(bet.id);
+          console.log(`[ContextGrade] Auto-confirmed needs_review bet ${bet.id?.slice(0, 8)} on grading`);
+        }
 
         if (bet.capper_id) {
           const bankroll = getBankroll(bet.capper_id);
@@ -1206,6 +1214,11 @@ CRITICAL RULES:
 
 // ── Finalize: DB update + capper bankroll + tailer payouts + ticker ──
 async function finalizeBetGrading(client, bet, status, evidence) {
+  // Idempotency guard: don't re-grade already-graded bets
+  if (bet.result && bet.result !== 'pending' && bet.result !== 'PENDING') {
+    console.log(`[Grader] SKIP already-graded bet ${bet.id?.slice(0, 8)} (current=${bet.result}, attempted=${status})`);
+    return { bet, result: bet.result, profitUnits: bet.profit_units || 0, grade: { grade: bet.grade || '?', reason: 'Already graded — duplicate skipped' } };
+  }
   const resultLower = status.toLowerCase();
   const profitUnits = (resultLower === 'void') ? 0 : calcProfit(bet.odds || -110, bet.units || 1, resultLower);
 
