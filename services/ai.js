@@ -52,6 +52,14 @@ const PROVIDERS = {
     format: 'openai',
     supportsImages: true,
   },
+  ollama: {
+    get url() { return `${process.env.OLLAMA_URL}/v1/chat/completions`; },
+    get model() { return process.env.OLLAMA_MODEL || 'llama3.2:3b'; },
+    keyEnv: 'OLLAMA_URL',
+    format: 'openai',
+    supportsImages: false,
+    isOllama: true,
+  },
 };
 
 // Get available providers (ones that have API keys set)
@@ -69,7 +77,7 @@ function getProviders(needsImages = false) {
       }
       return true;
     })
-    .map(([name, p]) => ({ name, ...p, key: process.env[p.keyEnv] }));
+    .map(([name, p]) => ({ name, ...p, key: p.isOllama ? 'ollama' : process.env[p.keyEnv] }));
 }
 
 // Rate limiting per provider
@@ -117,14 +125,19 @@ async function callOpenAI(provider, prompt, system, imageBase64, mediaType) {
     bodyPayload.response_format = { type: 'json_object' };
   }
 
-  // 15s timeout — if provider hangs, abort and fall through to next in waterfall
+  // Timeout: 25s for Ollama (CPU inference), 15s for cloud providers
+  const timeoutMs = provider.isOllama ? 25000 : 15000;
+  const headers = {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${provider.key}`,
+  };
+  if (provider.isOllama && process.env.OLLAMA_PROXY_SECRET) {
+    headers['x-ollama-secret'] = process.env.OLLAMA_PROXY_SECRET;
+  }
   const res = await fetch(provider.url, {
     method: 'POST',
-    signal: AbortSignal.timeout(15000),
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${provider.key}`,
-    },
+    signal: AbortSignal.timeout(timeoutMs),
+    headers,
     body: JSON.stringify(bodyPayload),
   });
   if (!res.ok) {

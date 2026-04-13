@@ -1017,6 +1017,9 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
   if (process.env.MISTRAL_API_KEY) {
     providers.push({ name: 'mistral', url: 'https://api.mistral.ai/v1/chat/completions', key: process.env.MISTRAL_API_KEY, model: 'mistral-small-latest' });
   }
+  if (process.env.OLLAMA_URL) {
+    providers.push({ name: 'ollama-llama3.2-3b', url: `${process.env.OLLAMA_URL}/v1/chat/completions`, key: 'ollama', model: process.env.OLLAMA_MODEL || 'llama3.2:3b', isOllama: true });
+  }
 
   if (providers.length === 0) return earlyReturn({ status: 'PENDING', evidence: 'No AI providers configured' });
 
@@ -1044,10 +1047,15 @@ CRITICAL RULES:
   for (const provider of providers) {
     try {
       console.log(`[AI Grader] Trying ${provider.name} (${provider.model})...`);
+      const gradeTimeoutMs = provider.isOllama ? 25000 : 20000;
+      const gradeHeaders = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${provider.key}` };
+      if (provider.isOllama && process.env.OLLAMA_PROXY_SECRET) {
+        gradeHeaders['x-ollama-secret'] = process.env.OLLAMA_PROXY_SECRET;
+      }
       const res = await fetch(provider.url, {
         method: 'POST',
-        signal: AbortSignal.timeout(20000),
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${provider.key}` },
+        signal: AbortSignal.timeout(gradeTimeoutMs),
+        headers: gradeHeaders,
         body: JSON.stringify({
           model: provider.model,
           messages: [{ role: 'user', content: prompt }],
