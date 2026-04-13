@@ -503,8 +503,9 @@ async function autoGradeBet(client, outcome, subjects) {
     profitUnits = -units;
   }
 
-  // Grade the bet
-  const graded = gradeBetRecord(bet.id, result, profitUnits, null, `Auto-graded from capper graphic`);
+  // Grade the bet (capper graphic = trusted path, auto-confirm)
+  const gradeResult = gradeBetRecord(bet.id, result, profitUnits, null, `Auto-graded from capper graphic`, true);
+  if (!gradeResult.graded) return null;
 
   // Update bankroll
   const bankroll = getBankroll(bet.capper_id);

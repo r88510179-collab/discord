@@ -196,7 +196,10 @@ module.exports = {
     const profitUnits = calcProfit(pendingBet.odds || -110, pendingBet.units || 1, result);
     const aiGrade = await gradeBetAI(pendingBet, result);
 
-    await gradeBet(pendingBet.id, result, profitUnits, aiGrade.grade, aiGrade.reason);
+    const gradeResult = gradeBet(pendingBet.id, result, profitUnits, aiGrade.grade, aiGrade.reason, true); // manual = trusted
+    if (!gradeResult.graded) {
+      return interaction.editReply('⚠️ This bet was already graded by another process.');
+    }
 
     // Update bankroll
     const bankroll = await getBankroll(capper.id);

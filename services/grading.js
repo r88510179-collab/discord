@@ -484,7 +484,8 @@ async function runAutoGrade(client) {
     if (gradedBets.some(g => g.bet.id === bet.id)) continue;
 
     const profitUnits = calcProfit(bet.odds || -110, bet.units || 1, 'loss');
-    await gradeBet(bet.id, 'loss', profitUnits, 'F', `Auto-swept: pending >${SWEEP_DAYS} days with no score/confirmation`);
+    const sweepResult = gradeBet(bet.id, 'loss', profitUnits, 'F', `Auto-swept: pending >${SWEEP_DAYS} days with no score/confirmation`, true);
+    if (!sweepResult.graded) continue;
 
     if (bet.capper_id) {
       const bankroll = getBankroll(bet.capper_id);
@@ -535,12 +536,13 @@ async function gradeFromCelebration(client, capperId, outcome, subjects) {
 
       if (match) {
         const profitUnits = calcProfit(bet.odds || -110, bet.units || 1, result);
-        await gradeBet(bet.id, result, profitUnits, result === 'win' ? 'B' : 'D', `Auto-graded from capper celebration: ${subject}`);
+        const gradeResult = gradeBet(bet.id, result, profitUnits, result === 'win' ? 'B' : 'D',
+          `Auto-graded from capper celebration: ${subject}`,
+          true); // allowAutoConfirm = true (recap is trusted)
 
-        // Auto-confirm if was needs_review
-        if (bet.review_status === 'needs_review') {
-          db.prepare("UPDATE bets SET review_status = 'confirmed' WHERE id = ?").run(bet.id);
-          console.log(`[ContextGrade] Auto-confirmed needs_review bet ${bet.id?.slice(0, 8)} on grading`);
+        if (!gradeResult.graded) {
+          console.log(`[ContextGrade] SKIP race-lost bet ${bet.id?.slice(0, 8)} (${gradeResult.reason})`);
+          continue;
         }
 
         if (bet.capper_id) {
@@ -1214,17 +1216,20 @@ CRITICAL RULES:
 
 // ── Finalize: DB update + capper bankroll + tailer payouts + ticker ──
 async function finalizeBetGrading(client, bet, status, evidence) {
-  // Idempotency guard: don't re-grade already-graded bets
-  if (bet.result && bet.result !== 'pending' && bet.result !== 'PENDING') {
-    console.log(`[Grader] SKIP already-graded bet ${bet.id?.slice(0, 8)} (current=${bet.result}, attempted=${status})`);
-    return { bet, result: bet.result, profitUnits: bet.profit_units || 0, grade: { grade: bet.grade || '?', reason: 'Already graded — duplicate skipped' } };
-  }
   const resultLower = status.toLowerCase();
   const profitUnits = (resultLower === 'void') ? 0 : calcProfit(bet.odds || -110, bet.units || 1, resultLower);
 
-  await gradeBet(bet.id, resultLower, profitUnits,
+  // ATOMIC GRADE: returns {graded: false} if another worker already finalized
+  // AI grader is NOT a trusted path — does NOT auto-confirm needs_review bets
+  const gradeResult = gradeBet(bet.id, resultLower, profitUnits,
     resultLower === 'win' ? 'B' : resultLower === 'void' ? 'N/A' : 'D',
-    `AI Grader: ${evidence || 'Graded via Gemini Search'}`);
+    `AI Grader: ${evidence || 'Graded via search'}`,
+    false);
+
+  if (!gradeResult.graded) {
+    console.log(`[Grader] SKIP race-lost bet ${bet.id?.slice(0, 8)} (${gradeResult.reason})`);
+    return { bet, result: bet.result || 'unknown', profitUnits: 0, grade: { grade: '?', reason: 'Already graded — race lost' } };
+  }
 
   // Update capper bankroll
   if (bet.capper_id && resultLower !== 'void') {

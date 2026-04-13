@@ -348,13 +348,23 @@ function createBetWithLegs(betData, legs) {
   return bet;
 }
 
-function gradeBetRecord(betId, result, profitUnits, grade, gradeReason) {
-  stmts.gradeBet.run(result, profitUnits, grade, gradeReason, betId);
-  // Auto-confirm: if a needs_review bet gets graded with a final result, promote to confirmed
-  if (result && result !== 'pending') {
+function gradeBetRecord(betId, result, profitUnits, grade, gradeReason, allowAutoConfirm = false) {
+  // Atomic conditional update — only updates bets still in 'pending'
+  const info = db.prepare(`
+    UPDATE bets SET result = ?, profit_units = ?, grade = ?, grade_reason = ?, graded_at = datetime('now')
+    WHERE id = ? AND (result = 'pending' OR result IS NULL)
+  `).run(result, profitUnits, grade, gradeReason, betId);
+
+  if (info.changes === 0) {
+    return { graded: false, reason: 'already_graded' };
+  }
+
+  // Auto-confirm only on opt-in (trusted paths like capper celebration, manual grade)
+  if (allowAutoConfirm && result && result !== 'pending') {
     db.prepare("UPDATE bets SET review_status = 'confirmed' WHERE id = ? AND review_status = 'needs_review'").run(betId);
   }
-  return stmts.getBet.get(betId);
+
+  return { graded: true };
 }
 
 function getPendingBets() {

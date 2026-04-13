@@ -49,9 +49,9 @@ async function handleGradeInteraction(interaction) {
   // Grade in database
   const display = RESULT_MAP[result];
   const gradeReason = `Manually graded by ${interaction.user.displayName} via button`;
-  const graded = gradeBet(betId, result, profitUnits, display.label, gradeReason);
+  const gradeResult = gradeBet(betId, result, profitUnits, display.label, gradeReason, true); // manual = trusted
 
-  if (!graded) {
+  if (!gradeResult.graded) {
     return interaction.reply({ content: `Could not grade bet \`${betId.slice(0, 8)}\`. It may already be graded.`, flags: MessageFlags.Ephemeral });
   }
 
