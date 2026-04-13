@@ -805,10 +805,15 @@ async function gradePropWithAI(bet) {
   const betType = (bet.bet_type || '').toLowerCase();
   if (betType === 'parlay' || betType === 'sgp') {
     const legs = db.prepare('SELECT * FROM parlay_legs WHERE bet_id = ? ORDER BY created_at').all(bet.id);
-    if (legs.length > 1) {
-      console.log(`[AI Grader] Parlay detected: ${legs.length} legs for bet ${bet.id?.slice(0, 8)}`);
-      return await gradeParlay(bet, legs);
+
+    // Guard: parlay missing leg data — prevent hallucinated single-grader results
+    if (!legs || legs.length <= 1) {
+      console.log(`[Grader] SKIP parlay missing legs: ${bet.id?.slice(0, 8)} (bet_type=${betType}, legs=${legs?.length || 0})`);
+      return { status: 'PENDING', evidence: `Parlay has ${legs?.length || 0} recorded legs — cannot grade without leg data. Manual review required.` };
     }
+
+    console.log(`[AI Grader] Parlay detected: ${legs.length} legs for bet ${bet.id?.slice(0, 8)}`);
+    return await gradeParlay(bet, legs);
   }
   return await gradeSingleBet(bet);
 }
@@ -1009,12 +1014,10 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
     return earlyReturn({ status: 'PENDING', evidence: 'No search results available — game may not have completed yet' });
   }
 
-  // ── Step 2: Provider chain — ordered by reliability (llama8b proven, qwen demoted) ──
+  // ── Step 2: Provider chain — ordered by hallucination rate (lowest first) ──
+  // cerebras 3.5% → groq-qwen unknown → openrouter unknown → groq-kimi 7.6% →
+  // mistral unknown → ollama local → groq-llama8b 39% (last resort)
   const providers = [];
-  if (process.env.GROQ_API_KEY) {
-    providers.push({ name: 'groq-llama8b', url: 'https://api.groq.com/openai/v1/chat/completions', key: process.env.GROQ_API_KEY, model: 'llama-3.1-8b-instant' });
-    providers.push({ name: 'groq-kimi', url: 'https://api.groq.com/openai/v1/chat/completions', key: process.env.GROQ_API_KEY, model: 'moonshotai/kimi-k2-instruct' });
-  }
   if (process.env.CEREBRAS_API_KEY) {
     providers.push({ name: 'cerebras', url: 'https://api.cerebras.ai/v1/chat/completions', key: process.env.CEREBRAS_API_KEY, model: 'llama3.1-8b' });
   }
@@ -1024,11 +1027,17 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
   if (process.env.OPENROUTER_API_KEY) {
     providers.push({ name: 'openrouter', url: 'https://openrouter.ai/api/v1/chat/completions', key: process.env.OPENROUTER_API_KEY, model: 'meta-llama/llama-3.3-70b-instruct:free' });
   }
+  if (process.env.GROQ_API_KEY) {
+    providers.push({ name: 'groq-kimi', url: 'https://api.groq.com/openai/v1/chat/completions', key: process.env.GROQ_API_KEY, model: 'moonshotai/kimi-k2-instruct' });
+  }
   if (process.env.MISTRAL_API_KEY) {
     providers.push({ name: 'mistral', url: 'https://api.mistral.ai/v1/chat/completions', key: process.env.MISTRAL_API_KEY, model: 'mistral-small-latest' });
   }
   if (process.env.OLLAMA_URL) {
     providers.push({ name: 'ollama-llama3.2-3b', url: `${process.env.OLLAMA_URL}/v1/chat/completions`, key: 'ollama', model: process.env.OLLAMA_MODEL || 'llama3.2:3b', isOllama: true });
+  }
+  if (process.env.GROQ_API_KEY) {
+    providers.push({ name: 'groq-llama8b', url: 'https://api.groq.com/openai/v1/chat/completions', key: process.env.GROQ_API_KEY, model: 'llama-3.1-8b-instant' });
   }
 
   if (providers.length === 0) return earlyReturn({ status: 'PENDING', evidence: 'No AI providers configured' });
