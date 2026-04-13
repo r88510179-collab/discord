@@ -111,6 +111,22 @@ try {
   if (!betCols5.includes('grading_source_url')) db.exec('ALTER TABLE bets ADD COLUMN grading_source_url TEXT');
 } catch (_) {}
 
+// ── Additive: capper calibration columns ────────────────────
+try {
+  const capCols = db.prepare("PRAGMA table_info('cappers')").all().map(c => c.name);
+  if (!capCols.includes('calibrated_unit_size')) {
+    db.exec("ALTER TABLE cappers ADD COLUMN calibrated_unit_size REAL");
+    db.exec("ALTER TABLE cappers ADD COLUMN calibration_median REAL");
+    db.exec("ALTER TABLE cappers ADD COLUMN calibration_p25 REAL");
+    db.exec("ALTER TABLE cappers ADD COLUMN calibration_p75 REAL");
+    db.exec("ALTER TABLE cappers ADD COLUMN calibration_stddev REAL");
+    db.exec("ALTER TABLE cappers ADD COLUMN calibration_cv REAL");
+    db.exec("ALTER TABLE cappers ADD COLUMN calibration_sample_size INTEGER DEFAULT 0");
+    db.exec("ALTER TABLE cappers ADD COLUMN calibration_status TEXT DEFAULT 'insufficient_data'");
+    db.exec("ALTER TABLE cappers ADD COLUMN calibrated_at TEXT");
+  }
+} catch (_) {}
+
 // ── Active season helper ────────────────────────────────────
 const ACTIVE_SEASON = process.env.ACTIVE_SEASON || 'Beta';
 

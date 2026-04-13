@@ -55,6 +55,9 @@ module.exports = {
       sub.setName('snapshot')
         .setDescription('Full bot state snapshot for fast triage'))
     .addSubcommand(sub =>
+      sub.setName('calibrate')
+        .setDescription('Run unit calibration on all cappers'))
+    .addSubcommand(sub =>
       sub.setName('grade-audit')
         .setDescription('Show grading audit trail for a bet')
         .addStringOption(opt => opt.setName('bet_id').setDescription('Bet ID (first 8 chars ok)').setRequired(true))),
@@ -286,6 +289,38 @@ module.exports = {
       return interaction.editReply(lines.join('\n'));
     }
 
+    // ── Calibrate: run unit calibration on all cappers ──
+    if (sub === 'calibrate') {
+      if (process.env.OWNER_ID && interaction.user.id !== process.env.OWNER_ID) return interaction.reply({ content: '🚫', ephemeral: true });
+      await interaction.deferReply({ ephemeral: true });
+      const { calibrateAllCappers } = require('../services/calibration');
+      const results = calibrateAllCappers();
+
+      const calibrated = results.details.filter(r => r.status === 'calibrated');
+      const volatile = results.details.filter(r => r.status === 'volatile');
+      const insufficient = results.details.filter(r => r.status === 'insufficient_data');
+
+      let response = `**Calibration Complete**\n\n`;
+      response += `✅ Calibrated: ${results.calibrated}\n`;
+      response += `⚠️ Volatile (high variance): ${results.volatile}\n`;
+      response += `❓ Insufficient data: ${results.insufficient}\n\n`;
+
+      if (calibrated.length > 0) {
+        response += `**Calibrated cappers:**\n`;
+        for (const r of calibrated) {
+          response += `• ${r.name}: 1u ≈ $${r.unitSize.toFixed(2)} (${r.sample_size} samples, CV ${r.cv.toFixed(2)})\n`;
+        }
+      }
+      if (volatile.length > 0) {
+        response += `\n**Volatile cappers (won't calibrate):**\n`;
+        for (const r of volatile) {
+          response += `• ${r.name}: CV ${r.cv.toFixed(2)} (${r.sample_size} samples)\n`;
+        }
+      }
+
+      return interaction.editReply(response.slice(0, 1900));
+    }
+
     // ── Grade audit: show grading trail for a bet ──
     if (sub === 'grade-audit') {
       if (process.env.OWNER_ID && interaction.user.id !== process.env.OWNER_ID) return interaction.reply({ content: '🚫', ephemeral: true });
@@ -419,8 +454,21 @@ module.exports = {
       // ── 8. Cappers ──
       const allCappers = getLeaderboard('roi_pct', 50);
       const qualified = allCappers.filter(c => (c.wins + c.losses) >= 1);
-      const top3 = qualified.slice(0, 3).map(c => `${c.display_name} ${c.wins}W-${c.losses}L ${c.roi_pct >= 0 ? '+' : ''}${c.roi_pct}%`).join('\n') || 'none';
-      const bot3 = [...qualified].sort((a, b) => a.roi_pct - b.roi_pct).slice(0, 3).map(c => `${c.display_name} ${c.wins}W-${c.losses}L ${c.roi_pct >= 0 ? '+' : ''}${c.roi_pct}%`).join('\n') || 'none';
+      // Fetch calibration data for annotation
+      const calData = {};
+      try {
+        const calRows = db.prepare('SELECT id, calibration_status, calibrated_unit_size FROM cappers WHERE calibration_status IS NOT NULL').all();
+        for (const r of calRows) calData[r.id] = r;
+      } catch (_) {}
+      const calBadge = (c) => {
+        const cal = calData[c.id];
+        if (!cal) return '';
+        if (cal.calibration_status === 'calibrated') return ` (1u≈$${cal.calibrated_unit_size?.toFixed(0) || '?'})`;
+        if (cal.calibration_status === 'volatile') return ' (1u≈variable)';
+        return '';
+      };
+      const top3 = qualified.slice(0, 3).map(c => `${c.display_name} ${c.wins}W-${c.losses}L ${c.roi_pct >= 0 ? '+' : ''}${c.roi_pct}%${calBadge(c)}`).join('\n') || 'none';
+      const bot3 = [...qualified].sort((a, b) => a.roi_pct - b.roi_pct).slice(0, 3).map(c => `${c.display_name} ${c.wins}W-${c.losses}L ${c.roi_pct >= 0 ? '+' : ''}${c.roi_pct}%${calBadge(c)}`).join('\n') || 'none';
 
       // ── 9. Active handles ──
       const handles = process._getActiveHandles?.()?.length || '?';
