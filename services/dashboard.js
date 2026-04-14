@@ -1,5 +1,5 @@
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
-const { getBetProps, getCapperStats, getLeaderboard, getPendingBets, getSentimentCounts, db, getSetting, setSetting } = require('./database');
+const { getBetProps, getCapperStats, getLeaderboard, getAllPendingBets, getSentimentCounts, db, getSetting, setSetting } = require('./database');
 
 function formatPropsLine(props) {
   if (!props || props.length === 0) return null;
@@ -198,7 +198,7 @@ function buildScoreboardData() {
       }).join('\n')
     : '_No cappers with 3+ graded bets yet_';
 
-  const pending = getPendingBets();
+  const pending = getAllPendingBets();
   const descCounts = {};
   for (const bet of pending) {
     const key = (bet.description || '').toLowerCase().slice(0, 40).trim();

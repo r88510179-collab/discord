@@ -8,10 +8,11 @@ const {
   EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
   ModalBuilder, TextInputBuilder, TextInputStyle,
 } = require('discord.js');
-const { approveBet, rejectBet, updateBetFields, getBetLegs, getBetProps, getCapperStats, getBankroll, db, createBet, updateBankroll, upsertUserBet, getSentimentCounts } = require('./database');
+const { approveBet, rejectBet, updateBetFields, getBetLegs, getBetProps, getCapperStats, getBankroll, db, createBet, updateBankroll, upsertUserBet, getSentimentCounts, gradeBet: gradeBetRecord } = require('./database');
 const { postNewPick } = require('./dashboard');
 const { shopLine, formatLineShop, extractTeamFromDescription } = require('./odds');
 const { calculateOptimalBet } = require('./bankroll');
+const { canFinalizeBet } = require('./grading');
 const { COLORS } = require('../utils/embeds');
 
 /**
@@ -527,11 +528,19 @@ async function handleWarRoomInteraction(interaction) {
         });
         if (saved && !saved._deduped) {
           const profitUnits = 0.91; // -110 odds → ~0.91u profit
-          db.prepare("UPDATE bets SET result = 'win', profit_units = ? WHERE id = ?").run(profitUnits, saved.id);
-          const bankroll = getBankroll(capperId);
-          if (bankroll) {
-            const unitSize = bankroll.unit_size || 25;
-            updateBankroll(capperId, profitUnits * unitSize);
+          // P0 gateway — log decision; straight single bet, expected ok=true
+          const gate = canFinalizeBet({ db, betId: saved.id, requestedResult: 'win', source: 'warroom_logwin' });
+          if (!gate.ok) {
+            await interaction.reply({ content: `❌ Could not log win (\`${gate.reason}\`).`, ephemeral: true });
+            return true;
+          }
+          const gr = gradeBetRecord(saved.id, 'win', profitUnits, null, 'Logged as untracked win via War Room', true);
+          if (gr.graded) {
+            const bankroll = getBankroll(capperId);
+            if (bankroll) {
+              const unitSize = bankroll.unit_size || 25;
+              updateBankroll(capperId, profitUnits * unitSize);
+            }
           }
         }
         const loggedEmbed = EmbedBuilder.from(embed)

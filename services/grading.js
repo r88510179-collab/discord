@@ -3,6 +3,102 @@ const { gradeBetAI } = require('./ai');
 
 const delay = ms => new Promise(res => setTimeout(res, ms));
 
+// ═══════════════════════════════════════════════════════════════════
+// P0 grading state machine — gateway + claim + backoff helpers.
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * canFinalizeBet — policy gateway invoked before every terminal grade write.
+ * Returns { ok, reason?, betType?, pendingLegs? }. Throws only on DB/IO errors.
+ * Callers must log and short-circuit on !ok; denials must NOT increment
+ * grading_attempts. For reason='pending_legs', callers should reschedule via
+ * scheduleRecheckAfterDenial() so we don't spin.
+ *
+ * Shadow mode: env CAN_FINALIZE_ENFORCE=false logs OK/DENIED decisions but
+ * always returns ok:true so no behavior change while we observe traffic.
+ */
+function canFinalizeBet({ db: conn, betId, requestedResult, source, force = false }) {
+  const _db = conn || db;
+  const bet = _db.prepare('SELECT id, bet_type, result FROM bets WHERE id = ?').get(betId);
+  if (!bet) return _gateLog(false, 'bet_not_found', source, betId, { force });
+
+  if (bet.result && bet.result !== 'pending') {
+    return _gateLog(false, 'already_finalized', source, betId, { betType: bet.bet_type, force });
+  }
+
+  const bt = (bet.bet_type || '').toLowerCase();
+  if (bt === 'parlay' || bt === 'sgp') {
+    const row = _db.prepare(
+      "SELECT COUNT(*) AS c FROM parlay_legs WHERE bet_id = ? AND result = 'pending'"
+    ).get(betId);
+    const pendingLegs = row?.c || 0;
+    if (pendingLegs > 0) {
+      return _gateLog(false, 'pending_legs', source, betId, { betType: bet.bet_type, pendingLegs, force });
+    }
+  }
+
+  return _gateLog(true, 'ok', source, betId, { betType: bet.bet_type });
+}
+
+function _gateLog(ok, reason, source, betId, extras = {}) {
+  const enforce = (process.env.CAN_FINALIZE_ENFORCE || 'true') !== 'false';
+  const short = (betId || '').slice(0, 8);
+  if (ok) {
+    console.log(`[CanFinalize:OK source=${source} bet=${short}]`);
+  } else if (extras.force) {
+    console.log(`[CanFinalize:FORCE source=${source} bet=${short} reason=${reason}${extras.pendingLegs ? ` pendingLegs=${extras.pendingLegs}` : ''}]`);
+  } else {
+    console.log(`[CanFinalize:DENIED source=${source} bet=${short} reason=${reason}${extras.pendingLegs ? ` pendingLegs=${extras.pendingLegs}` : ''}${!enforce ? ' (shadow)' : ''}]`);
+  }
+  // Effective ok: true if actually ok, or force-overridden, or shadow mode.
+  const effectiveOk = ok || !!extras.force || !enforce;
+  return { ok: effectiveOk, reason: ok ? undefined : reason, betType: extras.betType, pendingLegs: extras.pendingLegs };
+}
+
+/**
+ * Atomic claim — single conditional UPDATE. If rowcount===1, this worker
+ * owns the bet for 10 minutes. If 0, another worker already claimed it.
+ */
+function claimBetForGrading(betId) {
+  const info = db.prepare(`
+    UPDATE bets SET
+      grading_lock_until = datetime('now', '+10 minutes'),
+      grading_attempts = grading_attempts + 1,
+      grading_last_attempt_at = datetime('now')
+    WHERE id = ?
+      AND result = 'pending'
+      AND grading_state IN ('ready','backoff')
+      AND (grading_lock_until IS NULL OR grading_lock_until < datetime('now'))
+      AND (grading_next_attempt_at IS NULL OR grading_next_attempt_at <= datetime('now'))
+  `).run(betId);
+  return info.changes > 0;
+}
+
+/** Exponential backoff ladder based on cumulative attempt count. */
+function applyBackoff(betId, attempts, reason) {
+  const ladder = ['+15 minutes', '+1 hour', '+4 hours', '+12 hours', '+24 hours'];
+  const offset = ladder[Math.min(Math.max(attempts - 1, 0), ladder.length - 1)];
+  const quarantined = attempts >= 20;
+  db.prepare(`UPDATE bets
+    SET grading_state = ?,
+        grading_next_attempt_at = datetime('now', ?),
+        grading_last_failure_reason = ?,
+        grading_lock_until = NULL
+    WHERE id = ?`).run(quarantined ? 'quarantined' : 'backoff', offset, String(reason).slice(0, 200), betId);
+  if (quarantined) {
+    console.warn(`[AutoGrade:QUARANTINED bet=${(betId || '').slice(0, 8)} attempts=${attempts} reason=${String(reason).slice(0, 80)}]`);
+  }
+}
+
+/** Gateway-denial recheck: do not change state or touch attempts; just requeue. */
+function scheduleRecheckAfterDenial(betId, reason, minutes = 30) {
+  db.prepare(`UPDATE bets
+    SET grading_next_attempt_at = datetime('now', ?),
+        grading_last_failure_reason = ?,
+        grading_lock_until = NULL
+    WHERE id = ?`).run(`+${minutes} minutes`, String(reason).slice(0, 200), betId);
+}
+
 const ODDS_API_BASE = 'https://api.the-odds-api.com/v4';
 const API_KEY = process.env.ODDS_API_KEY;
 
@@ -391,89 +487,102 @@ function determineResult(bet, matchData) {
 }
 
 // ── Main auto-grade cycle ───────────────────────────────────
+// P0: state-machine aware. Atomic claim + exponential backoff + daily cap guard.
+// Removed dead `let retries = 3; while(retries>0)` loop — never decremented,
+// effectively always did a single attempt. Backoff now lives in the state
+// machine (grading_state='backoff' + grading_next_attempt_at ladder).
 async function runAutoGrade(client) {
   if (process.env.AUTOGRADER_DISABLED === 'true') {
     console.log('[AutoGrade] DISABLED via env var — skipping cycle');
     return { graded: 0 };
   }
+
+  // Daily attempt cap (global safety). Uses grading_audit.timestamp (INTEGER ms).
+  // If exceeded, pause WITHOUT auto-recovery — admin must investigate via
+  // /admin grading-unstick or flip AUTOGRADER_DISABLED. Log every cycle while
+  // paused so the condition is visible in logs (not indistinguishable from
+  // a dead cron).
+  const DAILY_CAP = 10_000;
+  try {
+    const r = db.prepare('SELECT COUNT(*) AS c FROM grading_audit WHERE timestamp > (unixepoch() - 86400) * 1000').get();
+    const attempts24h = r?.c || 0;
+    if (attempts24h > DAILY_CAP) {
+      console.warn(`[AutoGrade:PAUSED daily_cap_exceeded attempts_24h=${attempts24h} cap=${DAILY_CAP}] — admin action required (/admin grading-unstick)`);
+      return { graded: 0, paused: true, attempts24h };
+    }
+  } catch (e) {
+    console.error(`[AutoGrade] Daily cap check error (non-fatal): ${e.message}`);
+  }
+
   console.log('[AutoGrade] Starting grading cycle...');
   const pending = await getPendingBets();
   if (pending.length === 0) {
-    console.log('[AutoGrade] No pending bets.');
+    console.log('[AutoGrade] No pending bets in queue (state-machine selector).');
     return { graded: 0 };
   }
-
-  // Group by sport and fetch scores
-  const sportGroups = {};
-  for (const bet of pending) {
-    const sport = bet.sport?.toUpperCase() || 'UNKNOWN';
-    if (!sportGroups[sport]) sportGroups[sport] = [];
-    sportGroups[sport].push(bet);
-  }
+  console.log(`[AutoGrade] ${pending.length} bet(s) eligible this cycle`);
 
   let gradedCount = 0;
   const gradedBets = [];
 
-  // ── Hardened Grading Loop with retry + backoff ──
   for (const bet of pending) {
     const betAgeHours = (Date.now() - new Date(bet.created_at).getTime()) / (1000 * 60 * 60);
-    // Temporarily disabled for queue flush debugging
-    // if (betAgeHours < 4) continue;
-
     console.log(`[AutoGrade] Processing: "${bet.description?.slice(0, 50)}" | ${bet.sport} | Age: ${betAgeHours.toFixed(1)}h`);
 
-    let retries = 3;
-    let aiResult = null;
+    // Atomic claim — if another worker or a concurrent /grade retry-all
+    // already grabbed this bet, skip without touching state.
+    if (!claimBetForGrading(bet.id)) {
+      console.log(`[AutoGrade:SKIP race-lost bet=${bet.id.slice(0, 8)}]`);
+      continue;
+    }
+    const attemptsNow = db.prepare('SELECT grading_attempts FROM bets WHERE id = ?').get(bet.id)?.grading_attempts || 1;
 
+    let aiResult = null;
     let hit429 = false;
-    while (retries > 0) {
-      try {
-        aiResult = await gradePropWithAI(bet);
-        break;
-      } catch (error) {
-        if (error.status === 429 || error.message?.includes('429')) {
-          hit429 = true;
-          console.warn(`[Rate Limit] 429 hit — aborting grading cycle. Will retry next cron.`);
-          break; // Don't retry — abort the entire cycle
-        } else {
-          console.error(`[AutoGrade] Non-retryable error: ${error.message}`);
-          break;
-        }
+    try {
+      aiResult = await gradePropWithAI(bet);
+    } catch (error) {
+      if (error.status === 429 || /429/.test(error.message || '')) {
+        hit429 = true;
+        console.warn(`[Rate Limit] 429 — aborting cycle, will resume next cron`);
+        applyBackoff(bet.id, attemptsNow, 'rate_limit_429');
+      } else {
+        console.error(`[AutoGrade] Non-retryable error: ${error.message}`);
+        applyBackoff(bet.id, attemptsNow, `provider_error:${String(error.message || 'unknown').slice(0, 80)}`);
       }
     }
-
-    // 429 = abort entire cycle to preserve quota
-    if (hit429) {
-      console.log(`[AutoGrade] Cycle aborted after 429. Graded ${gradedCount} bet(s) before hitting limit.`);
-      break;
-    }
+    if (hit429) break;
 
     if (aiResult && ['WIN', 'LOSS', 'PUSH', 'VOID'].includes(aiResult.status)) {
-      // Save grading source URL if provided
-      if (aiResult.source_url && bet.id) {
+      if (aiResult.source_url) {
         try { db.prepare('UPDATE bets SET grading_source_url = ? WHERE id = ?').run(aiResult.source_url, bet.id); } catch (_) {}
       }
       const finalResult = await finalizeBetGrading(client, bet, aiResult.status, aiResult.evidence);
-      if (finalResult) {
+      if (finalResult && finalResult.graded !== false) {
         gradedBets.push(finalResult);
         gradedCount++;
       }
-      await delay(2000); // Discord API spacing
+      // If graded===false, finalizeBetGrading already handled the state
+      // transition (pending_legs → scheduleRecheckAfterDenial; race-lost → skip).
+      await delay(2000);
+    } else if (aiResult && aiResult.status === 'PENDING') {
+      applyBackoff(bet.id, attemptsNow, aiResult.evidence || 'ai_pending');
+    } else if (!aiResult) {
+      // Providers all failed / no response; treat as backoff
+      applyBackoff(bet.id, attemptsNow, 'no_result');
     }
 
-    // Dynamic slow drip: faster when backlog is large, slower when small
     const dripMs = pending.length > 20 ? 10000 : pending.length > 5 ? 20000 : 30000;
     console.log(`[AutoGrade] Drip: ${dripMs / 1000}s (${pending.length} pending)`);
     await delay(dripMs);
   }
 
-  // ── 7-Day Smart Sweeper: only sweep standard bets, props handled by AI Grader ──
+  // ── 7-Day Smart Sweeper ──
   const SWEEP_DAYS = 7;
   const sweepCutoff = SWEEP_DAYS * 24 * 60 * 60 * 1000;
   const expiredBets = pending.filter(bet => {
     const age = Date.now() - new Date(bet.created_at).getTime();
     if (age <= sweepCutoff) return false;
-    // Skip props — AI Grader handles them independently
     const betType = (bet.bet_type || '').toLowerCase();
     const desc = (bet.description || '').toLowerCase();
     if (betType === 'prop' || PROP_KEYWORDS.test(desc)) return false;
@@ -482,6 +591,12 @@ async function runAutoGrade(client) {
 
   for (const bet of expiredBets) {
     if (gradedBets.some(g => g.bet.id === bet.id)) continue;
+
+    const gate = canFinalizeBet({ db, betId: bet.id, requestedResult: 'loss', source: 'sweeper_7d' });
+    if (!gate.ok) {
+      if (gate.reason === 'pending_legs') scheduleRecheckAfterDenial(bet.id, 'sweeper_pending_legs', 30);
+      continue;
+    }
 
     const profitUnits = calcProfit(bet.odds || -110, bet.units || 1, 'loss');
     const sweepResult = gradeBet(bet.id, 'loss', profitUnits, 'F', `Auto-swept: pending >${SWEEP_DAYS} days with no score/confirmation`, true);
@@ -535,6 +650,13 @@ async function gradeFromCelebration(client, capperId, outcome, subjects) {
       const match = words.some(w => w.length >= 3 && desc.includes(w));
 
       if (match) {
+        const gate = canFinalizeBet({ db, betId: bet.id, requestedResult: result, source: 'celebration' });
+        if (!gate.ok) {
+          if (gate.reason === 'pending_legs') {
+            scheduleRecheckAfterDenial(bet.id, `celebration_pending_legs_${gate.pendingLegs}`, 30);
+          }
+          continue;
+        }
         const profitUnits = calcProfit(bet.odds || -110, bet.units || 1, result);
         const gradeResult = gradeBet(bet.id, result, profitUnits, result === 'win' ? 'B' : 'D',
           `Auto-graded from capper celebration: ${subject}`,
@@ -1228,6 +1350,17 @@ async function finalizeBetGrading(client, bet, status, evidence) {
   const resultLower = status.toLowerCase();
   const profitUnits = (resultLower === 'void') ? 0 : calcProfit(bet.odds || -110, bet.units || 1, resultLower);
 
+  // P0 gateway — log policy decision, short-circuit on denial. Note the
+  // hardened gradeBetRecord will also refuse if pending_legs is present, so
+  // even if this gate is bypassed somewhere, the write itself is safe.
+  const gate = canFinalizeBet({ db, betId: bet.id, requestedResult: resultLower, source: 'ai' });
+  if (!gate.ok) {
+    if (gate.reason === 'pending_legs') {
+      scheduleRecheckAfterDenial(bet.id, `ai_pending_legs_${gate.pendingLegs}`, 30);
+    }
+    return { bet, result: bet.result || 'unknown', profitUnits: 0, grade: { grade: '?', reason: `gate:${gate.reason}` }, graded: false };
+  }
+
   // ATOMIC GRADE: returns {graded: false} if another worker already finalized
   // AI grader is NOT a trusted path — does NOT auto-confirm needs_review bets
   const gradeResult = gradeBet(bet.id, resultLower, profitUnits,
@@ -1237,7 +1370,7 @@ async function finalizeBetGrading(client, bet, status, evidence) {
 
   if (!gradeResult.graded) {
     console.log(`[Grader] SKIP race-lost bet ${bet.id?.slice(0, 8)} (${gradeResult.reason})`);
-    return { bet, result: bet.result || 'unknown', profitUnits: 0, grade: { grade: '?', reason: 'Already graded — race lost' } };
+    return { bet, result: bet.result || 'unknown', profitUnits: 0, grade: { grade: '?', reason: 'Already graded — race lost' }, graded: false };
   }
 
   // Update capper bankroll
@@ -1311,6 +1444,10 @@ module.exports = {
   finalizeBetGrading,
   gradePropWithAI,
   gradeBet: finalizeBetGrading,
+  canFinalizeBet,
+  claimBetForGrading,
+  applyBackoff,
+  scheduleRecheckAfterDenial,
   calcProfit,
   delay,
   findMentionedTeams,
@@ -1319,6 +1456,5 @@ module.exports = {
   determineResult,
   aggregateParlayResults,
   matchBetToGame,
-  findMentionedTeams,
   canonicalizeTeamName,
 };

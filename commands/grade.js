@@ -1,10 +1,10 @@
 const { SlashCommandBuilder, EmbedBuilder, MessageFlags } = require('discord.js');
 const { runAutoGrade } = require('../services/grading');
-const { getOrCreateCapper, getRecentBets, gradeBet, updateBankroll, getBankroll, saveDailySnapshot } = require('../services/database');
+const { getOrCreateCapper, getRecentBets, gradeBet, updateBankroll, getBankroll, saveDailySnapshot, db } = require('../services/database');
 const { gradeBetAI } = require('../services/ai');
 const { gradedEmbed, COLORS, fmtUnits } = require('../utils/embeds');
 const { postBetGraded } = require('../services/dashboard');
-const { calcProfit } = require('../services/grading');
+const { calcProfit, canFinalizeBet } = require('../services/grading');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -191,6 +191,15 @@ module.exports = {
 
     if (!pendingBet) {
       return interaction.editReply('⏳ No pending bets to grade.');
+    }
+
+    // P0 gateway — surface policy denial before AI call + write
+    const gate = canFinalizeBet({ db, betId: pendingBet.id, requestedResult: result, source: 'manual_slash' });
+    if (!gate.ok) {
+      const msg = gate.reason === 'pending_legs'
+        ? `❌ Cannot grade — **${gate.pendingLegs}** parlay leg(s) still pending. Grade the legs first.`
+        : `❌ Cannot grade (\`${gate.reason}\`).`;
+      return interaction.editReply(msg);
     }
 
     const profitUnits = calcProfit(pendingBet.odds || -110, pendingBet.units || 1, result);

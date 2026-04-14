@@ -223,31 +223,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
 //   #submit-picks              1488236820700594197
 //   #admin-log                 1486825605105192960
 // ───────────────────────────────────────────────────────────────
-const TRACKED_CHANNELS_ENV = process.env.TRACKED_CHANNELS
-  ? process.env.TRACKED_CHANNELS.split(',').map(id => id.trim()).filter(Boolean)
-  : [];
-
-const HUMAN_CHANNELS_ENV = process.env.HUMAN_SUBMISSION_CHANNEL_IDS
-  ? process.env.HUMAN_SUBMISSION_CHANNEL_IDS.split(',').map(id => id.trim()).filter(Boolean)
-  : [];
-
-const AUTHORIZED_CHANNELS = [
-  ...new Set([
-    '1488236820700594197', // #submit-picks
-    '1486825605105192960', // #admin-log
-    ...(process.env.SUBMIT_CHANNEL_ID ? [process.env.SUBMIT_CHANNEL_ID] : []),
-    ...TRACKED_CHANNELS_ENV,
-    ...HUMAN_CHANNELS_ENV,
-  ]),
-];
-
-// ── Blacklist: channels the bot should never process ──
+// ── IGNORED_CHANNELS fast-path blacklist (also consulted by globalPipelineGuard) ──
 const IGNORED_CHANNELS = process.env.IGNORED_CHANNELS
   ? process.env.IGNORED_CHANNELS.split(',').map(id => id.trim()).filter(Boolean)
   : [];
 
-console.log(`[Config] Listening on ${AUTHORIZED_CHANNELS.length} channel(s):`, AUTHORIZED_CHANNELS);
 if (IGNORED_CHANNELS.length > 0) console.log(`[Config] Ignoring ${IGNORED_CHANNELS.length} channel(s):`, IGNORED_CHANNELS);
+// NOTE: Channel/author authorization (PICKS/HUMAN/SUBMIT/SLIP_FEED/ALLOWED_WEBHOOK_IDS)
+// is now enforced solely by globalPipelineGuard() in handlers/messageHandler.js.
+// Removed bot.js AUTHORIZED_CHANNELS/author.bot drop per P0 Fix 2.
 
 // ── Human submission channel diagnostics ──
 const _humanChIds = (process.env.HUMAN_SUBMISSION_CHANNEL_IDS || '').split(',').filter(Boolean);
@@ -262,11 +246,12 @@ client.on(Events.MessageCreate, async (message) => {
   // 0. IMMEDIATELY ignore blacklisted channels (saves resources)
   if (IGNORED_CHANNELS.includes(message.channel.id)) return;
 
-  // 1. IMMEDIATELY ignore bots (prevents infinite loops)
-  if (message.author.bot) return;
+  // P0 Fix 2: no bot.author drop here. globalPipelineGuard handles bot/webhook
+  // policy via ALLOWED_WEBHOOK_IDS. The `!`-prefix inline commands below
+  // are explicitly gated on !message.author.bot so bots can't trigger them.
 
   // 📊 X-RAY COMMAND: Type "!status" in any channel to see pending bets
-  if (message.content.toLowerCase() === '!status') {
+  if (!message.author.bot && message.content.toLowerCase() === '!status') {
     try {
       const { db } = require('./services/database');
       const pendingCount = db.prepare("SELECT COUNT(*) as count FROM bets WHERE result = 'pending'").get().count;
@@ -293,7 +278,7 @@ client.on(Events.MessageCreate, async (message) => {
   }
 
   // 🏆 LEADERBOARD COMMAND
-  if (message.content.toLowerCase() === '!leaderboard') {
+  if (!message.author.bot && message.content.toLowerCase() === '!leaderboard') {
     try {
       const { db } = require('./services/database');
       const topCappers = db.prepare(`
@@ -338,7 +323,7 @@ client.on(Events.MessageCreate, async (message) => {
   }
 
   // 🗄️ FULL PENDING LIST
-  if (message.content.toLowerCase() === '!pending') {
+  if (!message.author.bot && message.content.toLowerCase() === '!pending') {
     try {
       const { db: database } = require('./services/database');
       const { AttachmentBuilder } = require('discord.js');
@@ -377,7 +362,7 @@ client.on(Events.MessageCreate, async (message) => {
   }
 
   // 👤 MYSTATS COMMAND
-  if (message.content.toLowerCase() === '!mystats') {
+  if (!message.author.bot && message.content.toLowerCase() === '!mystats') {
     try {
       const { db: database } = require('./services/database');
       const userId = message.author.id;
@@ -421,7 +406,7 @@ client.on(Events.MessageCreate, async (message) => {
   }
 
   // 💵 BANKROLL COMMAND
-  if (message.content.toLowerCase() === '!bankroll') {
+  if (!message.author.bot && message.content.toLowerCase() === '!bankroll') {
     try {
       const { ensureUserExists, getUserBankroll } = require('./services/database');
       ensureUserExists(message.author.id, message.author.username);
@@ -441,7 +426,7 @@ client.on(Events.MessageCreate, async (message) => {
   }
 
   // 🏆 RESET SEASON (Admin only)
-  if (message.content.toLowerCase() === '!reset_season') {
+  if (!message.author.bot && message.content.toLowerCase() === '!reset_season') {
     if (!message.member.permissions.has('Administrator')) return;
     try {
       const { db: database } = require('./services/database');
@@ -472,18 +457,14 @@ client.on(Events.MessageCreate, async (message) => {
     }
   }
 
-  // 2. IMMEDIATELY ignore unauthorized channels
-  if (!AUTHORIZED_CHANNELS.includes(message.channel.id)) return;
-
-  // 3. ONLY THEN do we log and process
-  console.log(`[DEAF-TEST] Seen message in #${message.channel.name}`);
-  console.log(`[DEAF-TEST] Snapshots: ${message.messageSnapshots?.size || 0}`);
-
+  // Channel/author authorization lives inside handleMessage → globalPipelineGuard.
   handleMessage(message);
 });
 
 // ── Handle message updates (FxTwitter embed unfurling) ──────
 client.on(Events.MessageUpdate, (oldMsg, newMsg) => {
+  // IGNORED fast-path parity with MessageCreate.
+  if (newMsg.channel?.id && IGNORED_CHANNELS.includes(newMsg.channel.id)) return;
   // Only care if embeds were added (0 → N) — this is Discord unfurling a link
   if (oldMsg.embeds.length === 0 && newMsg.embeds.length > 0) {
     if (newMsg.content && /hardrock\.bet/i.test(newMsg.content)) {

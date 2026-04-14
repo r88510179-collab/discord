@@ -1,5 +1,5 @@
 const { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionFlagsBits, MessageFlags } = require('discord.js');
-const { getPendingBets } = require('../services/database');
+const { getAllPendingBets } = require('../services/database');
 const { COLORS, fmtOdds } = require('../utils/embeds');
 
 module.exports = {
@@ -11,7 +11,7 @@ module.exports = {
   async execute(interaction) {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-    const pending = getPendingBets();
+    const pending = getAllPendingBets();
     if (pending.length === 0) {
       return interaction.editReply('No pending bets to grade.');
     }

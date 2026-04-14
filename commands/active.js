@@ -1,5 +1,5 @@
 const { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, ButtonStyle, PermissionFlagsBits, MessageFlags } = require('discord.js');
-const { getPendingBets, deleteBetById } = require('../services/database');
+const { getAllPendingBets, deleteBetById } = require('../services/database');
 const { COLORS } = require('../utils/embeds');
 
 module.exports = {
@@ -11,7 +11,7 @@ module.exports = {
   async execute(interaction) {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-    const pending = getPendingBets();
+    const pending = getAllPendingBets();
     if (pending.length === 0) {
       return interaction.editReply({ content: 'No active pending bets.' });
     }
@@ -86,7 +86,7 @@ module.exports = {
         }
 
         // Refresh the list
-        const remaining = getPendingBets();
+        const remaining = getAllPendingBets();
         const refreshLines = remaining.slice(0, 25).map((b, idx) => {
           const d = (b.description || 'Unknown').slice(0, 50);
           const o = b.odds != null ? (b.odds > 0 ? `+${b.odds}` : `${b.odds}`) : 'N/A';

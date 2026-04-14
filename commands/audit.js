@@ -1,5 +1,5 @@
 const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } = require('discord.js');
-const { getPendingBets, getAuditRecent, getAuditByHandle, getAuditRejected, getAuditStats, searchAudit } = require('../services/database');
+const { getAllPendingBets, getAuditRecent, getAuditByHandle, getAuditRejected, getAuditStats, searchAudit } = require('../services/database');
 const { shopLine, extractTeamFromDescription } = require('../services/odds');
 const { americanToDecimal, impliedProbability } = require('../services/bankroll');
 const { COLORS } = require('../utils/embeds');
@@ -219,7 +219,7 @@ module.exports = {
     if (sub === 'clv') {
       await interaction.deferReply({ ephemeral: true });
 
-      const pending = getPendingBets().filter(b => b.review_status === 'confirmed');
+      const pending = getAllPendingBets().filter(b => b.review_status === 'confirmed');
       if (pending.length === 0) return interaction.editReply({ content: 'No confirmed pending bets to audit.' });
 
       const results = [];

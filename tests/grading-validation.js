@@ -74,9 +74,9 @@ function runAlreadyGradedCheck() {
       source: 'manual',
     });
 
-    assert.ok(database.getPendingBets().some((b) => b.id === bet.id), 'new bet should be pending');
+    assert.ok(database.getAllPendingBets().some((b) => b.id === bet.id), 'new bet should be pending');
     database.gradeBet(bet.id, 'win', 0.83, 'B', 'ok');
-    assert.ok(!database.getPendingBets().some((b) => b.id === bet.id), 'graded bets should not be re-queued for grading');
+    assert.ok(!database.getAllPendingBets().some((b) => b.id === bet.id), 'graded bets should not be re-queued for grading');
   } finally {
     database.db.close();
     if (fs.existsSync(dbFile)) fs.unlinkSync(dbFile);

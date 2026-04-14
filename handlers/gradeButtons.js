@@ -3,7 +3,7 @@
 
 const { EmbedBuilder, MessageFlags } = require('discord.js');
 const { gradeBet, getBankroll, updateBankroll, saveDailySnapshot, db } = require('../services/database');
-const { calcProfit } = require('../services/grading');
+const { calcProfit, canFinalizeBet } = require('../services/grading');
 const { postBetGraded } = require('../services/dashboard');
 const { COLORS, fmtUnits } = require('../utils/embeds');
 
@@ -46,6 +46,15 @@ async function handleGradeInteraction(interaction) {
   // Calculate profit
   const profitUnits = calcProfit(odds, units, result);
 
+  // P0 gateway — surface policy denial to the admin user directly
+  const gate = canFinalizeBet({ db, betId, requestedResult: result, source: 'manual_button' });
+  if (!gate.ok) {
+    const msg = gate.reason === 'pending_legs'
+      ? `❌ Cannot grade — **${gate.pendingLegs}** parlay leg(s) still pending. Grade the legs first.`
+      : `❌ Cannot grade (\`${gate.reason}\`).`;
+    return interaction.reply({ content: msg, flags: MessageFlags.Ephemeral });
+  }
+
   // Grade in database
   const display = RESULT_MAP[result];
   const gradeReason = `Manually graded by ${interaction.user.displayName} via button`;
@@ -85,9 +94,12 @@ async function handleGradeInteraction(interaction) {
   // Remove buttons + update embed
   await interaction.update({ embeds: [gradedEmbed], components: [] });
 
-  // Post to dashboard
+  // Post to dashboard — re-fetch so we send the already-graded row (result,
+  // graded_at, profit_units populated). Falls back to in-memory `bet` if the
+  // re-fetch fails.
   try {
-    await postBetGraded(interaction.client, graded, result, profitUnits, { grade: display.label, reason: gradeReason });
+    const gradedBet = db.prepare('SELECT * FROM bets WHERE id = ?').get(betId) || bet;
+    await postBetGraded(interaction.client, gradedBet, result, profitUnits, { grade: display.label, reason: gradeReason });
   } catch (err) {
     console.error('[GradeBtn] Dashboard post error:', err.message);
   }

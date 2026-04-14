@@ -48,13 +48,13 @@ function run() {
     source: 'manual',
   });
 
-  assert.ok(database.getPendingBets().some((b) => b.id === pendingBet.id), 'new bet should start pending');
+  assert.ok(database.getAllPendingBets().some((b) => b.id === pendingBet.id), 'new bet should start pending');
 
   database.gradeBet(pendingBet.id, 'win', 0.8, 'B', 'Covered in regulation');
-  assert.ok(!database.getPendingBets().some((b) => b.id === pendingBet.id), 'graded bet should be excluded from pending list');
+  assert.ok(!database.getAllPendingBets().some((b) => b.id === pendingBet.id), 'graded bet should be excluded from pending list');
 
   // Simulate repeat grading cycle query.
-  const pendingAfterRepeat = database.getPendingBets().filter((b) => b.id === pendingBet.id);
+  const pendingAfterRepeat = database.getAllPendingBets().filter((b) => b.id === pendingBet.id);
   assert.strictEqual(pendingAfterRepeat.length, 0, 'repeat grading passes should not re-queue graded bets');
 
   console.log('Reliability validation passed.');

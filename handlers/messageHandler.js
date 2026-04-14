@@ -1,10 +1,10 @@
 const { parseBetText, parseBetSlipImage, evaluateTweet, validateParsedBet } = require('../services/ai');
-const { getOrCreateCapper, createBetWithLegs, isAuditMode, findPendingBetBySubject, gradeBet: gradeBetRecord, getBankroll, updateBankroll } = require('../services/database');
+const { getOrCreateCapper, createBetWithLegs, isAuditMode, findPendingBetBySubject, gradeBet: gradeBetRecord, getBankroll, updateBankroll, db } = require('../services/database');
 const { betEmbed } = require('../utils/embeds');
 const { postPickTracked } = require('../services/dashboard');
 const { sendStagingEmbed } = require('../services/warRoom');
 const { extractTextFromImage } = require('../services/ocr');
-const { gradeFromCelebration, finalizeBetGrading, calcProfit } = require('../services/grading');
+const { gradeFromCelebration, finalizeBetGrading, calcProfit, canFinalizeBet, scheduleRecheckAfterDenial } = require('../services/grading');
 
 // ── Dedup guard: prevent double-processing of the same Discord message ──
 const processedMessages = new Set();
@@ -206,32 +206,71 @@ function getPicksChannels() {
 }
 
 /**
- * globalPipelineGuard — centralized gatekeeper for channel authorization.
- * Single source of truth: if this returns authorized:false, nothing runs.
+ * globalPipelineGuard — unified channel + author authorization (P0 Fix 2).
+ * Single source of truth for both MessageCreate and MessageUpdate paths.
+ * Returns { authorized, reason, context }.
+ *
+ * Order of checks:
+ *   1. IGNORED_CHANNELS → false/ignored_channel
+ *   2. Self (our own bot user) → true/self (handleMessage should early-return
+ *      on reason='self' to prevent ingestion loops)
+ *   3. Any bot/webhook author → allowlist check against ALLOWED_WEBHOOK_IDS
+ *      (webhook.id first, author.id second) → whitelisted_bot OR
+ *      bot_not_whitelisted
+ *   4. Human → channel must be in SLIP_FEED / PICKS / SUBMIT / HUMAN_SUBMISSION
+ *   5. Otherwise false/channel_not_allowed
  */
 function globalPipelineGuard(message) {
-  const picksWhitelist = (process.env.PICKS_CHANNEL_IDS || '')
-    .split(',').map(id => id.trim()).filter(Boolean);
+  const chId = message.channel?.id;
+  const ignored = (process.env.IGNORED_CHANNELS || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (ignored.includes(chId)) {
+    return { authorized: false, reason: 'ignored_channel', context: _guardCtx(message) };
+  }
 
-  const isSlipChannel = message.channel.id === process.env.SLIP_FEED_CHANNEL_ID;
-  const isPicksChannel = picksWhitelist.includes(message.channel.id);
-  const isSubmitChannel = process.env.SUBMIT_CHANNEL_ID && message.channel.id === process.env.SUBMIT_CHANNEL_ID;
-  const humanChannelIds = (process.env.HUMAN_SUBMISSION_CHANNEL_IDS || '').split(',').map(id => id.trim()).filter(Boolean);
-  const isHumanChannel = humanChannelIds.includes(message.channel.id);
-  const isBot = message.author?.bot || !!message.webhookId;
-  const authorized = isSlipChannel || isPicksChannel || isSubmitChannel || isHumanChannel;
+  const selfId = message.client?.user?.id;
+  if (selfId && message.author?.id === selfId) {
+    return { authorized: true, reason: 'self', context: _guardCtx(message, { isSelf: true, isBot: true }) };
+  }
+
+  const isBot = !!message.author?.bot || !!message.webhookId;
+  if (isBot) {
+    const allow = (process.env.ALLOWED_WEBHOOK_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+    const hit = (message.webhookId && allow.includes(message.webhookId))
+      || (message.author?.id && allow.includes(message.author.id));
+    if (!hit) {
+      console.log(`[Guard:DENIED reason=bot_not_whitelisted channel=#${message.channel?.name} author=${message.author?.tag} webhookId=${message.webhookId || 'none'}]`);
+      return { authorized: false, reason: 'bot_not_whitelisted', context: _guardCtx(message, { isBot: true }) };
+    }
+    // Bot allowed — but still needs to be in an authorized channel below.
+  }
+
+  const picks = (process.env.PICKS_CHANNEL_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+  const humans = (process.env.HUMAN_SUBMISSION_CHANNEL_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+  const slip = process.env.SLIP_FEED_CHANNEL_ID;
+  const submit = process.env.SUBMIT_CHANNEL_ID;
+  const isSlip = chId === slip;
+  const isPicks = picks.includes(chId);
+  const isSubmit = !!submit && chId === submit;
+  const isHuman = humans.includes(chId);
+
+  if (!(isSlip || isPicks || isSubmit || isHuman)) {
+    console.log(`[Guard:DENIED reason=channel_not_allowed channel=${chId} author=${message.author?.tag}]`);
+    return { authorized: false, reason: 'channel_not_allowed', context: _guardCtx(message, { isBot }) };
+  }
 
   return {
-    authorized,
-    context: {
-      isPicksChannel,
-      isSlipChannel,
-      isHumanChannel,
-      isBot,
-      channelName: message.channel?.name || 'unknown',
-      channelId: message.channel.id,
-      author: message.author?.tag || 'Webhook',
-    },
+    authorized: true,
+    reason: isBot ? 'whitelisted_bot' : 'human_ok',
+    context: _guardCtx(message, { isBot, isPicksChannel: isPicks, isSlipChannel: isSlip, isHumanChannel: isHuman }),
+  };
+}
+
+function _guardCtx(m, extra = {}) {
+  return {
+    channelId: m.channel?.id,
+    channelName: m.channel?.name || 'unknown',
+    author: m.author?.tag || 'Webhook',
+    ...extra,
   };
 }
 
@@ -503,6 +542,15 @@ async function autoGradeBet(client, outcome, subjects) {
     profitUnits = -units;
   }
 
+  // P0 gateway — log decision, short-circuit on denial, do not increment attempts
+  const gate = canFinalizeBet({ db, betId: bet.id, requestedResult: result, source: 'graphic_auto' });
+  if (!gate.ok) {
+    if (gate.reason === 'pending_legs') {
+      scheduleRecheckAfterDenial(bet.id, `graphic_auto_pending_legs_${gate.pendingLegs}`, 30);
+    }
+    return null;
+  }
+
   // Grade the bet (capper graphic = trusted path, auto-confirm)
   const gradeResult = gradeBetRecord(bet.id, result, profitUnits, null, `Auto-graded from capper graphic`, true);
   if (!gradeResult.graded) return null;
@@ -605,8 +653,8 @@ async function handleMessage(message, { isUpdate = false } = {}) {
   processedMessages.add(dedupKey);
   setTimeout(() => processedMessages.delete(dedupKey), 10_000);
 
-  // ═══ GUARD 0: Global Pipeline Guard — single source of truth ═══
-  const { authorized, context } = globalPipelineGuard(message);
+  // ═══ GUARD 0: Global Pipeline Guard — single source of truth (P0 Fix 2) ═══
+  const { authorized, reason, context } = globalPipelineGuard(message);
   if (!authorized) {
     // Strict Mode: alert admin (rate-limited per channel to prevent spam)
     if (process.env.STRICT_MODE === 'true' && process.env.ADMIN_LOG_CHANNEL_ID) {
@@ -616,7 +664,7 @@ async function handleMessage(message, { isUpdate = false } = {}) {
         const adminCh = message.client.channels.cache.get(process.env.ADMIN_LOG_CHANNEL_ID);
         if (adminCh) {
           adminCh.send(
-            `⚠️ **Unauthorized Pipeline Trigger**\n**Channel:** #${context.channelName} (\`${context.channelId}\`)\n**User:** ${context.author}\n*Action: Message discarded before AI/OCR.*`
+            `⚠️ **Unauthorized Pipeline Trigger**\n**Channel:** #${context.channelName} (\`${context.channelId}\`)\n**User:** ${context.author}\n**Reason:** \`${reason}\`\n*Action: Message discarded before AI/OCR.*`
           ).catch(() => {});
         }
       }
@@ -624,8 +672,9 @@ async function handleMessage(message, { isUpdate = false } = {}) {
     return; // HARD STOP
   }
 
-  // ═══ GUARD 1: Never process our own messages (prevents infinite loop) ═══
-  if (message.author.id === message.client.user.id) return;
+  // ═══ Self-loop prevention: guard authorizes the bot's own messages for
+  //     sanity (e.g. edits), but we never re-ingest them. ═══
+  if (reason === 'self') return;
 
   // ═══ Combine message content + embed text (FixTwitter puts tweet text in embeds) ═══
   const rawContent = message.content || '';
@@ -642,23 +691,18 @@ async function handleMessage(message, { isUpdate = false } = {}) {
   const slipHandled = await handleSlipFeed(message);
   if (slipHandled) return;
 
-  const picksChannels = getPicksChannels();
-  const humanSubChannels = (process.env.HUMAN_SUBMISSION_CHANNEL_IDS || '').split(',').map(id => id.trim()).filter(Boolean);
-  const isInPicksOrHuman = picksChannels.includes(message.channel.id) || humanSubChannels.includes(message.channel.id);
-  if (picksChannels.length === 0 && humanSubChannels.length === 0) return;
-  if (!isInPicksOrHuman) return;
-
   // ═══ GUARD 2: Resolve channel mapping (for capper attribution) ═══
+  // Channel authorization already handled by globalPipelineGuard above.
   const twitterMap = getTwitterCapperMap();
   const capperMap = getCapperChannelMap();
   const isTwitterFeed = !!twitterMap[message.channel.id];
   const isMappedCapper = !!capperMap[message.channel.id];
   const isMappedChannel = isTwitterFeed || isMappedCapper;
-  // NOTE: We allow ALL bots/webhooks (TweetShift, custom webhooks) in picks channels.
-  // The only bot we skip is ourselves to prevent infinite loops.
+  // Bot/webhook authorization — handled by globalPipelineGuard via
+  // ALLOWED_WEBHOOK_IDS. Only unauthorized bots reach here (impossible
+  // because guard would have dropped them); self-skip via reason='self'.
 
-  // ═══ GUARD 3: Skip our own replies (prevent loops) ═══
-  if (message.author.id === message.client.user.id) return;
+  // ═══ GUARD 3: Skip replies in mapped capper channels (prevents tail-loops) ═══
   if (isMappedChannel && message.reference) return;
 
   // ═══ GUARD 4: Skip old messages (only process last 2 min) ═══
@@ -947,7 +991,13 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
       return;
     }
     console.error('[MessageHandler] Error:', err.message);
-    await reportErrorToAdmin(err, context, message.client);
+    // P0 incidental fix: `context` was undefined here; build it locally.
+    await reportErrorToAdmin(err, {
+      channelName: message.channel?.name,
+      channelId: message.channel?.id,
+      author: message.author?.tag || 'unknown',
+      where: `processAggregatedMessage channel=#${message.channel?.name || '?'} msg=${message.id}`,
+    }, message.client);
   }
 }
 

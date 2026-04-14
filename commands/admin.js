@@ -1,5 +1,5 @@
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
-const { getSetting, setSetting, purgeTable } = require('../services/database');
+const { getSetting, setSetting, purgeTable, revertBetToPending } = require('../services/database');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -60,7 +60,11 @@ module.exports = {
     .addSubcommand(sub =>
       sub.setName('grade-audit')
         .setDescription('Show grading audit trail for a bet')
-        .addStringOption(opt => opt.setName('bet_id').setDescription('Bet ID (first 8 chars ok)').setRequired(true))),
+        .addStringOption(opt => opt.setName('bet_id').setDescription('Bet ID (first 8 chars ok)').setRequired(true)))
+    .addSubcommand(sub =>
+      sub.setName('grading-unstick')
+        .setDescription('Clear stale grading locks + list quarantined bets + optionally force a bet back to ready')
+        .addStringOption(opt => opt.setName('force_ready_bet_id').setDescription('Optional: bet id (prefix ok) to reset to ready').setRequired(false))),
 
   async execute(interaction) {
     const sub = interaction.options.getSubcommand();
@@ -131,19 +135,9 @@ module.exports = {
         return interaction.editReply('✅ No suspect grades found in the last 24h.');
       }
 
-      // Revert all suspect grades
-      const revert = db.prepare(`
-        UPDATE bets
-        SET result = 'pending',
-            profit_units = NULL,
-            graded_at = NULL,
-            grade = NULL,
-            grade_reason = 'REVERTED: hallucinated grade — no verified search results'
-        WHERE id = ?
-      `);
-
+      // Revert all suspect grades via centralized helper (also resets state machine)
       const txn = db.transaction(() => {
-        for (const bet of suspect) revert.run(bet.id);
+        for (const bet of suspect) revertBetToPending(bet.id, 'REVERTED: hallucinated grade — no verified search results');
       });
       txn();
 
@@ -232,11 +226,33 @@ module.exports = {
         return interaction.editReply('✅ No hallucinated bets found in last 3 days.');
       }
 
-      const revert = db.prepare("UPDATE bets SET result = 'void', review_status = 'rejected', grade_reason = 'REVERTED: AI hallucination — offseason or placeholder' WHERE id = ?");
-      db.transaction(() => { for (const b of offseason) revert.run(b.id); })();
+      // P0: refactor through gradeBetRecord + gateway (force=true for admin override).
+      // Note: per plan decision 1, this now only voids bets that are still 'pending'
+      // — the hardened gradeBetRecord WHERE-clause blocks already-terminal rows by
+      // design. For already-graded hallucinations, use /admin revert-by-id.
+      const { gradeBet: gradeBetRecord } = require('../services/database');
+      const { canFinalizeBet } = require('../services/grading');
+      let reverted = 0;
+      const skipped = [];
+      db.transaction(() => {
+        for (const b of offseason) {
+          const gate = canFinalizeBet({ db, betId: b.id, requestedResult: 'void', source: 'admin_revert_halluc', force: true });
+          if (!gate.ok) { skipped.push(b); continue; }
+          const gr = gradeBetRecord(b.id, 'void', 0, null, 'REVERTED: AI hallucination — offseason or placeholder', true);
+          if (gr.graded) {
+            db.prepare("UPDATE bets SET review_status = 'rejected' WHERE id = ?").run(b.id);
+            reverted++;
+          } else {
+            skipped.push(b);
+          }
+        }
+      })();
 
       const lines = offseason.map(b => `• \`${b.id.slice(0, 8)}\` ${b.sport} — ${b.description?.slice(0, 50)}`);
-      return interaction.editReply(`🔄 Reverted **${offseason.length}** hallucinated bet(s):\n${lines.join('\n').slice(0, 1900)}`);
+      const skippedNote = skipped.length > 0
+        ? `\n⚠️ **${skipped.length}** already-terminal bet(s) skipped — use \`/admin revert-by-id\` to handle those.`
+        : '';
+      return interaction.editReply(`🔄 Reverted **${reverted}** hallucinated bet(s):\n${lines.join('\n').slice(0, 1800)}${skippedNote}`);
     }
 
     // ── Revert single bet by ID ──
@@ -246,8 +262,9 @@ module.exports = {
       const { db } = require('../services/database');
       const bet = db.prepare('SELECT id, description, result FROM bets WHERE id LIKE ?').get(`${partialId}%`);
       if (!bet) return interaction.reply({ content: `❌ No bet found matching \`${partialId}\``, ephemeral: true });
-      db.prepare("UPDATE bets SET result = 'pending', profit_units = NULL, graded_at = NULL, grade = NULL, grade_reason = 'REVERTED manually via /admin revert-by-id' WHERE id = ?").run(bet.id);
-      return interaction.reply({ content: `🔄 Reverted \`${bet.id.slice(0, 8)}\` (was ${bet.result}) → PENDING\n${bet.description?.slice(0, 80)}`, ephemeral: true });
+      // Resets state machine fields too — bet becomes eligible for next grade cycle.
+      revertBetToPending(bet.id, 'REVERTED manually via /admin revert-by-id');
+      return interaction.reply({ content: `🔄 Reverted \`${bet.id.slice(0, 8)}\` (was ${bet.result}) → PENDING (state=ready, attempts=0)\n${bet.description?.slice(0, 80)}`, ephemeral: true });
     }
 
     // ── Toggle Twitter poller ──
@@ -361,13 +378,63 @@ module.exports = {
       return interaction.editReply({ embeds: [embed] });
     }
 
+    // ── Grading unstick: clear stale locks, list quarantined, optional force-ready ──
+    if (sub === 'grading-unstick') {
+      if (process.env.OWNER_ID && interaction.user.id !== process.env.OWNER_ID) return interaction.reply({ content: '🚫', ephemeral: true });
+      await interaction.deferReply({ ephemeral: true });
+      const { db } = require('../services/database');
+      const forceId = interaction.options.getString('force_ready_bet_id');
+
+      // 1. Clear stale locks (>1h old) on ready/backoff bets
+      const cleared = db.prepare(`
+        UPDATE bets SET grading_lock_until = NULL
+        WHERE grading_lock_until IS NOT NULL
+          AND grading_lock_until < datetime('now','-1 hour')
+          AND grading_state IN ('ready','backoff')
+      `).run();
+
+      // 2. 24h attempt count (for daily cap visibility)
+      const attempts24h = db.prepare('SELECT COUNT(*) AS c FROM grading_audit WHERE timestamp > (unixepoch() - 86400) * 1000').get()?.c || 0;
+      const DAILY_CAP = 10_000;
+      const capStatus = attempts24h > DAILY_CAP ? `🚨 PAUSED (exceeded cap ${DAILY_CAP})` : `▶️ Active (${attempts24h}/${DAILY_CAP})`;
+
+      // 3. List quarantined bets
+      const quarantined = db.prepare(`
+        SELECT id, description, grading_attempts, grading_last_failure_reason
+        FROM bets WHERE grading_state = 'quarantined'
+        ORDER BY grading_last_attempt_at DESC LIMIT 25
+      `).all();
+
+      // 4. Optional force-ready
+      let forceMsg = '';
+      if (forceId) {
+        const target = db.prepare('SELECT id, result FROM bets WHERE id LIKE ?').get(`${forceId}%`);
+        if (!target) forceMsg = `\n⚠️ No bet matches \`${forceId}\``;
+        else if (target.result && target.result !== 'pending') forceMsg = `\n⚠️ \`${target.id.slice(0, 8)}\` is already ${target.result} — use revert-by-id first`;
+        else {
+          db.prepare(`UPDATE bets SET grading_state='ready', grading_attempts=0,
+                        grading_lock_until=NULL, grading_next_attempt_at=NULL,
+                        grading_last_failure_reason=NULL WHERE id = ?`).run(target.id);
+          forceMsg = `\n🔄 Forced \`${target.id.slice(0, 8)}\` → state=ready, attempts=0`;
+        }
+      }
+
+      const qList = quarantined.length === 0
+        ? '_none_'
+        : quarantined.map(b => `• \`${b.id.slice(0, 8)}\` att=${b.grading_attempts} ${(b.description || '').slice(0, 50)} — ${(b.grading_last_failure_reason || '').slice(0, 60)}`).join('\n');
+
+      return interaction.editReply({
+        content: `🔧 **Grading Unstick**\n**Cap status:** ${capStatus}\n**Cleared stale locks:** ${cleared.changes}\n**Quarantined (${quarantined.length}):**\n${qList}${forceMsg}`.slice(0, 1900)
+      });
+    }
+
     // ── Snapshot: full bot state for fast triage ──
     if (sub === 'snapshot') {
       if (process.env.OWNER_ID && interaction.user.id !== process.env.OWNER_ID) return interaction.reply({ content: '🚫', ephemeral: true });
       await interaction.deferReply({ ephemeral: true });
 
       const { EmbedBuilder } = require('discord.js');
-      const { db, getLeaderboard, getPendingBets, getTrackedTwitterAccounts } = require('../services/database');
+      const { db, getLeaderboard, getTrackedTwitterAccounts } = require('../services/database');
       const v8 = require('v8');
       const mem = process.memoryUsage();
       const hs = v8.getHeapStatistics();

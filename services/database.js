@@ -127,6 +127,48 @@ try {
   }
 } catch (_) {}
 
+// ── Migration 016: grading state machine backfill (best-effort, 30s budget) ──
+// Schema changes ran inside runMigrations transaction; this is the companion
+// idempotent backfill, gated by a settings row so it runs once. If the budget
+// is exceeded, we abort cleanly — the state machine converges naturally as
+// bets retry (grading_state='ready' defaults still apply to new inserts).
+(function backfillGradingState() {
+  try {
+    // Settings table may not exist on very fresh DBs — migration 003 creates it.
+    const ensure = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='settings'").get();
+    if (!ensure) return;
+    const done = db.prepare('SELECT value FROM settings WHERE key = ?').get('migration_016_backfill_done');
+    if (done?.value === '1') return;
+
+    const start = Date.now();
+    const BUDGET_MS = 30_000;
+
+    // Pass 1 — mark currently-pending bets as ready
+    const p1 = db.prepare("UPDATE bets SET grading_state = 'ready' WHERE result = 'pending' AND grading_state = 'done'").run();
+    console.log(`[Migration016] Pass 1: marked ${p1.changes} pending bets as ready`);
+
+    if (Date.now() - start > BUDGET_MS) {
+      console.warn('[Migration016] Budget exceeded after pass 1 — skipping attempt-count backfill; state machine will converge naturally');
+      db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('migration_016_backfill_done', '1');
+      return;
+    }
+
+    // Pass 2 — rebuild grading_attempts from audit log for pending bets
+    const p2 = db.prepare(`
+      UPDATE bets SET grading_attempts = (
+        SELECT COUNT(*) FROM grading_audit
+         WHERE bet_id = bets.id OR bet_id LIKE bets.id || '-leg%'
+      ) WHERE result = 'pending'
+    `).run();
+    console.log(`[Migration016] Pass 2: backfilled grading_attempts on ${p2.changes} pending bets`);
+
+    db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('migration_016_backfill_done', '1');
+    console.log(`[Migration016] Backfill complete in ${Date.now() - start}ms`);
+  } catch (e) {
+    console.error('[Migration016] Backfill error (non-fatal):', e.message);
+  }
+})();
+
 // ── Active season helper ────────────────────────────────────
 const ACTIVE_SEASON = process.env.ACTIVE_SEASON || 'Beta';
 
@@ -325,6 +367,13 @@ function createBet(betData) {
         .run(betData.source_tweet_id || null, betData.source_tweet_handle || null, id);
     } catch (_) {}
   }
+  // P0 state machine: new pending bets enter the grader queue as 'ready'.
+  // Without this they inherit the migration-016 default of 'done' and never grade.
+  if (!betData.result || betData.result === 'pending') {
+    try {
+      db.prepare("UPDATE bets SET grading_state = 'ready' WHERE id = ?").run(id);
+    } catch (_) {}
+  }
   return { ...stmts.getBet.get(id), _deduped: false };
 }
 
@@ -365,14 +414,24 @@ function createBetWithLegs(betData, legs) {
 }
 
 function gradeBetRecord(betId, result, profitUnits, grade, gradeReason, allowAutoConfirm = false) {
-  // Atomic conditional update — only updates bets still in 'pending'
+  // Hardened atomic conditional update:
+  //  1. Only updates bets still in 'pending' (race-safe vs concurrent graders)
+  //  2. For parlay/sgp, blocks finalize if any leg is still pending
+  //  3. Clears grading_state=done + grading_lock_until on terminal write
   const info = db.prepare(`
-    UPDATE bets SET result = ?, profit_units = ?, grade = ?, grade_reason = ?, graded_at = datetime('now')
-    WHERE id = ? AND (result = 'pending' OR result IS NULL)
+    UPDATE bets SET
+      result = ?, profit_units = ?, grade = ?, grade_reason = ?, graded_at = datetime('now'),
+      grading_state = 'done', grading_lock_until = NULL
+    WHERE id = ?
+      AND (result = 'pending' OR result IS NULL)
+      AND (
+        bet_type NOT IN ('parlay','sgp')
+        OR (SELECT COUNT(*) FROM parlay_legs WHERE bet_id = bets.id AND result = 'pending') = 0
+      )
   `).run(result, profitUnits, grade, gradeReason, betId);
 
   if (info.changes === 0) {
-    return { graded: false, reason: 'already_graded' };
+    return { graded: false, reason: 'already_graded_or_pending_legs' };
   }
 
   // Auto-confirm only on opt-in (trusted paths like capper celebration, manual grade)
@@ -383,8 +442,44 @@ function gradeBetRecord(betId, result, profitUnits, grade, gradeReason, allowAut
   return { graded: true };
 }
 
+// P0 state-machine selector: only rows eligible for the current grading cycle.
+// Kill-switch env var reverts to the old broad query.
 function getPendingBets() {
+  if ((process.env.GRADING_STATE_MACHINE_ENABLED || 'true') === 'false') {
+    return stmts.pendingBets.all();
+  }
+  return db.prepare(`
+    SELECT b.*, c.display_name AS capper_name, c.discord_id AS capper_discord_id
+    FROM bets b LEFT JOIN cappers c ON b.capper_id = c.id
+    WHERE b.result = 'pending'
+      AND b.grading_state IN ('ready','backoff')
+      AND (b.grading_lock_until IS NULL OR b.grading_lock_until < datetime('now'))
+      AND (b.grading_next_attempt_at IS NULL OR b.grading_next_attempt_at <= datetime('now'))
+    ORDER BY b.created_at DESC
+  `).all();
+}
+
+// Broad pending selector — preserves old behavior for dashboards/admin/healthReport.
+function getAllPendingBets() {
   return stmts.pendingBets.all();
+}
+
+// P0 admin helper: revert a finalized bet back to pending AND reset all
+// state-machine fields. Used by /admin revert-today and revert-by-id.
+// revert-hallucinations uses gradeBetRecord(..., 'void', ...) via the gateway.
+function revertBetToPending(betId, reason = 'reverted') {
+  const info = db.prepare(`
+    UPDATE bets SET
+      result = 'pending', profit_units = NULL, graded_at = NULL, grade = NULL,
+      grade_reason = ?,
+      grading_state = 'ready',
+      grading_attempts = 0,
+      grading_lock_until = NULL,
+      grading_next_attempt_at = NULL,
+      grading_last_failure_reason = NULL
+    WHERE id = ?
+  `).run(String(reason).slice(0, 500), betId);
+  return info.changes > 0;
 }
 
 function getRecentBets(capperId, limit = 10) {
@@ -596,6 +691,12 @@ function getPendingReviews() {
 function approveBet(betId) {
   const info = stmts.approveBet.run(betId);
   if (info.changes === 0) return null;
+  // Ensure state machine can pick up freshly-approved bets. Only touch rows
+  // where grading_state is still the insert-time or migration default.
+  try {
+    db.prepare(`UPDATE bets SET grading_state = 'ready'
+      WHERE id = ? AND result = 'pending' AND grading_state = 'done'`).run(betId);
+  } catch (_) {}
   return stmts.getReviewBetWithCapper.get(betId);
 }
 
@@ -793,6 +894,8 @@ module.exports = {
   dedupeParlayLegs,
   gradeBet: gradeBetRecord,
   getPendingBets,
+  getAllPendingBets,
+  revertBetToPending,
   getRecentBets,
   getCapperStats,
   getLeaderboard,
