@@ -5,3 +5,4 @@ node_modules/
 bettracker.db
 bettracker.db-wal
 bettracker.db-shm
+test-fixtures/
