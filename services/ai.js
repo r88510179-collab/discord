@@ -959,10 +959,11 @@ function inferLegSport(legDescription) {
   return null;
 }
 
-function validateParsedBet(pick, sourceText) {
+function validateParsedBet(pick, sourceText, opts = {}) {
   const issues = [];
   const desc = (pick.description || '').toLowerCase();
   const src = (sourceText || '').toLowerCase();
+  const hasMedia = !!opts.hasMedia;
 
   // Check forbidden placeholders
   if (FORBIDDEN_PLACEHOLDERS.some(p => desc.includes(p))) {
@@ -993,14 +994,34 @@ function validateParsedBet(pick, sourceText) {
     }
   }
 
-  // Bug B: Sportsbook brand names parsed as bets
+  // Bug B: Sportsbook brand names parsed as bets.
+  //
+  // EXEMPTION: slip-share tweets ("PrizePicks 40x slip", "Betr 10x slip")
+  // and image-only slip shares mention the brand but are real bets. Skip
+  // the brand rejection when either the description or the source tweet
+  // text matches a slip-shape pattern, OR when the tweet has media attached
+  // (the bet lives in the image, not the text). Brand-only promo tweets
+  // without slip indicators and without media still reject.
+  const slipShape = looksLikeSlipShare(pick.description) || looksLikeSlipShare(sourceText);
+  const brandExempt = slipShape || hasMedia;
+
   if (isSportsbookBrand(pick.description)) {
-    issues.push(`Description matches sportsbook brand name`);
-    return { valid: false, issues, reason: 'sportsbook_brand' };
+    if (brandExempt) {
+      const exemptSample = sourceText || pick.description || '';
+      console.log(`[validateParsedBet] BRAND EXEMPT: ${slipShape ? 'slip pattern' : 'has_media'} detected — passing to extraction | "${String(exemptSample).slice(0, 60)}..."`);
+    } else {
+      issues.push(`Description matches sportsbook brand name`);
+      return { valid: false, issues, reason: 'sportsbook_brand' };
+    }
   }
   if ((pick.sport === 'Unknown' || !pick.sport) && /sportsbook/i.test(desc)) {
-    issues.push(`Unknown sport with sportsbook keyword`);
-    return { valid: false, issues, reason: 'sportsbook_brand' };
+    if (brandExempt) {
+      const exemptSample = sourceText || pick.description || '';
+      console.log(`[validateParsedBet] BRAND EXEMPT: ${slipShape ? 'slip pattern' : 'has_media'} detected — passing to extraction | "${String(exemptSample).slice(0, 60)}..."`);
+    } else {
+      issues.push(`Unknown sport with sportsbook keyword`);
+      return { valid: false, issues, reason: 'sportsbook_brand' };
+    }
   }
 
   // Bug A: Wrong-sport team contamination in parlay legs
@@ -1056,9 +1077,30 @@ const SPORTSBOOK_BRAND_PATTERNS = [
   /pinnacle/i,
 ];
 
+// Slip-share shape patterns — legitimate bet tweets that mention a
+// sportsbook brand in passing (e.g. "PrizePicks 40x slip", "Betr 10x slip",
+// "5-leg parlay", "SGP"). If either the description or the source tweet
+// matches, the sportsbook_brand rejection is bypassed.
+const SLIP_SHAPE_PATTERNS = [
+  /\d+x\s+(slip|leg|pick|parlay)/i,
+  /\d+[-\s]leg/i,
+  /\bparlay\b/i,
+  /pick\s*(of|#)\s*\d+/i,
+  /\bsgp\b/i,
+  /(picks?|legs?):\s*\d+/i,
+];
+
 function isSportsbookBrand(text) {
   if (!text) return false;
   for (const pattern of SPORTSBOOK_BRAND_PATTERNS) {
+    if (pattern.test(text)) return true;
+  }
+  return false;
+}
+
+function looksLikeSlipShare(text) {
+  if (!text) return false;
+  for (const pattern of SLIP_SHAPE_PATTERNS) {
     if (pattern.test(text)) return true;
   }
   return false;

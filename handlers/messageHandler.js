@@ -456,8 +456,9 @@ async function processSlipImage(client, imageUrl, capperId, capperName, opts = {
   // ── Stage 4: Save to DB + send to War Room ──
   const saved = [];
   for (const bet of parsed.bets) {
-    // Anti-hallucination: validate parsed bet against source content
-    const slipValidation = validateParsedBet(bet, ocrText || '');
+    // Anti-hallucination: validate parsed bet against source content.
+    // Slip pipeline inherently has an image → hasMedia:true (brand-exempt).
+    const slipValidation = validateParsedBet(bet, ocrText || '', { hasMedia: true });
     if (!slipValidation.valid) {
       console.log(`[Parser] SLIP bet REJECTED: ${slipValidation.reason} | desc="${(bet.description || '').slice(0, 80)}"`);
       continue;
@@ -927,8 +928,10 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
         for (const bet of betsToSave) {
           // Dedup handled by createBetWithLegs fingerprint — isDuplicateBet removed (false positives)
 
-          // Anti-hallucination: validate parsed bet against source content
-          const validation = validateParsedBet(bet, cleanText);
+          // Anti-hallucination: validate parsed bet against source content.
+          // hasMedia mirrors hasAnyImage — slip-shares with brand names in text
+          // but the real bet in an image should be brand-exempt.
+          const validation = validateParsedBet(bet, cleanText, { hasMedia: hasAnyImage });
           if (!validation.valid) {
             console.warn(`[MessageHandler] HALLUCINATION BLOCKED: ${validation.reason} | ${validation.issues.join('; ')}`);
             continue;

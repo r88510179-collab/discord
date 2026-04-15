@@ -166,8 +166,10 @@ async function handleTwitterWebhookPayload(payload, client) {
       // Sport reclassification — catch misclassified sports
       if (pick.sport) pick.sport = reclassifySport(pick.sport, pick.description);
 
-      // Bouncer accepted — now validate against hallucination
-      const validation = validateParsedBet(pick, text);
+      // Bouncer accepted — now validate against hallucination.
+      // hasMedia uses the already-normalized `hasImages` from extractImageUrls()
+      // which handles twitterapi.io, apitwitter.com, and legacy media shapes.
+      const validation = validateParsedBet(pick, text, { hasMedia: hasImages });
       if (!validation.valid) {
         console.warn(`[TwitterHandler] HALLUCINATION BLOCKED: ${validation.reason} | ${validation.issues.join('; ')}`);
         logTweetAudit({ ...auditBase, stage: 'bouncer_rejected', reason: `Hallucination: ${validation.reason} — ${validation.issues.join('; ')}` });
