@@ -476,10 +476,26 @@ module.exports = {
 
       // ── 4. Grading health ──
       const lastGrade = db.prepare("SELECT MAX(graded_at) as last FROM bets WHERE graded_at IS NOT NULL").get()?.last || 'never';
+      const { backendHealth } = require('../services/grading');
+      const fmtBackend = (name) => {
+        const h = backendHealth[name];
+        if (!h) return 'unknown';
+        if (h.openUntil && Date.now() < h.openUntil) {
+          const m = Math.ceil((h.openUntil - Date.now()) / 60000);
+          return `OPEN (${h.lastError || 'unknown'}, ${m}m)`;
+        }
+        if (!h.lastSuccess && !h.lastFailure) return 'idle';
+        if (h.lastSuccess) {
+          const m = Math.floor((Date.now() - h.lastSuccess) / 60000);
+          return `healthy (${m}m ago)`;
+        }
+        return `failing (${h.failCount} fails, last: ${h.lastError || 'unknown'})`;
+      };
       const gradeLines = [
         `**Last grade:** ${lastGrade}`,
         `**Pending queue:** ${pending}`,
-        `**Brave:** healthy | **DDG:** ${typeof global.ddgFailCount !== 'undefined' ? `${global.ddgFailCount} fails` : 'unknown'}`,
+        `**Brave:** ${fmtBackend('brave')} | **DDG:** ${fmtBackend('ddg')}`,
+        `**Bing:** ${fmtBackend('bing')} | **Serper:** ${fmtBackend('serper')}`,
       ];
 
       // ── 5. Twitter ingestion ──

@@ -755,17 +755,63 @@ const USER_AGENTS = [
 const randomUA = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 const decodeHTML = (s) => s.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#x27;/g, "'").replace(/&quot;/g, '"').replace(/&#39;/g, "'");
 
-// ── Search backend circuit breaker ──
-let ddgFailCount = 0;
-let ddgCooldownUntil = 0;
-const DDG_MAX_FAILS = 3;
-const DDG_COOLDOWN_MS = 30 * 60 * 1000; // 30 min
+// ── Search backend health registry ──
+// In-memory state; resets on deploy (that's intentional — quotas typically
+// reset daily and we don't want a sticky "OPEN" carrying across a restart
+// if the quota window rolled over).
+//
+// Circuit policy:
+//   - HTTP 402/401/403 on any backend → open for 60 min (quota/auth exhaustion)
+//   - 3 consecutive other failures (timeouts, 5xx) → open for 5 min
+//   - A single success resets failCount + clears openUntil
+//
+// Backends consulted by searchWeb(): brave, ddg, bing, serper.
+const backendHealth = {
+  brave:  { lastSuccess: null, lastFailure: null, failCount: 0, openUntil: null, lastError: null },
+  ddg:    { lastSuccess: null, lastFailure: null, failCount: 0, openUntil: null, lastError: null },
+  bing:   { lastSuccess: null, lastFailure: null, failCount: 0, openUntil: null, lastError: null },
+  serper: { lastSuccess: null, lastFailure: null, failCount: 0, openUntil: null, lastError: null },
+};
+
+function isBackendHealthy(name) {
+  const h = backendHealth[name];
+  if (!h?.openUntil) return true;
+  if (Date.now() > h.openUntil) {
+    h.openUntil = null;
+    h.failCount = 0;
+    return true;
+  }
+  return false;
+}
+
+function recordBackendResult(name, ok, errorCode = null) {
+  const h = backendHealth[name];
+  if (!h) return;
+  if (ok) {
+    h.lastSuccess = Date.now();
+    h.failCount = 0;
+    h.openUntil = null;
+    h.lastError = null;
+  } else {
+    h.lastFailure = Date.now();
+    h.failCount++;
+    h.lastError = errorCode;
+    if (errorCode === 'HTTP_402' || errorCode === 'HTTP_401' || errorCode === 'HTTP_403') {
+      h.openUntil = Date.now() + 60 * 60 * 1000; // 1 hour — quota/auth exhaustion
+    } else if (h.failCount >= 3) {
+      h.openUntil = Date.now() + 5 * 60 * 1000;  // 5 min — generic transient failures
+    }
+  }
+}
 
 // DDG Lite with retry
 async function searchDDG(query) {
-  // Circuit breaker: skip if DDG has been failing
-  if (ddgFailCount >= DDG_MAX_FAILS && Date.now() < ddgCooldownUntil) {
-    console.log(`[DDG] Circuit breaker OPEN — skipping (${Math.round((ddgCooldownUntil - Date.now()) / 60000)}m remaining)`);
+  // Circuit breaker via backendHealth (shared helpers). Generic 5-min cooldown
+  // after 3 consecutive failures (previously 30 min). If DDG rate-limits harder
+  // than 5 min allows, tune via a per-backend config later — not today.
+  if (!isBackendHealthy('ddg')) {
+    const remaining = Math.round((backendHealth.ddg.openUntil - Date.now()) / 60000);
+    console.log(`[DDG] Circuit breaker OPEN — skipping (${remaining}m remaining, last error: ${backendHealth.ddg.lastError || 'unknown'})`);
     return [];
   }
 
@@ -780,7 +826,11 @@ async function searchDDG(query) {
       });
       const duration = Date.now() - start;
 
-      if (!res.ok) { console.log(`[Search] Backend=DDG | Result=HTTP_${res.status} | Duration=${duration}ms`); return []; }
+      if (!res.ok) {
+        console.log(`[Search] Backend=DDG | Result=HTTP_${res.status} | Duration=${duration}ms`);
+        recordBackendResult('ddg', false, `HTTP_${res.status}`);
+        return [];
+      }
 
       const html = await res.text();
       const results = [];
@@ -802,7 +852,7 @@ async function searchDDG(query) {
       }
 
       console.log(`[Search] Backend=DDG | Result=SUCCESS | Duration=${duration}ms | Hits=${results.length}`);
-      ddgFailCount = 0; // Reset on success
+      recordBackendResult('ddg', true);
       return results;
     } catch (err) {
       const duration = Date.now() - start;
@@ -811,15 +861,14 @@ async function searchDDG(query) {
     }
   }
 
-  ddgFailCount++;
-  if (ddgFailCount >= DDG_MAX_FAILS) {
-    ddgCooldownUntil = Date.now() + DDG_COOLDOWN_MS;
-    console.warn(`[DDG] Circuit breaker TRIPPED — ${DDG_MAX_FAILS} consecutive failures. Cooldown 30 min.`);
-  }
+  recordBackendResult('ddg', false, 'TIMEOUT');
   return [];
 }
 
-// Bing scrape with increased timeout
+// Bing scrape with increased timeout.
+// NOTE: Bing is the workhorse backend — tracked but NOT gated by a breaker
+// so snapshot can show its state without risking a breaker tripping and
+// killing grading entirely.
 async function searchBing(query) {
   const start = Date.now();
   try {
@@ -828,7 +877,11 @@ async function searchBing(query) {
       headers: { 'User-Agent': randomUA() },
     });
     const duration = Date.now() - start;
-    if (!res.ok) { console.log(`[Search] Backend=Bing | Result=HTTP_${res.status} | Duration=${duration}ms`); return []; }
+    if (!res.ok) {
+      console.log(`[Search] Backend=Bing | Result=HTTP_${res.status} | Duration=${duration}ms`);
+      recordBackendResult('bing', false, `HTTP_${res.status}`);
+      return [];
+    }
 
     const html = await res.text();
     const results = [];
@@ -841,9 +894,11 @@ async function searchBing(query) {
       if (title || snippet) results.push({ title, snippet });
     }
     console.log(`[Search] Backend=Bing | Result=SUCCESS | Duration=${duration}ms | Hits=${results.length}`);
+    recordBackendResult('bing', true);
     return results;
   } catch (err) {
     console.log(`[Search] Backend=Bing | Result=TIMEOUT | Duration=${Date.now() - start}ms`);
+    recordBackendResult('bing', false, 'TIMEOUT');
     return [];
   }
 }
@@ -851,6 +906,13 @@ async function searchBing(query) {
 // Brave Search API — free tier 2K queries/month
 async function searchBrave(query) {
   if (!process.env.BRAVE_API_KEY) return [];
+  // Circuit breaker: skip entirely when quota/auth is exhausted so we don't
+  // burn 200-300ms per grading attempt on a guaranteed 402.
+  if (!isBackendHealthy('brave')) {
+    const remaining = Math.round((backendHealth.brave.openUntil - Date.now()) / 60000);
+    console.log(`[Brave] Circuit breaker OPEN — skipping (${remaining}m remaining, last error: ${backendHealth.brave.lastError || 'unknown'})`);
+    return [];
+  }
   const start = Date.now();
   try {
     const res = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=5`, {
@@ -858,18 +920,26 @@ async function searchBrave(query) {
       signal: AbortSignal.timeout(15000),
     });
     const duration = Date.now() - start;
-    if (!res.ok) { console.log(`[Search] Backend=Brave | Result=HTTP_${res.status} | Duration=${duration}ms`); return []; }
+    if (!res.ok) {
+      console.log(`[Search] Backend=Brave | Result=HTTP_${res.status} | Duration=${duration}ms`);
+      recordBackendResult('brave', false, `HTTP_${res.status}`);
+      return [];
+    }
     const data = await res.json();
     const results = (data.web?.results || []).slice(0, 5).map(r => ({ title: r.title || '', snippet: r.description || '' }));
     console.log(`[Search] Backend=Brave | Result=SUCCESS | Duration=${duration}ms | Hits=${results.length}`);
+    recordBackendResult('brave', true);
     return results;
   } catch (err) {
     console.log(`[Search] Backend=Brave | Result=ERROR | Duration=${Date.now() - start}ms | ${err.message}`);
+    recordBackendResult('brave', false, 'ERROR');
     return [];
   }
 }
 
-// Serper — only if key set (exhausted free tier, paid only)
+// Serper — only if key set (exhausted free tier, paid only).
+// Tracked for snapshot visibility; no breaker since searchWeb() reaches it
+// only as last resort and a broken Serper is still cheap to attempt.
 async function searchSerper(query) {
   if (!process.env.SERPER_API_KEY) return [];
   try {
@@ -878,13 +948,20 @@ async function searchSerper(query) {
       headers: { 'X-API-KEY': process.env.SERPER_API_KEY, 'Content-Type': 'application/json' },
       body: JSON.stringify({ q: query, num: 5 }),
     });
-    if (!res.ok) return [];
+    if (!res.ok) {
+      recordBackendResult('serper', false, `HTTP_${res.status}`);
+      return [];
+    }
     const data = await res.json();
     const results = [];
     if (data.answerBox?.answer) results.push({ title: 'Answer', snippet: data.answerBox.answer });
     for (const r of (data.organic || []).slice(0, 5)) results.push({ title: r.title || '', snippet: r.snippet || '' });
+    recordBackendResult('serper', true);
     return results;
-  } catch (_) { return []; }
+  } catch (err) {
+    recordBackendResult('serper', false, 'ERROR');
+    return [];
+  }
 }
 
 // Master search: Brave (reliable API) → DDG (free, may timeout) → Bing → Serper
@@ -1448,6 +1525,9 @@ module.exports = {
   claimBetForGrading,
   applyBackoff,
   scheduleRecheckAfterDenial,
+  backendHealth,
+  isBackendHealthy,
+  recordBackendResult,
   calcProfit,
   delay,
   findMentionedTeams,
