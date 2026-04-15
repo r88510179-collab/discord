@@ -116,3 +116,12 @@ Reusable prompt templates in ~/Documents/discord/.code-prompts/:
 - migration-backfill.md — "schema change + data migration + safety budget"
 
 Each is a fill-in-the-blank template. We've been writing these from scratch — saves 10-15min per Code session. Build next time we have low-pressure time.
+
+### Code Tab prompt template library
+Reusable prompt templates in ~/Documents/discord/.code-prompts/:
+- audit-only.md — "read DB / read code / report findings, no changes"
+- single-file-fix.md — "modify one rule, ship via DEPLOY_CHECKLIST"
+- multi-file-refactor.md — "signature change + N call sites + verification"
+- migration-backfill.md — "schema change + data migration + safety budget"
+
+Each is a fill-in-the-blank template. We've been writing these from scratch — saves 10-15min per Code session. Build next time we have low-pressure time.
