@@ -75,3 +75,36 @@ fly ssh console -a bettracker-discord-bot -C 'node -e "const db=require(\"better
 
 Confirm Brave breaker still firing:
 fly logs -a bettracker-discord-bot --no-tail | grep -E "Brave.*Circuit breaker OPEN" | tail -5
+
+## Codex audit findings (Apr 15 close-out)
+
+Audit clean: 0 blockers. Two HIGH items to decide on FIRST tomorrow morning, before Gemma work:
+
+### HIGH #1 - Check for orphan capper channels (5 min decision)
+
+Run this before doing anything else:
+fly ssh console -a bettracker-discord-bot -C 'node -e "const m=process.env.CAPPER_CHANNEL_MAP||\"\"; const p=(process.env.PICKS_CHANNEL_IDS||\"\").split(\",\"); const h=(process.env.HUMAN_SUBMISSION_CHANNEL_IDS||\"\").split(\",\"); const allowed=new Set([...p,...h,process.env.SUBMIT_CHANNEL_ID,process.env.SLIP_FEED_CHANNEL_ID].filter(Boolean)); const orphans=m.split(\",\").map(s=>s.split(\":\")[0]).filter(c=>c && !allowed.has(c)); console.log(\"Orphan capper channels:\", orphans);"'
+
+If output is []: bug is latent, document in BACKLOG, defer.
+If output has channel IDs: those cappers are silently denied. Fix BEFORE Gemma. Add CAPPER_CHANNEL_MAP IDs to globalPipelineGuard's allowed set.
+
+### HIGH #2 - Brand exemption breadth (defer until after Gemma)
+
+Codex flagged that hasMedia OR slipShape is too permissive (FanDuel promo image tweets pass brand check). Counter-context: zrob4444 dense slips have no inline text — requiring AND would re-break the recovery we just shipped. Wait until Gemma is wired; then the second-stage parser becomes the safety net and we can tighten brand exemption to AND. Document in BACKLOG.
+
+### MEDIUM items - add to BACKLOG, fix opportunistically
+
+- /admin grading-unstick prefix match - require 8+ char prefix or exact ID. 5 min fix.
+- Migration 016 backfill resume - permanent skip if budget exhausted. Edge case.
+- Composite grading index unused per EXPLAIN QUERY PLAN - dead weight, low priority.
+- Test seed inserts bypass grading_state='ready' - matters when state machine tests exist.
+
+### LOW/NIT - all confirmed working as intended
+
+- canFinalizeBet TOCTOU benign (atomic finalize wins)
+- backendHealth races benign (Node single-threaded)
+- /admin snapshot exposes no secrets
+
+### Test infra issue (pre-existing, not from today)
+
+npm run test:reliability fails in tests/migration-validation.js expecting 006_add_season_to_bets.sql but file is 006_add_season_column.sql. Migration was renamed at some point, test wasn't updated. Add to BACKLOG for next time we touch test suite.
