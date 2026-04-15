@@ -102,5 +102,8 @@ Target 8 handles without TweetShift coverage
 ### Local Ollama for free AI grading
 Offload grading AI calls from Groq to local Ollama instance. Zero marginal cost. Slower but unlimited.
 
+
+### Gemma 4 E4B for local vision OCR fallback
+Evaluate `gemma4:e4b-it-q4_K_M` on Surface Pro 5 Ollama (~5GB RAM at Q4, CPU-only) as fallback path for dense Hard Rock Bet slips that defeat current Gemini Vision preprocessing — the failure mode flagged in Day 6 audit. Native multimodal with configurable 1120-token OCR budget designed for small-text document parsing. Apache 2.0, function calling, native thinking modes. Secondary use: upgrade grader fallback tier (`ollama-llama3.2-3b` → `gemma4:e4b`); E4B inherits Gemini 3 research lineage and is meaningfully stronger than llama3.2:3b at reasoning. P0 (state machine + canFinalizeBet) shipped in v276 — hold this until P1 (pipeline_events + silent drop fixes) is done.
 ### Sports data caching
 Nightly precompute of hit rates, trends, splits. Cached locally, served to Fly bot on demand via Tailscale.
