@@ -103,8 +103,7 @@ Target 8 handles without TweetShift coverage
 Offload grading AI calls from Groq to local Ollama instance. Zero marginal cost. Slower but unlimited.
 
 
-### Gemma 4 E4B for local vision OCR fallback
-Evaluate `gemma4:e4b-it-q4_K_M` on Surface Pro 5 Ollama (~5GB RAM at Q4, CPU-only) as fallback path for dense Hard Rock Bet slips that defeat current Gemini Vision preprocessing — the failure mode flagged in Day 6 audit. Native multimodal with configurable 1120-token OCR budget designed for small-text document parsing. Apache 2.0, function calling, native thinking modes. Secondary use: upgrade grader fallback tier (`ollama-llama3.2-3b` → `gemma4:e4b`); E4B inherits Gemini 3 research lineage and is meaningfully stronger than llama3.2:3b at reasoning. P0 (state machine + canFinalizeBet) shipped in v276 — hold this until P1 (pipeline_events + silent drop fixes) is done.
+
 ### Sports data caching
 Nightly precompute of hit rates, trends, splits. Cached locally, served to Fly bot on demand via Tailscale.
 
@@ -125,3 +124,42 @@ Reusable prompt templates in ~/Documents/discord/.code-prompts/:
 - migration-backfill.md — "schema change + data migration + safety budget"
 
 Each is a fill-in-the-blank template. We've been writing these from scratch — saves 10-15min per Code session. Build next time we have low-pressure time.
+
+### Vision extraction failure on dense slip-share images — wire Gemma 3:4b as fallback
+**Tested Apr 15 — proven working.** Gemma 3:4b on Surface Pro Ollama successfully extracted player picks from a zrob4444 PrizePicks slip image (732x1199 JPEG, 70KB) via local HTTP API. Output: structured player names. Note: tested model is `gemma3:4b` (3.3GB), not the previously-noted `gemma4:e4b` which doesn't exist as a current Ollama tag.
+
+Current Gemini Vision returns "missing legs / capper hid the picks in image" placeholder for dense slips, bouncer correctly rejects. Confirmed leak: ~10 real bets/week from missing-image bucket alone (audit verified Apr 15).
+
+Plan:
+1. Add Ollama Gemma 3:4b as vision-capable provider in `services/ai.js` after Gemini Vision in the waterfall
+2. Auth via existing Tailscale Funnel + `OLLAMA_PROXY_SECRET` (llama3.2:3b uses this path for grading already)
+3. Trigger condition: when Gemini Vision returns placeholder text matching `/missing legs|capper hid|cannot read/i`, fall through to Gemma instead of giving up
+4. Validate output quality — Gemma may hallucinate fields (jersey numbers, etc). Need test fixtures of known-good slips before promoting.
+5. If quality holds: promote to primary Vision for known-difficult cappers (zrob4444, bookitwithtrent, rbssportsplays), keep Gemini for everyone else.
+
+Resources: Surface Pro has 5.5GB RAM available, 201GB disk. Gemma 3:4b is 3.3GB on disk, ~5GB RAM at runtime. Inference time on CPU: 30-90s per image (untested but expected).
+
+### Pre-filter audit findings (Apr 15)
+7-day rejection breakdown verified via `twitter_audit_log`:
+- 57 "No betting structure found (pre-filter)" — confirmed correct rejections (frustration tweets, marketing, PrizePicks shareEntry URLs without context)
+- 29 "Hallucination: placeholder — missing legs / capper hid in image" — ~10 are real bets (Vision failures, see Gemma plan above)
+- 6 "Hallucination: sportsbook_brand" — fixed in v277 for slip-shape patterns
+- 8 "Hallucination: entity_mismatch [multiple, picks]" — parser stripped detail to placeholders. Investigate why parser writes `[multiple, X]` instead of legs.
+- 5 "Hallucination: leg_sport_mismatch" — cross-sport parlay parser bugs (already in BACKLOG)
+
+Total real-bet leak: ~12-15 bets/week pre-fixes, ~10 bets/week post-v277 (Vision still leaks).
+
+### bookitwithtrent inline-text bets being missed
+"Yankees ML live (-145) 10u" was rejected as missing-legs even though it's a complete inline bet. Bouncer probably focused on attached image and missed inline pick. Investigate `parseBetText()` flow when both text bet AND image are present.
+
+### ESPN API for basic grading
+Replace AI calls with direct ESPN API for ML/spread/total grading on completed games. Free, no rate limits at our volume, deterministic. Architecture: new ESPN provider in `services/grading.js`, falls back to AI when ESPN doesn't have the data (player props, futures). Estimated 70-90% reduction in AI grading calls.
+
+### Junk bet auto-reject
+"KBO Lotto", "10u nuke", "History will repeat itself", "Eury to shove" should never become bets. Bouncer needs tighter no-bet-content rejection.
+
+### Scraper Playwright timeout investigation (Apr 15)
+Intermittent `page.waitForSelector: Timeout 15000ms exceeded` on @toptierpicks_, @zrob4444, @guess_pray_bets. Could be Twitter rate-limiting residential IP, cookie expiration, or page structure changes. Add retry logic with shorter timeout + structured failure logging.
+
+### Dashboard migration to grading_state aware queries
+`healthReport.js`, `!status`, `/admin snapshot` still use raw `result='pending'` for "stuck >24h" alerts. Fires false positives on quarantined bets. Add `getActiveQueue()` helper that filters by grading_state, swap callers.
