@@ -760,12 +760,22 @@ const decodeHTML = (s) => s.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace
 // reset daily and we don't want a sticky "OPEN" carrying across a restart
 // if the quota window rolled over).
 //
-// Circuit policy:
-//   - HTTP 402/401/403 on any backend → open for 60 min (quota/auth exhaustion)
-//   - 3 consecutive other failures (timeouts, 5xx) → open for 5 min
+// Circuit policy is per-backend via BACKEND_CONFIG:
+//   - HTTP 402/401/403 → open for config.quotaCooldownMs (quota/auth exhaustion)
+//   - config.maxFails consecutive other failures → open for config.failCooldownMs
 //   - A single success resets failCount + clears openUntil
 //
 // Backends consulted by searchWeb(): brave, ddg, bing, serper.
+// DDG uses a 30min fail cooldown because DDG Lite rate-limits by IP and
+// 5min doesn't give the IP enough cool-down before re-triggering the ban.
+// Everyone else uses 5min.
+const BACKEND_CONFIG = {
+  brave:  { failCooldownMs:  5 * 60 * 1000, quotaCooldownMs: 60 * 60 * 1000, maxFails: 3 },
+  ddg:    { failCooldownMs: 30 * 60 * 1000, quotaCooldownMs: 60 * 60 * 1000, maxFails: 3 },
+  bing:   { failCooldownMs:  5 * 60 * 1000, quotaCooldownMs: 60 * 60 * 1000, maxFails: 3 },
+  serper: { failCooldownMs:  5 * 60 * 1000, quotaCooldownMs: 60 * 60 * 1000, maxFails: 3 },
+};
+
 const backendHealth = {
   brave:  { lastSuccess: null, lastFailure: null, failCount: 0, openUntil: null, lastError: null },
   ddg:    { lastSuccess: null, lastFailure: null, failCount: 0, openUntil: null, lastError: null },
@@ -787,6 +797,7 @@ function isBackendHealthy(name) {
 function recordBackendResult(name, ok, errorCode = null) {
   const h = backendHealth[name];
   if (!h) return;
+  const cfg = BACKEND_CONFIG[name];
   if (ok) {
     h.lastSuccess = Date.now();
     h.failCount = 0;
@@ -797,18 +808,18 @@ function recordBackendResult(name, ok, errorCode = null) {
     h.failCount++;
     h.lastError = errorCode;
     if (errorCode === 'HTTP_402' || errorCode === 'HTTP_401' || errorCode === 'HTTP_403') {
-      h.openUntil = Date.now() + 60 * 60 * 1000; // 1 hour — quota/auth exhaustion
-    } else if (h.failCount >= 3) {
-      h.openUntil = Date.now() + 5 * 60 * 1000;  // 5 min — generic transient failures
+      h.openUntil = Date.now() + (cfg?.quotaCooldownMs ?? 60 * 60 * 1000);
+    } else if (h.failCount >= (cfg?.maxFails ?? 3)) {
+      h.openUntil = Date.now() + (cfg?.failCooldownMs ?? 5 * 60 * 1000);
     }
   }
 }
 
 // DDG Lite with retry
 async function searchDDG(query) {
-  // Circuit breaker via backendHealth (shared helpers). Generic 5-min cooldown
-  // after 3 consecutive failures (previously 30 min). If DDG rate-limits harder
-  // than 5 min allows, tune via a per-backend config later — not today.
+  // Circuit breaker via backendHealth. Cooldown is driven by BACKEND_CONFIG.ddg
+  // (30min after 3 consecutive failures — DDG Lite rate-limits by IP and
+  // 5min doesn't give the IP enough cool-down before re-triggering the ban).
   if (!isBackendHealthy('ddg')) {
     const remaining = Math.round((backendHealth.ddg.openUntil - Date.now()) / 60000);
     console.log(`[DDG] Circuit breaker OPEN — skipping (${remaining}m remaining, last error: ${backendHealth.ddg.lastError || 'unknown'})`);
