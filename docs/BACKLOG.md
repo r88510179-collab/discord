@@ -163,3 +163,48 @@ Intermittent `page.waitForSelector: Timeout 15000ms exceeded` on @toptierpicks_,
 
 ### Dashboard migration to grading_state aware queries
 `healthReport.js`, `!status`, `/admin snapshot` still use raw `result='pending'` for "stuck >24h" alerts. Fires false positives on quarantined bets. Add `getActiveQueue()` helper that filters by grading_state, swap callers.
+
+## April 16 session learnings
+
+### Gemini + Brave quota dependencies are single points of failure
+Both APIs on free tier, both exhausted. When either dies the pipeline degrades sharply. Options:
+- Pay for Gemini (Paid tier ~$19/mo for useful scale) and/or Brave ($5/mo Pro)
+- Build local AI fallbacks on Surface Pro (Gemma for Vision, llama3.2 or larger for grading — see Option 3 below)
+- Accept degraded capacity on free tier and tune state machine to handle it
+
+### Option 3: Full local AI fallback chain (weekend project)
+Replace external AI dependencies with Surface Pro Ollama:
+
+1. **Gemma 3:4b for Vision intake** (already proven Apr 15)
+   - Trigger: Gemini returns 429/quota error OR placeholder text
+   - Route: Tailscale Funnel + OLLAMA_PROXY_SECRET
+   - Output: two-stage (Gemma extract → Cerebras parse)
+   - Fixtures: 8 saved slip images in test-fixtures/vision/
+
+2. **Larger local model for grading** (e.g. llama3.1:8b or qwen2.5:7b)
+   - Current grading waterfall: groq-llama8b → groq-kimi → ollama-llama3.2-3b
+   - Issue: 3b is too small for grading quality
+   - Upgrade: 7-8b on Surface Pro for grader fallback tier
+   - Requires: verify Surface Pro RAM can handle concurrent Gemma 4b + llama 8b (5+8=13GB, Surface has ~16GB)
+
+3. **State machine tuning**
+   - Currently treats all PENDING as retryable failures
+   - Need: if AI verdict is PENDING due to "no data found", don't retry endlessly
+   - Better: ship auto-void-after-N-PENDINGs guard (previously drafted)
+
+### ESPN integration observations (v282 today)
+- Works perfectly for ML/spread/total on MLB/NBA/NHL for completed games
+- Date fallback (UTC date + previous ET day) handles late-night bets correctly
+- Covers ~30-40% of bet volume
+- Doesn't help with: player props, parlays with props, tennis, golf, SGPs
+- Remaining 60-70% still depends on AI + search
+
+### Today's emergency actions
+- Auto-voided 9 bets with >5 attempts + >48h age (some later identified as having real slips that Vision failed to extract — see Gemma fixtures)
+- Force-readied 100+ bets across 2 cycles to recover from backoff lock
+- Deployed v280 → v281 (stale worktree, broken) → v282 (fixed)
+- Bot stabilized at ~7 grades/hour via ESPN only
+
+### Known drifts
+- Grader can still hallucinate WINs on promo/commentary text (e.g. "🏀 Mathurin is the man!")
+- Workaround: ship unscoped-bet auto-void (Task 2 in Apr 16 session)
