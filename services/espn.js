@@ -265,25 +265,59 @@ async function tryGradeViaESPN(bet, betTeamList) {
     return { ok: false, reason: parsed.reason || 'unparseable' };
   }
 
-  // Date from event_date (preferred) or created_at
+  // Date from event_date (preferred) or created_at.
+  // ESPN scoreboards are indexed by ET date; bet timestamps are UTC. A bet
+  // created at 01:30 UTC is often for the previous ET calendar day. Try
+  // both dates so we don't need a timezone lib. Max 2 API calls per bet.
   const rawDate = bet.event_date || bet.created_at;
   if (!rawDate) return { ok: false, reason: 'no_date' };
-  const dateStr = new Date(rawDate).toISOString().split('T')[0];
+  const dateObj = new Date(rawDate);
+  const dateStr = dateObj.toISOString().split('T')[0];
+  const prevDate = new Date(dateObj.getTime() - 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
-  console.log(`[ESPN] ${sport} score lookup: date=${dateStr}, teams=[${(betTeamList || []).join(', ')}], type=${parsed.type}${parsed.line != null ? ` line=${parsed.line}` : ''}${parsed.direction ? ` dir=${parsed.direction}` : ''}`);
+  console.log(`[ESPN] ${sport} score lookup: date=${dateStr} (fallback ${prevDate}), teams=[${(betTeamList || []).join(', ')}], type=${parsed.type}${parsed.line != null ? ` line=${parsed.line}` : ''}${parsed.direction ? ` dir=${parsed.direction}` : ''}`);
 
-  // Fetch scoreboard
-  const events = await fetchScoreboard(sport, dateStr);
-  if (events.length === 0) {
-    console.log(`[ESPN] No events for ${sport} on ${dateStr}`);
+  // 1. Try primary (UTC-derived) date
+  let events = await fetchScoreboard(sport, dateStr);
+  let usedDate = dateStr;
+
+  // 2. Fallback to previous day if primary has no events at all
+  if (!events || events.length === 0) {
+    console.log(`[ESPN] No events on ${dateStr}, trying ${prevDate}`);
+    events = await fetchScoreboard(sport, prevDate);
+    usedDate = prevDate;
+  }
+
+  if (!events || events.length === 0) {
+    console.log(`[ESPN] No events for ${sport} on ${dateStr} or ${prevDate}`);
     recordStat(sport, 'misses');
     return { ok: false, reason: 'no_events' };
   }
 
-  // Match teams
-  const match = matchTeamsToEvent(events, betTeamList);
+  // 3. Try team match on the date we have
+  let match = matchTeamsToEvent(events, betTeamList);
+
+  // 4. If primary date had events but no team match, retry on prevDate
+  //    (covers the case where the UTC-derived date happens to have other
+  //    games scheduled but the team we want played the night before ET).
+  if (!match && usedDate === dateStr) {
+    const prevEvents = await fetchScoreboard(sport, prevDate);
+    if (prevEvents && prevEvents.length > 0) {
+      const prevMatch = matchTeamsToEvent(prevEvents, betTeamList);
+      if (prevMatch) {
+        match = prevMatch;
+        events = prevEvents;
+        usedDate = prevDate;
+      }
+    }
+  }
+
   if (!match) {
-    console.log(`[ESPN] No match for [${(betTeamList || []).join(', ')}] in ${events.length} events`);
+    // Debug-dump ESPN's team names so we can spot alias gaps.
+    const espnTeams = events
+      .map(e => (e.competitions?.[0]?.competitors || []).map(c => c.team?.displayName).filter(Boolean))
+      .flat();
+    console.log(`[ESPN] No match for [${(betTeamList || []).join(', ')}] in ${events.length} events on ${usedDate}. ESPN teams: [${espnTeams.join(', ')}]`);
     recordStat(sport, 'misses');
     return { ok: false, reason: 'no_team_match' };
   }
