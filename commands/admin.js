@@ -495,10 +495,14 @@ module.exports = {
       const espnSportLine = Object.entries(espnStats.bySport || {})
         .map(([s, v]) => `${s}:${v.grades}/${v.requests}`)
         .join(' ') || 'none';
+      const autoVoided24h = db.prepare(
+        "SELECT COUNT(*) AS c FROM bets WHERE review_status = 'auto_void_unscoped_bet' AND graded_at > datetime('now', '-24 hours')"
+      ).get()?.c || 0;
       const gradeLines = [
         `**Last grade:** ${lastGrade}`,
         `**Pending queue:** ${pending}`,
         `**ESPN:** ${espnStats.grades} graded / ${espnStats.requests} req (${espnSportLine})`,
+        `**Auto-voided (unscoped) 24h:** ${autoVoided24h}`,
         `**Brave:** ${fmtBackend('brave')} | **DDG:** ${fmtBackend('ddg')}`,
         `**Bing:** ${fmtBackend('bing')} | **Serper:** ${fmtBackend('serper')}`,
       ];

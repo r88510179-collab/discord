@@ -3,6 +3,27 @@ const { gradeBetAI } = require('./ai');
 
 const delay = ms => new Promise(res => setTimeout(res, ms));
 
+// ── Supported sports for grading ──
+// Bets outside this set get auto-voided at the top of gradePropWithAI
+// (see the "AUTO-VOID UNSCOPED BETS" block). Keep in sync with the
+// sport families we actually ingest from cappers.
+const SUPPORTED_SPORTS = new Set([
+  'MLB', 'NBA', 'NHL', 'NFL',
+  'NCAAB', 'NCAAF', 'NCAAM', 'NCAAW',
+  'TENNIS', 'GOLF',
+  'SOCCER', 'UCL', 'UEL', 'MLS', 'EPL',
+  'LA LIGA', 'SERIE A', 'BUNDESLIGA', 'LIGUE 1',
+  'F1', 'NASCAR',
+  'MMA', 'UFC', 'BOXING',
+]);
+
+function isSupportedSport(sport) {
+  if (!sport) return false;
+  const s = String(sport).trim().toUpperCase();
+  if (!s || s === 'UNKNOWN' || s === 'N/A' || s === 'NA') return false;
+  return SUPPORTED_SPORTS.has(s);
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // P0 grading state machine — gateway + claim + backoff helpers.
 // ═══════════════════════════════════════════════════════════════════
@@ -1011,6 +1032,39 @@ async function gradePropWithAI(bet) {
     }
   }
 
+  // ── AUTO-VOID UNSCOPED BETS ──
+  // If the sport is null / Unknown / N/A / outside the supported set,
+  // void the bet immediately and skip BOTH ESPN and AI. With Brave dead
+  // and search quality degraded, AI hallucinates positive grades on
+  // promo captions like "MLB Wednesday picks" or garbage descriptions.
+  // Runs AFTER reclassifySport() so bets with a recoverable sport
+  // (e.g. description mentions "Yankees" despite sport='Unknown') are
+  // still rescued. Applies before parlay/single dispatch, so both
+  // paths inherit the guard.
+  if (!isSupportedSport(bet.sport)) {
+    console.log(`[AutoGrade] Auto-void unscoped: ${bet.id} | sport=${bet.sport} | "${(bet.description || '').slice(0, 80)}"`);
+    try {
+      db.prepare(`UPDATE bets SET
+        result = 'void',
+        profit_units = 0,
+        graded_at = datetime('now'),
+        grade = 'VOID',
+        grade_reason = ?,
+        review_status = 'auto_void_unscoped_bet',
+        grading_state = 'done',
+        grading_lock_until = NULL
+      WHERE id = ? AND (result = 'pending' OR result IS NULL)`).run(
+        `Auto-voided: sport=${bet.sport || 'null'} not in supported set`,
+        bet.id
+      );
+    } catch (e) {
+      console.error(`[AutoGrade] Auto-void write error: ${e.message}`);
+    }
+    // Return sentinel that runAutoGrade's if/else won't match → silent no-op.
+    // (The DB write above is the real finalize; no need for finalizeBetGrading.)
+    return { status: 'AUTO_VOIDED', evidence: `Auto-voided: sport=${bet.sport || 'null'} not in supported set` };
+  }
+
   // Load legs if this is a parlay
   const betType = (bet.bet_type || '').toLowerCase();
   if (betType === 'parlay' || betType === 'sgp') {
@@ -1559,6 +1613,8 @@ module.exports = {
   backendHealth,
   isBackendHealthy,
   recordBackendResult,
+  SUPPORTED_SPORTS,
+  isSupportedSport,
   calcProfit,
   delay,
   findMentionedTeams,
