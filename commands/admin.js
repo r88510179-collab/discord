@@ -477,6 +477,7 @@ module.exports = {
       // ── 4. Grading health ──
       const lastGrade = db.prepare("SELECT MAX(graded_at) as last FROM bets WHERE graded_at IS NOT NULL").get()?.last || 'never';
       const { backendHealth } = require('../services/grading');
+      const { espnStats } = require('../services/espn');
       const fmtBackend = (name) => {
         const h = backendHealth[name];
         if (!h) return 'unknown';
@@ -491,9 +492,13 @@ module.exports = {
         }
         return `failing (${h.failCount} fails, last: ${h.lastError || 'unknown'})`;
       };
+      const espnSportLine = Object.entries(espnStats.bySport || {})
+        .map(([s, v]) => `${s}:${v.grades}/${v.requests}`)
+        .join(' ') || 'none';
       const gradeLines = [
         `**Last grade:** ${lastGrade}`,
         `**Pending queue:** ${pending}`,
+        `**ESPN:** ${espnStats.grades} graded / ${espnStats.requests} req (${espnSportLine})`,
         `**Brave:** ${fmtBackend('brave')} | **DDG:** ${fmtBackend('ddg')}`,
         `**Bing:** ${fmtBackend('bing')} | **Serper:** ${fmtBackend('serper')}`,
       ];

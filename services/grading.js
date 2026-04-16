@@ -1174,6 +1174,26 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
   const betTeamList = [...betTeams];
   console.log(`[AI Grader] Bet teams: [${betTeamList.join(', ')}] | Sport: ${sportContext || '?'}`);
 
+  // ── ESPN PRE-CHECK: deterministic grading for standard MLB/NBA/NHL/NFL bets ──
+  // Runs BEFORE the expensive searchWeb + AI chain. Skips props, parlays,
+  // and unparseable descriptions — those fall through to the existing path.
+  if (['MLB', 'NBA', 'NHL', 'NFL'].includes((bet.sport || '').toUpperCase())) {
+    try {
+      const { tryGradeViaESPN } = require('./espn');
+      const espnResult = await tryGradeViaESPN(bet, betTeamList);
+      if (espnResult.ok) {
+        audit.search_backend = 'espn';
+        audit.search_hits = 1;
+        audit.provider_used = 'espn';
+        return earlyReturn({ status: espnResult.result, evidence: espnResult.evidence });
+      }
+      // ESPN couldn't grade — fall through to searchWeb + AI
+      console.log(`[ESPN→AI] Falling through: ${espnResult.reason || 'unknown'} | "${(bet.description || '').slice(0, 50)}"`);
+    } catch (err) {
+      console.error(`[ESPN] Error (non-fatal, falling through to AI): ${err.message}`);
+    }
+  }
+
   // ── Step 1: Web search — use "team1 vs team2" format for precision ──
   let searchResults = [];
   let searchSnippets = '';
