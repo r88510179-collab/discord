@@ -406,16 +406,47 @@ module.exports = {
       `).all();
 
       // 4. Optional force-ready
+      //
+      // Bet IDs are 32 hex chars (crypto.randomBytes(16).toString('hex')).
+      // Codex audit flagged: the old `WHERE id LIKE 'prefix%'` + first-match
+      // picked an arbitrary bet when two IDs shared a prefix. Tightened to:
+      //   - <8 chars      → reject (too ambiguous)
+      //   - 32 chars      → exact match on id = ?
+      //   - 8–31 chars    → prefix search returning ALL matches; require
+      //                     exactly 1 to proceed, else show disambiguation
       let forceMsg = '';
       if (forceId) {
-        const target = db.prepare('SELECT id, result FROM bets WHERE id LIKE ?').get(`${forceId}%`);
-        if (!target) forceMsg = `\n⚠️ No bet matches \`${forceId}\``;
-        else if (target.result && target.result !== 'pending') forceMsg = `\n⚠️ \`${target.id.slice(0, 8)}\` is already ${target.result} — use revert-by-id first`;
-        else {
-          db.prepare(`UPDATE bets SET grading_state='ready', grading_attempts=0,
-                        grading_lock_until=NULL, grading_next_attempt_at=NULL,
-                        grading_last_failure_reason=NULL WHERE id = ?`).run(target.id);
-          forceMsg = `\n🔄 Forced \`${target.id.slice(0, 8)}\` → state=ready, attempts=0`;
+        const input = forceId.trim();
+        let target = null;
+        let matches = [];
+
+        if (input.length < 8) {
+          forceMsg = `\n⚠️ ID prefix must be at least 8 characters (got ${input.length}).`;
+        } else if (input.length === 32) {
+          target = db.prepare('SELECT id, result FROM bets WHERE id = ?').get(input);
+          if (!target) forceMsg = `\n⚠️ No bet with id \`${input}\``;
+        } else {
+          matches = db.prepare('SELECT id, result, substr(description, 1, 40) AS desc FROM bets WHERE id LIKE ? ORDER BY id').all(`${input}%`);
+          if (matches.length === 0) {
+            forceMsg = `\n⚠️ No bet matches prefix \`${input}\``;
+          } else if (matches.length > 1) {
+            const list = matches.slice(0, 5).map(m => `  • \`${m.id}\` (${m.result}) — ${m.desc}`).join('\n');
+            const more = matches.length > 5 ? `\n  …and ${matches.length - 5} more` : '';
+            forceMsg = `\n⚠️ Prefix \`${input}\` is ambiguous — ${matches.length} matches. Provide more characters:\n${list}${more}`;
+          } else {
+            target = matches[0];
+          }
+        }
+
+        if (target) {
+          if (target.result && target.result !== 'pending') {
+            forceMsg = `\n⚠️ \`${target.id.slice(0, 8)}\` is already ${target.result} — use revert-by-id first`;
+          } else {
+            db.prepare(`UPDATE bets SET grading_state='ready', grading_attempts=0,
+                          grading_lock_until=NULL, grading_next_attempt_at=NULL,
+                          grading_last_failure_reason=NULL WHERE id = ?`).run(target.id);
+            forceMsg = `\n🔄 Forced \`${target.id.slice(0, 8)}\` → state=ready, attempts=0`;
+          }
         }
       }
 
