@@ -1,5 +1,6 @@
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const { getSetting, setSetting, purgeTable, revertBetToPending } = require('../services/database');
+const { recordStage } = require('../services/pipeline-events');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -64,7 +65,14 @@ module.exports = {
     .addSubcommand(sub =>
       sub.setName('grading-unstick')
         .setDescription('Clear stale grading locks + list quarantined bets + optionally force a bet back to ready')
-        .addStringOption(opt => opt.setName('force_ready_bet_id').setDescription('Optional: bet id (prefix ok) to reset to ready').setRequired(false))),
+        .addStringOption(opt => opt.setName('force_ready_bet_id').setDescription('Optional: bet id (prefix ok) to reset to ready').setRequired(false)))
+    .addSubcommand(sub =>
+      sub.setName('pipeline-trace')
+        .setDescription('Show every pipeline_events row for an ingest_id in chronological order')
+        .addStringOption(opt => opt.setName('ingest_id').setDescription('Ingest id (e.g. disc_12345, twit_67890)').setRequired(true)))
+    .addSubcommand(sub =>
+      sub.setName('pipeline-drops-24h')
+        .setDescription('Aggregated DROP counts by reason from the last 24h')),
 
   async execute(interaction) {
     const sub = interaction.options.getSubcommand();
@@ -651,6 +659,115 @@ module.exports = {
         );
 
       return interaction.editReply({ embeds: [embed1, embed2] });
+    }
+
+    // ── Pipeline trace: show every event for one ingest_id ──
+    if (sub === 'pipeline-trace') {
+      if (process.env.OWNER_ID && interaction.user.id !== process.env.OWNER_ID) return interaction.reply({ content: '🚫', ephemeral: true });
+      await interaction.deferReply({ ephemeral: true });
+
+      const { db } = require('../services/database');
+      const ingestId = interaction.options.getString('ingest_id').trim();
+
+      let rows = [];
+      try {
+        rows = db.prepare(`
+          SELECT ingest_id, bet_id, source_type, source_ref, stage, event_type, drop_reason, payload, created_at
+          FROM pipeline_events
+          WHERE ingest_id = ?
+          ORDER BY created_at ASC, id ASC
+        `).all(ingestId);
+      } catch (err) {
+        return interaction.editReply(`❌ Error querying pipeline_events: \`${err.message}\``);
+      }
+
+      if (rows.length === 0) {
+        return interaction.editReply(`No pipeline events found for ingest_id \`${ingestId}\`.`);
+      }
+
+      const head = rows[0];
+      const fmtTime = (ts) => {
+        const d = new Date(Number(ts) * 1000);
+        if (isNaN(d.getTime())) return '????-??-?? ??:??:??';
+        return d.toISOString().replace('T', ' ').slice(0, 19);
+      };
+      const fmtHms = (ts) => fmtTime(ts).slice(11);
+
+      const sourceDesc = head.source_type === 'twitter' && head.source_ref
+        ? `twitter / tweet=${head.source_ref}`
+        : head.source_type === 'discord' && head.source_ref
+          ? `discord / msg=${head.source_ref}`
+          : `${head.source_type} / ${head.source_ref || '-'}`;
+
+      const header = `${ingestId} (${sourceDesc} / ${fmtTime(head.created_at)})`;
+      const lines = [];
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
+        const isLast = i === rows.length - 1;
+        const prefix = isLast ? '└─' : '├─';
+        let label = r.stage;
+        if (r.event_type === 'DROP' || r.stage === 'DROPPED') {
+          label = `DROPPED (reason=${r.drop_reason || 'UNKNOWN'})`;
+        } else if (r.event_type === 'ERROR') {
+          label = `ERROR`;
+        }
+        let payloadStr = '';
+        if (r.payload) {
+          try {
+            const p = JSON.parse(r.payload);
+            payloadStr = ` payload=${JSON.stringify(p).slice(0, 180)}`;
+          } catch (_) {
+            payloadStr = ` payload=${String(r.payload).slice(0, 180)}`;
+          }
+        }
+        const betStr = r.bet_id ? ` bet=${r.bet_id.slice(0, 8)}` : '';
+        lines.push(`${prefix} ${fmtHms(r.created_at)} ${label}${betStr}${payloadStr}`);
+      }
+
+      const body = '```\n' + header + '\n' + lines.join('\n') + '\n```';
+      return interaction.editReply(body.slice(0, 1990));
+    }
+
+    // ── Pipeline drops 24h: aggregated drop counts ──
+    if (sub === 'pipeline-drops-24h') {
+      if (process.env.OWNER_ID && interaction.user.id !== process.env.OWNER_ID) return interaction.reply({ content: '🚫', ephemeral: true });
+      await interaction.deferReply({ ephemeral: true });
+
+      const { db } = require('../services/database');
+      const cutoff = Math.floor(Date.now() / 1000) - 86400;
+
+      let aggRows = [];
+      let totalEvents = 0;
+      try {
+        aggRows = db.prepare(`
+          SELECT drop_reason, COUNT(*) AS n
+          FROM pipeline_events
+          WHERE event_type = 'DROP'
+            AND drop_reason IS NOT NULL
+            AND created_at >= ?
+          GROUP BY drop_reason
+          ORDER BY n DESC
+        `).all(cutoff);
+        totalEvents = db.prepare('SELECT COUNT(*) AS n FROM pipeline_events WHERE created_at >= ?').get(cutoff)?.n || 0;
+      } catch (err) {
+        return interaction.editReply(`❌ Error querying pipeline_events: \`${err.message}\``);
+      }
+
+      if (aggRows.length === 0) {
+        return interaction.editReply(`No drops in the last 24h. (Total events in window: ${totalEvents})`);
+      }
+
+      const lines = aggRows.map(r => `DROPPED_${r.drop_reason}: ${r.n}`);
+      const totalDrops = aggRows.reduce((s, r) => s + r.n, 0);
+      const body = [
+        `**Pipeline drops — last 24h**`,
+        `Total drop events: ${totalDrops} / ${totalEvents} events`,
+        '```',
+        ...lines,
+        '```',
+      ].join('\n');
+
+      return interaction.editReply(body.slice(0, 1990));
     }
   },
 };
