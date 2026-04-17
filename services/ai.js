@@ -6,6 +6,7 @@
 const { normalizeDescription, normalizePlayer } = require('./normalization');
 const sharp = require('sharp');
 const crypto = require('crypto');
+const { recordDrop } = require('./pipeline-events');
 
 // ── Image dedup cache (SHA-256 hash → timestamp, 12h window) ──
 const imageHashCache = new Map();
@@ -943,14 +944,38 @@ Output strictly valid JSON. Do not include markdown formatting, do not include \
   return result;
 }
 
-async function parseBetSlipImage(imageBase64, mediaType = 'image/png') {
+async function parseBetSlipImage(imageBase64, mediaType = 'image/png', opts = {}) {
   const sys = `Bet slip OCR expert. Recognize Hard Rock Bet, DraftKings, FanDuel, BetMGM, Caesars, Onyx.
 Return ONLY JSON: {"sportsbook":"Hard Rock Bet","bets":[{"sport":"UCL","league":"Champions League","bet_type":"straight","description":"Over 1.5 1H Goals - Corum vs Erokspor","odds":130,"units":1.0,"stake_amount":14.85,"potential_payout":34.15,"legs":[]}]}
 Use specific league names (UCL, EPL, La Liga, etc) not generic Soccer.`;
   const raw = await callLLM('Extract all bets from this bet slip.', sys, imageBase64, mediaType);
-  if (!raw) return { bets: [], error: 'AI unavailable' };
+  if (!raw) {
+    if (opts.ingestId) {
+      recordDrop({
+        ingestId: opts.ingestId,
+        sourceType: opts.sourceType || 'discord',
+        sourceRef: opts.sourceRef || null,
+        stage: 'DROPPED',
+        dropReason: 'VISION_EXTRACTION_FAILED',
+        payload: { where: 'parseBetSlipImage', reason: 'AI unavailable' },
+      });
+    }
+    return { bets: [], error: 'AI unavailable' };
+  }
   const parsed = parseJSON(raw);
-  if (!parsed) return { bets: [], error: 'Could not read slip' };
+  if (!parsed) {
+    if (opts.ingestId) {
+      recordDrop({
+        ingestId: opts.ingestId,
+        sourceType: opts.sourceType || 'discord',
+        sourceRef: opts.sourceRef || null,
+        stage: 'DROPPED',
+        dropReason: 'VISION_EXTRACTION_FAILED',
+        payload: { where: 'parseBetSlipImage', reason: 'Could not read slip' },
+      });
+    }
+    return { bets: [], error: 'Could not read slip' };
+  }
   return {
     sportsbook: parsed.sportsbook ? String(parsed.sportsbook).slice(0, 80) : null,
     ...normalizeParsedBets(parsed),
@@ -1232,15 +1257,31 @@ function validateParsedBet(pick, sourceText, opts = {}) {
   const src = (sourceText || '').toLowerCase();
   const hasMedia = !!opts.hasMedia;
 
+  // Emit a DROP when callers supply an ingestId so observability can
+  // attribute the rejection without duplicating logic upstream.
+  const maybeDrop = (reason, dropReason, extra = {}) => {
+    if (!opts.ingestId) return;
+    recordDrop({
+      ingestId: opts.ingestId,
+      sourceType: opts.sourceType || 'discord',
+      sourceRef: opts.sourceRef || null,
+      stage: 'DROPPED',
+      dropReason,
+      payload: { validator: reason, issues, description: (pick.description || '').slice(0, 120), ...extra },
+    });
+  };
+
   // Check forbidden placeholders
   if (FORBIDDEN_PLACEHOLDERS.some(p => desc.includes(p))) {
     issues.push(`Placeholder text: "${desc.slice(0, 60)}"`);
+    maybeDrop('placeholder', 'BOUNCER_REJECTED');
     return { valid: false, issues, reason: 'placeholder' };
   }
 
   // Check sport seasonality
   if (pick.sport && !isInSeason(pick.sport)) {
     issues.push(`${pick.sport} is out of season`);
+    maybeDrop('offseason', 'BOUNCER_REJECTED', { sport: pick.sport });
     return { valid: false, issues, reason: 'offseason' };
   }
 
@@ -1256,6 +1297,7 @@ function validateParsedBet(pick, sourceText, opts = {}) {
       const matchCount = keyWords.filter(w => src.includes(w)).length;
       if (matchCount === 0) {
         issues.push(`No key entities from bet found in source text. Bet words: [${keyWords.slice(0, 5).join(', ')}]`);
+        maybeDrop('entity_mismatch', 'VALIDATOR_ENTITY_MISMATCH', { keyWords: keyWords.slice(0, 5) });
         return { valid: false, issues, reason: 'entity_mismatch' };
       }
     }
@@ -1278,6 +1320,7 @@ function validateParsedBet(pick, sourceText, opts = {}) {
       console.log(`[validateParsedBet] BRAND EXEMPT: ${slipShape ? 'slip pattern' : 'has_media'} detected — passing to extraction | "${String(exemptSample).slice(0, 60)}..."`);
     } else {
       issues.push(`Description matches sportsbook brand name`);
+      maybeDrop('sportsbook_brand', 'BOUNCER_REJECTED');
       return { valid: false, issues, reason: 'sportsbook_brand' };
     }
   }
@@ -1287,6 +1330,7 @@ function validateParsedBet(pick, sourceText, opts = {}) {
       console.log(`[validateParsedBet] BRAND EXEMPT: ${slipShape ? 'slip pattern' : 'has_media'} detected — passing to extraction | "${String(exemptSample).slice(0, 60)}..."`);
     } else {
       issues.push(`Unknown sport with sportsbook keyword`);
+      maybeDrop('sportsbook_brand', 'BOUNCER_REJECTED');
       return { valid: false, issues, reason: 'sportsbook_brand' };
     }
   }
@@ -1297,6 +1341,7 @@ function validateParsedBet(pick, sourceText, opts = {}) {
       const legCheck = validateLegSportConsistency(leg, pick.sport);
       if (!legCheck.valid) {
         issues.push(legCheck.reason);
+        maybeDrop('leg_sport_mismatch', 'VALIDATOR_SPORT_MISMATCH', { leg: leg?.description?.slice(0, 80) });
         return { valid: false, issues, reason: 'leg_sport_mismatch' };
       }
     }

@@ -6,6 +6,7 @@
 const { extractPickFromTweet, parseBetText, evaluateTweet, validateParsedBet, reclassifySport } = require('./ai');
 const { db, getOrCreateCapper, createBetWithLegs, updateLastTweetId, logTweetAudit } = require('./database');
 const { sendStagingEmbed } = require('./warRoom');
+const { recordStage, recordDrop, recordError, makeIngestId } = require('./pipeline-events');
 
 const delay = ms => new Promise(r => setTimeout(r, ms));
 
@@ -63,9 +64,15 @@ async function handleTwitterWebhookPayload(payload, client) {
     const hasImages = imageUrls.length > 0;
     const tweetUrl = tweetId ? `https://x.com/${cleanHandle}/status/${tweetId}` : '';
     const auditBase = { tweet_id: tweetId, handle: cleanHandle, tweet_text: text, tweet_url: tweetUrl, has_media: hasImages, posted_at: tweet.created_at || null };
+    const ingestId = makeIngestId('twitter', tweetId || `${cleanHandle}_${Date.now()}`);
 
     try {
-      if (!tweetId || !text) continue;
+      if (!tweetId || !text) {
+        recordDrop({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'DROPPED', dropReason: 'PRE_FILTER_NO_BET_CONTENT', payload: { reason: 'missing_id_or_text', handle: cleanHandle } });
+        continue;
+      }
+
+      recordStage({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'RECEIVED', eventType: 'STAGE_ENTER', payload: { handle: cleanHandle, textLen: text.length, imageCount: imageUrls.length } });
 
       // Log: fetched
       logTweetAudit({ ...auditBase, stage: 'fetched', reason: `${text.length} chars, ${imageUrls.length} img(s)` });
@@ -74,20 +81,25 @@ async function handleTwitterWebhookPayload(payload, client) {
       const exists = db.prepare('SELECT tweet_id FROM processed_tweets WHERE tweet_id = ?').get(tweetId);
       if (exists) {
         logTweetAudit({ ...auditBase, stage: 'deduped', reason: 'Already in processed_tweets' });
+        recordDrop({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'DROPPED', dropReason: 'DUPLICATE_IMAGE', payload: { reason: 'processed_tweets_dedup', handle: cleanHandle } });
         skipped++;
         continue;
       }
       db.prepare('INSERT OR IGNORE INTO processed_tweets (tweet_id) VALUES (?)').run(tweetId);
 
+      recordStage({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'AUTHORIZED', eventType: 'STAGE_ENTER', payload: { handle: cleanHandle } });
+
       // RT filter (twitterapi.io uses retweeted_tweet, apitwitter.com uses isRetweet)
       if (tweet.retweeted_tweet || tweet.isRetweet || text.startsWith('RT @')) {
         logTweetAudit({ ...auditBase, stage: 'filtered_rt', reason: 'Retweet detected' });
+        recordDrop({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'DROPPED', dropReason: 'BOUNCER_REJECTED', payload: { filter: 'retweet', handle: cleanHandle } });
         continue;
       }
 
       // Reply filter
       if (tweet.isReply) {
         logTweetAudit({ ...auditBase, stage: 'filtered_reply', reason: 'Direct reply' });
+        recordDrop({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'DROPPED', dropReason: 'BOUNCER_REJECTED', payload: { filter: 'reply', handle: cleanHandle } });
         continue;
       }
 
@@ -97,15 +109,18 @@ async function handleTwitterWebhookPayload(payload, client) {
       const preCheck = evaluateTweet(text);
       if (preCheck === 'reject_settled') {
         logTweetAudit({ ...auditBase, stage: 'bouncer_rejected', reason: 'All picks marked ✅ — settled recap' });
+        recordDrop({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'DROPPED', dropReason: 'PRE_FILTER_NO_BET_CONTENT', payload: { filter: 'evaluateTweet_reject_settled', handle: cleanHandle } });
         continue;
       }
       // Only reject "no structure" for text-only tweets — images go to Vision
       let structureDetected = false;
       if (!hasImages && preCheck === 'reject_recap') {
         logTweetAudit({ ...auditBase, stage: 'bouncer_rejected', reason: 'No betting structure found (pre-filter)' });
+        recordDrop({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'DROPPED', dropReason: 'PRE_FILTER_NO_BET_CONTENT', payload: { filter: 'evaluateTweet_reject_recap', handle: cleanHandle } });
         continue;
       }
       structureDetected = hasImages || (preCheck === 'valid');
+      if (hasImages) recordStage({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'EXTRACTED', eventType: 'STAGE_ENTER', payload: { imageCount: imageUrls.length } });
 
       await delay(3000);
       aiCalls++;
@@ -126,31 +141,44 @@ async function handleTwitterWebhookPayload(payload, client) {
             pick = { sport: bet.sport || 'Unknown', type: bet.bet_type || 'straight', description: bet.description, odds: bet.odds ? String(bet.odds) : null, units: bet.units || 1, legs: bet.legs || [], is_ladder: bet.is_ladder || false, ladder_step: bet.ladder_step || 0 };
             legs = bet.legs || [];
             if (/\b(sgp|same\s*game\s*parlay)\b/i.test(text) && pick.type === 'straight') pick.type = 'parlay';
+            recordStage({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'PARSED', eventType: 'STAGE_ENTER', payload: { source: 'vision', legCount: legs.length, betType: pick.type } });
           } else if (parsed?.type === 'result' || parsed?.type === 'untracked_win') {
             logTweetAudit({ ...auditBase, stage: 'bouncer_rejected', reason: `Vision detected ${parsed.type} — not a new bet` });
+            recordDrop({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'DROPPED', dropReason: 'PRE_FILTER_NO_BET_CONTENT', payload: { filter: 'vision_' + parsed.type, handle: cleanHandle } });
             continue;
           } else {
             pick = await extractPickFromTweet(text, displayName);
-            if (pick) legs = pick.legs || [];
+            if (pick) {
+              legs = pick.legs || [];
+              recordStage({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'PARSED', eventType: 'STAGE_ENTER', payload: { source: 'text_fallback', legCount: legs.length } });
+            }
           }
         } else {
           pick = await extractPickFromTweet(text, displayName);
-          if (pick) legs = pick.legs || [];
+          if (pick) {
+            legs = pick.legs || [];
+            recordStage({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'PARSED', eventType: 'STAGE_ENTER', payload: { source: 'text', legCount: legs.length } });
+          }
         }
       } catch (aiErr) {
         if (aiErr.status === 429 || String(aiErr.message).includes('429')) {
           logTweetAudit({ ...auditBase, stage: 'error', reason: `AI 429 rate limit` });
+          recordError({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'EXTRACTED', error: aiErr, payload: { reason: 'ai_rate_limit' } });
           await delay(10000);
           continue;
         }
         logTweetAudit({ ...auditBase, stage: 'error', reason: `AI error: ${aiErr.message}` });
+        recordError({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'EXTRACTED', error: aiErr, payload: { handle: cleanHandle } });
         if (hasImages && !pick) {
           try {
             pick = await extractPickFromTweet(text, displayName);
             if (pick) legs = pick.legs || [];
           } catch (_) {}
         }
-        if (!pick) continue;
+        if (!pick) {
+          recordDrop({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'DROPPED', dropReason: 'VISION_EXTRACTION_FAILED', payload: { aiError: aiErr.message?.slice(0, 120) } });
+          continue;
+        }
       }
 
       if (!pick) {
@@ -159,8 +187,10 @@ async function handleTwitterWebhookPayload(payload, client) {
           console.warn(`[TwitterHandler] ESCAPE HATCH: structure detected but AI returned NULL — force-staging for review`);
           logTweetAudit({ ...auditBase, stage: 'bouncer_valid', reason: 'ESCAPE HATCH: structure detected, AI returned NULL — forced to review' });
           pick = { sport: 'Unknown', type: 'straight', description: text.slice(0, 200), odds: null, units: 1, legs: [], is_ladder: false, ladder_step: 0 };
+          recordStage({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'PARSED', eventType: 'STAGE_ENTER', payload: { source: 'escape_hatch' } });
         } else {
           logTweetAudit({ ...auditBase, stage: 'bouncer_rejected', reason: 'AI returned NULL — not a bet' });
+          recordDrop({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'DROPPED', dropReason: 'PARSER_NO_LEGS', payload: { reason: 'ai_returned_null', handle: cleanHandle } });
           continue;
         }
       }
@@ -175,14 +205,23 @@ async function handleTwitterWebhookPayload(payload, client) {
       if (!validation.valid) {
         console.warn(`[TwitterHandler] HALLUCINATION BLOCKED: ${validation.reason} | ${validation.issues.join('; ')}`);
         logTweetAudit({ ...auditBase, stage: 'bouncer_rejected', reason: `Hallucination: ${validation.reason} — ${validation.issues.join('; ')}` });
+        const mappedReason = validation.reason === 'leg_sport_mismatch' ? 'VALIDATOR_SPORT_MISMATCH'
+          : validation.reason === 'entity_mismatch' ? 'VALIDATOR_ENTITY_MISMATCH'
+          : 'BOUNCER_REJECTED';
+        recordDrop({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'DROPPED', dropReason: mappedReason, payload: { validator: validation.reason, issues: validation.issues, description: (pick.description || '').slice(0, 120) } });
         continue;
       }
 
+      recordStage({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'VALIDATED', eventType: 'STAGE_ENTER', payload: { betType: pick.type, sport: pick.sport } });
       logTweetAudit({ ...auditBase, stage: 'bouncer_valid', reason: `${pick.type}: "${(pick.description || '').slice(0, 80)}"` });
 
       if (/\b(sgp|same\s*game\s*parlay)\b/i.test(text) && pick.type !== 'parlay') pick.type = 'parlay';
 
       const capper = getOrCreateCapper(`twitter_${cleanHandle}`, displayName, null);
+      if (!capper || !capper.id) {
+        recordDrop({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'DROPPED', dropReason: 'CAPPER_UNRESOLVED', payload: { handle: cleanHandle } });
+        continue;
+      }
       const sourceUrl = tweetUrl;
       const betSource = hasImages ? 'twitter_vision' : 'twitter_text';
 
@@ -200,6 +239,9 @@ async function handleTwitterWebhookPayload(payload, client) {
           } catch (_) {}
           staged += ladderBets.length;
         }
+        for (const lb of ladderBets) {
+          recordStage({ ingestId, betId: lb.id, sourceType: 'twitter', sourceRef: tweetId, stage: 'STAGED', eventType: 'STAGE_EXIT', payload: { pipeline: 'twitter_ladder', step: lb.ladder_step } });
+        }
         logTweetAudit({ ...auditBase, stage: 'saved', reason: `Ladder: ${ladderBets.length} steps`, bet_id: ladderBets[0]?.id });
         updateLastTweetId(cleanHandle, tweetId);
         continue;
@@ -213,12 +255,16 @@ async function handleTwitterWebhookPayload(payload, client) {
           try { await sendStagingEmbed(client, saved, displayName, sourceUrl); } catch (_) {}
         }
         staged++;
+        recordStage({ ingestId, betId: saved.id, sourceType: 'twitter', sourceRef: tweetId, stage: 'STAGED', eventType: 'STAGE_EXIT', payload: { betType: pick.type, sport: pick.sport } });
         logTweetAudit({ ...auditBase, stage: 'saved', reason: `${pick.type}: "${(pick.description || '').slice(0, 60)}"`, bet_id: saved.id });
+      } else if (saved?._deduped) {
+        recordDrop({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'DROPPED', dropReason: 'DUPLICATE_IMAGE', payload: { dedup: 'fingerprint', handle: cleanHandle } });
       }
 
       updateLastTweetId(cleanHandle, tweetId);
     } catch (err) {
       logTweetAudit({ ...auditBase, stage: 'error', reason: err.message });
+      recordError({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'ERROR', error: err, payload: { handle: cleanHandle } });
       console.error(`[TwitterHandler] Tweet error:`, err.message);
     }
   }

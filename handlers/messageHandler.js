@@ -5,6 +5,7 @@ const { postPickTracked } = require('../services/dashboard');
 const { sendStagingEmbed } = require('../services/warRoom');
 const { extractTextFromImage } = require('../services/ocr');
 const { gradeFromCelebration, finalizeBetGrading, calcProfit, canFinalizeBet, scheduleRecheckAfterDenial } = require('../services/grading');
+const { recordStage, recordDrop, recordError, makeIngestId } = require('../services/pipeline-events');
 
 // ── Dedup guard: prevent double-processing of the same Discord message ──
 const processedMessages = new Set();
@@ -27,6 +28,18 @@ const messageBuffer = new Map(); // key: `${userId}:${channelId}` → { texts, i
 function bufferMessage(message) {
   const key = `${message.author.id}:${message.channel.id}`;
   const images = getImageAttachments(message);
+  const ingestId = makeIngestId('discord', message.id);
+  // Mark the buffered stage for every underlying source_ref — aggregated
+  // buffers still emit one event per originating message so the trace
+  // stays attributable.
+  recordStage({
+    ingestId,
+    sourceType: 'discord',
+    sourceRef: message.id,
+    stage: 'BUFFERED',
+    eventType: 'STAGE_ENTER',
+    payload: { channelId: message.channel?.id, authorTag: message.author?.tag },
+  });
 
   if (messageBuffer.has(key)) {
     // Append to existing buffer
@@ -34,6 +47,7 @@ function bufferMessage(message) {
     if (message.content?.trim()) entry.texts.push(message.content.trim());
     entry.images.push(...images);
     entry.messages.push(message);
+    entry.ingestIds.push(ingestId);
     for (const embed of message.embeds) {
       if (embed.description) entry.texts.push(embed.description);
       if (embed.title) entry.texts.push(embed.title);
@@ -52,7 +66,7 @@ function bufferMessage(message) {
     if (embed.title) texts.push(embed.title);
   }
 
-  const entry = { texts, images: [...images], messages: [message], timer: null };
+  const entry = { texts, images: [...images], messages: [message], ingestIds: [ingestId], timer: null };
   entry.timer = setTimeout(() => flushBuffer(key), BUFFER_DELAY_MS);
   messageBuffer.set(key, entry);
 }
@@ -63,6 +77,8 @@ async function flushBuffer(key) {
   if (!entry || entry.messages.length === 0) return;
 
   const primaryMessage = entry.messages[0];
+  const ingestIds = entry.ingestIds?.length ? entry.ingestIds : [makeIngestId('discord', primaryMessage.id)];
+  const primaryIngestId = ingestIds[0];
 
   // Re-fetch all messages to pick up late-loading FxTwitter/vxtwitter embeds
   const texts = [];
@@ -95,13 +111,33 @@ async function flushBuffer(key) {
   const combinedImages = allImages;
 
   try {
-    await processAggregatedMessage(primaryMessage, combinedText, combinedImages);
+    await processAggregatedMessage(primaryMessage, combinedText, combinedImages, { ingestIds, primaryIngestId });
   } catch (err) {
     if (err.message === 'DUPLICATE_IMAGE_DETECTED') {
       console.log('[Dedup] Duplicate image in buffer — skipping silently.');
+      for (const id of ingestIds) {
+        recordDrop({
+          ingestId: id,
+          sourceType: 'discord',
+          sourceRef: id.replace(/^disc_/, ''),
+          stage: 'DROPPED',
+          dropReason: 'DUPLICATE_IMAGE',
+          payload: { where: 'flushBuffer' },
+        });
+      }
       return;
     }
     console.error('[Buffer] Error processing aggregated message:', err.message);
+    for (const id of ingestIds) {
+      recordError({
+        ingestId: id,
+        sourceType: 'discord',
+        sourceRef: id.replace(/^disc_/, ''),
+        stage: 'BUFFERED',
+        error: err,
+        payload: { where: 'flushBuffer' },
+      });
+    }
   }
 }
 
@@ -414,6 +450,8 @@ async function scanImage(imageUrl, mediaType) {
 // Returns { bets: [...saved], ocrText } or null on failure.
 async function processSlipImage(client, imageUrl, capperId, capperName, opts = {}) {
   const { channelId, messageId, sourceUrl, contextHints } = opts;
+  const ingestId = opts.ingestId || makeIngestId('discord', messageId || imageUrl || 'slip');
+  const sourceRef = messageId || null;
 
   // ── Stage 1: OCR — extract raw text from image ──
   let ocrText = '';
@@ -441,8 +479,10 @@ async function processSlipImage(client, imageUrl, capperId, capperName, opts = {
 
   if (!parsed.bets || parsed.bets.length === 0) {
     console.log('[SlipPipeline] Stage 2: No bets found in image.');
+    recordDrop({ ingestId, sourceType: 'discord', sourceRef, stage: 'DROPPED', dropReason: 'VISION_EXTRACTION_FAILED', payload: { where: 'processSlipImage', parseError: parsed.error || null } });
     return { bets: [] };
   }
+  recordStage({ ingestId, sourceType: 'discord', sourceRef, stage: 'PARSED', eventType: 'STAGE_ENTER', payload: { betCount: parsed.bets.length, source: 'vision_slip' } });
 
   console.log(`[SlipPipeline] Stage 2: AI extracted ${parsed.bets.length} bet(s).`);
 
@@ -461,6 +501,10 @@ async function processSlipImage(client, imageUrl, capperId, capperName, opts = {
     const slipValidation = validateParsedBet(bet, ocrText || '', { hasMedia: true });
     if (!slipValidation.valid) {
       console.log(`[Parser] SLIP bet REJECTED: ${slipValidation.reason} | desc="${(bet.description || '').slice(0, 80)}"`);
+      const mappedReason = slipValidation.reason === 'leg_sport_mismatch' ? 'VALIDATOR_SPORT_MISMATCH'
+        : slipValidation.reason === 'entity_mismatch' ? 'VALIDATOR_ENTITY_MISMATCH'
+        : 'BOUNCER_REJECTED';
+      recordDrop({ ingestId, sourceType: 'discord', sourceRef, stage: 'DROPPED', dropReason: mappedReason, payload: { validator: slipValidation.reason, issues: slipValidation.issues, description: (bet.description || '').slice(0, 120) } });
       continue;
     }
 
@@ -479,8 +523,12 @@ async function processSlipImage(client, imageUrl, capperId, capperName, opts = {
     }, bet.legs || [], bet.props || []);
 
     if (!record?._deduped) {
+      recordStage({ ingestId, betId: record?.id || null, sourceType: 'discord', sourceRef, stage: 'VALIDATED', eventType: 'STAGE_EXIT', payload: { pipeline: 'slip', reviewStatus: 'needs_review' } });
+      recordStage({ ingestId, betId: record?.id || null, sourceType: 'discord', sourceRef, stage: 'STAGED', eventType: 'STAGE_EXIT', payload: { pipeline: 'slip', sport: bet.sport, betType: bet.bet_type } });
       saved.push(record);
       await sendStagingEmbed(client, record, capperName, sourceUrl);
+    } else {
+      recordDrop({ ingestId, sourceType: 'discord', sourceRef, stage: 'DROPPED', dropReason: 'DUPLICATE_IMAGE', payload: { pipeline: 'slip', dedup: 'fingerprint' } });
     }
   }
 
@@ -496,17 +544,25 @@ async function handleSlipFeed(message) {
   const images = getImageAttachments(message);
   if (images.length === 0) return false;
 
+  const ingestId = makeIngestId('discord', message.id);
+  const sourceRef = message.id;
+
   try {
     // React immediately so user knows the bot is processing
     await message.react('🔍').catch(() => {});
 
     const capperInfo = resolveCapper(message);
+    if (!capperInfo || !capperInfo.name) {
+      recordDrop({ ingestId, sourceType: 'discord', sourceRef, stage: 'DROPPED', dropReason: 'CAPPER_UNRESOLVED', payload: { where: 'handleSlipFeed' } });
+      return true;
+    }
     const capper = await getOrCreateCapper(capperInfo.discordId, capperInfo.name, capperInfo.avatar);
 
     const result = await processSlipImage(message.client, images[0].url, capper.id, capperInfo.name, {
       channelId: message.channel.id,
       messageId: message.id,
       sourceUrl: message.url,
+      ingestId,
     });
 
     if (!result) return true;
@@ -514,6 +570,7 @@ async function handleSlipFeed(message) {
     return true;
   } catch (err) {
     console.error('[SlipFeed] Error:', err.message);
+    recordError({ ingestId, sourceType: 'discord', sourceRef, stage: 'ERROR', error: err, payload: { where: 'handleSlipFeed' } });
     return true;
   }
 }
@@ -609,6 +666,22 @@ async function handleAutoGrade(message, fullText) {
 }
 
 async function handleMessage(message, { isUpdate = false } = {}) {
+  const ingestId = makeIngestId('discord', message.id);
+  const sourceRef = message.id;
+  recordStage({
+    ingestId,
+    sourceType: 'discord',
+    sourceRef,
+    stage: 'RECEIVED',
+    eventType: 'STAGE_ENTER',
+    payload: {
+      channelId: message.channel?.id,
+      channelName: message.channel?.name,
+      authorTag: message.author?.tag,
+      isUpdate,
+    },
+  });
+
   // ═══ TRACE: log EVERY message the bot sees (remove after debugging) ═══
   console.log(`[MessageHandler] ENTRY | ch=${message.channel?.name || message.channel?.id} | author=${message.author?.username} | bot=${message.author?.bot} | content=${message.content?.length || 0} | att=${message.attachments?.size || 0} | embeds=${message.embeds?.length || 0} | isUpdate=${isUpdate}`);
 
@@ -670,12 +743,40 @@ async function handleMessage(message, { isUpdate = false } = {}) {
         }
       }
     }
+    const dropReason = reason === 'bot_not_whitelisted' ? 'BOUNCER_REJECTED' : 'CHANNEL_UNAUTHORIZED';
+    recordDrop({
+      ingestId,
+      sourceType: 'discord',
+      sourceRef,
+      stage: 'DROPPED',
+      dropReason,
+      payload: { guardReason: reason, channelId: context.channelId, channelName: context.channelName, author: context.author },
+    });
     return; // HARD STOP
   }
 
   // ═══ Self-loop prevention: guard authorizes the bot's own messages for
   //     sanity (e.g. edits), but we never re-ingest them. ═══
-  if (reason === 'self') return;
+  if (reason === 'self') {
+    recordDrop({
+      ingestId,
+      sourceType: 'discord',
+      sourceRef,
+      stage: 'DROPPED',
+      dropReason: 'BOUNCER_REJECTED',
+      payload: { guardReason: 'self' },
+    });
+    return;
+  }
+
+  recordStage({
+    ingestId,
+    sourceType: 'discord',
+    sourceRef,
+    stage: 'AUTHORIZED',
+    eventType: 'STAGE_ENTER',
+    payload: { guardReason: reason, channelId: context.channelId, channelName: context.channelName },
+  });
 
   // ═══ Combine message content + embed text (FixTwitter puts tweet text in embeds) ═══
   const rawContent = message.content || '';
@@ -685,8 +786,16 @@ async function handleMessage(message, { isUpdate = false } = {}) {
   console.log(`[DEBUG] handleMessage | embeds: ${message.embeds.length} | isUpdate: ${isUpdate} | fullContent(${fullContent.length}): "${fullContent.slice(0, 80)}"`);
 
   // ═══ HARD FILTER: Reject fan replies (RT filter removed — cappers retweet their own slips) ═══
-  if (/\breplying\s+to\b/i.test(fullContent)) { console.log('[DEBUG] Rejected by Hard Filter: replying to'); return; }
-  if (/vxtwitter\.com|fixupx\.com/i.test(rawContent) && !/\b(pick|lock|play|bet)\b/i.test(fullContent)) { console.log('[DEBUG] Rejected by Hard Filter: vxtwitter without pick signal'); return; }
+  if (/\breplying\s+to\b/i.test(fullContent)) {
+    console.log('[DEBUG] Rejected by Hard Filter: replying to');
+    recordDrop({ ingestId, sourceType: 'discord', sourceRef, stage: 'DROPPED', dropReason: 'BOUNCER_REJECTED', payload: { hardFilter: 'replying_to' } });
+    return;
+  }
+  if (/vxtwitter\.com|fixupx\.com/i.test(rawContent) && !/\b(pick|lock|play|bet)\b/i.test(fullContent)) {
+    console.log('[DEBUG] Rejected by Hard Filter: vxtwitter without pick signal');
+    recordDrop({ ingestId, sourceType: 'discord', sourceRef, stage: 'DROPPED', dropReason: 'PRE_FILTER_NO_BET_CONTENT', payload: { hardFilter: 'vxtwitter_no_pick' } });
+    return;
+  }
 
   // ═══ OCR Slip Feed — check before picks channel guard ═══
   const slipHandled = await handleSlipFeed(message);
@@ -704,11 +813,17 @@ async function handleMessage(message, { isUpdate = false } = {}) {
   // because guard would have dropped them); self-skip via reason='self'.
 
   // ═══ GUARD 3: Skip replies in mapped capper channels (prevents tail-loops) ═══
-  if (isMappedChannel && message.reference) return;
+  if (isMappedChannel && message.reference) {
+    recordDrop({ ingestId, sourceType: 'discord', sourceRef, stage: 'DROPPED', dropReason: 'BOUNCER_REJECTED', payload: { guardReason: 'mapped_channel_reply' } });
+    return;
+  }
 
   // ═══ GUARD 4: Skip old messages (only process last 2 min) ═══
   const msgAge = Date.now() - message.createdTimestamp;
-  if (msgAge > 2 * 60 * 1000) return;
+  if (msgAge > 2 * 60 * 1000) {
+    recordDrop({ ingestId, sourceType: 'discord', sourceRef, stage: 'DROPPED', dropReason: 'AGE_GATE', payload: { ageMs: msgAge } });
+    return;
+  }
 
   const hasText = fullContent.length > 0;
   const images = getImageAttachments(message);
@@ -727,6 +842,7 @@ async function handleMessage(message, { isUpdate = false } = {}) {
     const isWhitelisted = isMappedChannel || isBot || capperIds.includes(message.author.id);
     if (!isWhitelisted) {
       console.log(`[Guard] Ignored image-only msg from non-capper ${message.author.tag} in #${message.channel.name}`);
+      recordDrop({ ingestId, sourceType: 'discord', sourceRef, stage: 'DROPPED', dropReason: 'BOUNCER_REJECTED', payload: { guardReason: 'image_only_non_capper', channelName: message.channel?.name } });
       return;
     }
   }
@@ -745,6 +861,7 @@ async function handleMessage(message, { isUpdate = false } = {}) {
   const textIsPick = looksLikePick(fullText);
   const textIsCelebration = looksLikeCelebration(fullText);
   if (!textIsPick && !textIsCelebration && !hasImages) {
+    recordDrop({ ingestId, sourceType: 'discord', sourceRef, stage: 'DROPPED', dropReason: 'PRE_FILTER_NO_BET_CONTENT', payload: { textLen: fullText.length } });
     return;
   }
 
@@ -756,9 +873,25 @@ async function handleMessage(message, { isUpdate = false } = {}) {
 // processAggregatedMessage — runs after the 4-second buffer flushes
 // Receives the combined text + images from all buffered messages.
 // ═══════════════════════════════════════════════════════════════
-async function processAggregatedMessage(message, combinedRawText, combinedImages) {
+async function processAggregatedMessage(message, combinedRawText, combinedImages, opts = {}) {
   const hasImages = combinedImages.length > 0;
   const fullText = combinedRawText;
+  const ingestId = opts.primaryIngestId || makeIngestId('discord', message.id);
+  const ingestIds = opts.ingestIds?.length ? opts.ingestIds : [ingestId];
+  const sourceRef = message.id;
+
+  // Helper: emit a drop against every underlying source_ref in the buffer
+  // so aggregated batches do not hide individual messages.
+  const dropAll = (stage, dropReason, payload = {}) => {
+    for (const id of ingestIds) {
+      recordDrop({ ingestId: id, sourceType: 'discord', sourceRef: id.replace(/^disc_/, ''), stage, dropReason, payload });
+    }
+  };
+  const stageAll = (stage, payload = {}) => {
+    for (const id of ingestIds) {
+      recordStage({ ingestId: id, sourceType: 'discord', sourceRef: id.replace(/^disc_/, ''), stage, eventType: 'STAGE_ENTER', payload });
+    }
+  };
 
   try {
     const capperInfo = resolveCapper(message);
@@ -796,12 +929,14 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
       const outerText = hardScrub(combinedRawText.split('\n')[0] || '');
       if (/✅|❌|✔|✓/.test(outerText)) {
         console.log(`[Filter] Outer wrapper has settled marker: "${outerText.slice(0, 60)}" — rejecting`);
+        dropAll('DROPPED', 'PRE_FILTER_NO_BET_CONTENT', { filter: 'outer_settled_marker', sample: outerText.slice(0, 80) });
         return;
       }
       if (cleanText.length > 5) {
         const preCheck = evaluateTweet(cleanText);
         if (preCheck === 'reject_settled') {
           console.log(`[Filter] Pre-filter: settled recap (all ✅) — skipping AI`);
+          dropAll('DROPPED', 'PRE_FILTER_NO_BET_CONTENT', { filter: 'evaluateTweet_reject_settled' });
           return;
         }
       }
@@ -810,10 +945,12 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
         // Single image (or text-only) — normal path
         const imageUrl = imageUrls[0] || null;
         console.log(`[DEBUG] Sending to AI. Text length: ${cleanText.length} | hasImage: ${!!imageUrl} | preview: "${cleanText.slice(0, 100)}"`);
+        if (imageUrl) stageAll('EXTRACTED', { imageCount: 1, imageUrl: imageUrl.slice(0, 120) });
         parsed = await parseBetText(textPrompt, imageUrl, { imageUrl });
       } else {
         // Multiple images — process each sequentially then merge
         console.log(`[DEBUG] Processing ${imageUrls.length} images sequentially...`);
+        stageAll('EXTRACTED', { imageCount: imageUrls.length });
         const mergedBets = [];
         let mergedTicketStatus = 'new';
         let mergedType = 'ignore';
@@ -844,6 +981,7 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
       }
 
       console.log(`[DEBUG] AI Response: type=${parsed.type || 'bet'} is_bet=${parsed.is_bet} bets=${parsed.bets?.length || 0} ticket_status=${parsed.ticket_status || 'new'}`);
+      stageAll('PARSED', { type: parsed.type || 'bet', isBet: !!parsed.is_bet, betCount: parsed.bets?.length || 0, ticketStatus: parsed.ticket_status || 'new' });
 
       // Auto-grade detection
       if (parsed.type === 'result') {
@@ -914,6 +1052,7 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
       // Not a bet — silently ignore
       if (parsed.is_bet === false) {
         console.log(`[Filter] AI rejected as non-bet: ${cleanText.substring(0, 60)}...`);
+        dropAll('DROPPED', 'PRE_FILTER_NO_BET_CONTENT', { filter: 'ai_is_bet_false', sample: cleanText.slice(0, 80) });
         return;
       }
 
@@ -934,6 +1073,10 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
           const validation = validateParsedBet(bet, cleanText, { hasMedia: hasAnyImage });
           if (!validation.valid) {
             console.warn(`[MessageHandler] HALLUCINATION BLOCKED: ${validation.reason} | ${validation.issues.join('; ')}`);
+            const mappedReason = validation.reason === 'leg_sport_mismatch' ? 'VALIDATOR_SPORT_MISMATCH'
+              : validation.reason === 'entity_mismatch' ? 'VALIDATOR_ENTITY_MISMATCH'
+              : 'BOUNCER_REJECTED';
+            dropAll('DROPPED', mappedReason, { validator: validation.reason, issues: validation.issues, description: (bet.description || '').slice(0, 120) });
             continue;
           }
 
@@ -957,11 +1100,15 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
             review_status: reviewStatus,
           }, bet.legs || []);
           if (!saved?._deduped) {
+            recordStage({ ingestId, betId: saved?.id || null, sourceType: 'discord', sourceRef, stage: 'VALIDATED', eventType: 'STAGE_EXIT', payload: { reviewStatus } });
+            recordStage({ ingestId, betId: saved?.id || null, sourceType: 'discord', sourceRef, stage: 'STAGED', eventType: 'STAGE_EXIT', payload: { reviewStatus, sport: bet.sport, betType: bet.bet_type } });
             if (reviewStatus === 'needs_review') {
               reviewBets.push(saved);
             } else {
               allBets.push(saved);
             }
+          } else {
+            recordDrop({ ingestId, sourceType: 'discord', sourceRef, stage: 'DROPPED', dropReason: 'DUPLICATE_IMAGE', payload: { dedup: 'fingerprint' } });
           }
         }
       }
@@ -991,9 +1138,13 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
     // Silently ignore duplicate image detections
     if (err.message === 'DUPLICATE_IMAGE_DETECTED') {
       console.log('[Dedup] Duplicate image detected — skipping silently.');
+      dropAll('DROPPED', 'DUPLICATE_IMAGE', { where: 'processAggregatedMessage' });
       return;
     }
     console.error('[MessageHandler] Error:', err.message);
+    for (const id of ingestIds) {
+      recordError({ ingestId: id, sourceType: 'discord', sourceRef: id.replace(/^disc_/, ''), stage: 'ERROR', error: err, payload: { where: 'processAggregatedMessage', channel: message.channel?.name } });
+    }
     // P0 incidental fix: `context` was undefined here; build it locally.
     await reportErrorToAdmin(err, {
       channelName: message.channel?.name,

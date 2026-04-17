@@ -9,6 +9,7 @@
 
 const { db, getTrackedTwitterAccounts, getSetting, setSetting } = require('./database');
 const { handleTwitterWebhookPayload } = require('./twitter-handler');
+const { recordDrop, makeIngestId } = require('./pipeline-events');
 
 const delay = ms => new Promise(r => setTimeout(r, ms));
 
@@ -174,7 +175,20 @@ async function pollCappers(client) {
       // Age gate for fresh handles
       if (freshHandles.has(author)) {
         const tweetTime = tweet.createdAt ? new Date(tweet.createdAt).getTime() : (tweet.created_at ? new Date(tweet.created_at).getTime() : 0);
-        if (tweetTime && tweetTime < sixHoursAgo) { ageFiltered++; continue; }
+        if (tweetTime && tweetTime < sixHoursAgo) {
+          const ageTweetId = String(tweet.id || tweet.tweet_id || tweet.rest_id || tweet.id_str || '');
+          const ageIngestId = makeIngestId('twitter', ageTweetId || `${author}_${tweetTime || Date.now()}`);
+          recordDrop({
+            ingestId: ageIngestId,
+            sourceType: 'twitter',
+            sourceRef: ageTweetId || null,
+            stage: 'DROPPED',
+            dropReason: 'AGE_GATE',
+            payload: { handle: author, tweetTime, cutoff: sixHoursAgo, reason: 'fresh_handle_older_than_6h' },
+          });
+          ageFiltered++;
+          continue;
+        }
       }
 
       if (!tweetsByHandle[author]) tweetsByHandle[author] = [];
