@@ -529,6 +529,9 @@ module.exports = {
       const autoVoided24h = db.prepare(
         "SELECT COUNT(*) AS c FROM bets WHERE review_status = 'auto_void_unscoped_bet' AND graded_at > datetime('now', '-24 hours')"
       ).get()?.c || 0;
+      const autoVoidedNoData24h = db.prepare(
+        "SELECT COUNT(*) AS c FROM bets WHERE review_status = 'auto_void_no_searchable_data' AND graded_at > datetime('now', '-24 hours')"
+      ).get()?.c || 0;
       let visionFallbacks24h = 0;
       try {
         visionFallbacks24h = db.prepare(
@@ -550,7 +553,7 @@ module.exports = {
         `**Last grade:** ${lastGrade}`,
         `**Pending queue:** ${pending}`,
         `**ESPN:** ${espnStats.grades} graded / ${espnStats.requests} req (${espnSportLine})`,
-        `**Auto-voided (unscoped) 24h:** ${autoVoided24h}`,
+        `**Auto-voided (unscoped) 24h:** ${autoVoided24h} | **Auto-voided (no-data) 24h:** ${autoVoidedNoData24h}`,
         `**Vision fallbacks 24h:** ${visionFallbacks24h} | **Gemma:** ${gemmaLine}`,
         `**Brave:** ${fmtBackend('brave')} | **DDG:** ${fmtBackend('ddg')}`,
         `**Bing:** ${fmtBackend('bing')} | **Serper:** ${fmtBackend('serper')}`,

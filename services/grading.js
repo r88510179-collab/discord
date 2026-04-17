@@ -120,6 +120,87 @@ function scheduleRecheckAfterDenial(betId, reason, minutes = 30) {
     WHERE id = ?`).run(`+${minutes} minutes`, String(reason).slice(0, 200), betId);
 }
 
+// ── Auto-void after N PENDING-no-data attempts ──
+//
+// State machine handles transient PENDINGs with exponential backoff, but
+// without a terminal condition a bet where search backends simply don't
+// have data (old game, missing index, etc.) re-queues forever. This adds
+// a terminal void when:
+//   - bet age >= 12h        (games finish fast; if data isn't there by 12h it won't be)
+//   - grading_attempts >= 5 (gives backoff a real chance first)
+//   - last 5 audit rows are ALL PENDING with no-data evidence
+//
+// Only triggers on "no searchable data" signals — AI timeouts, parse
+// errors, rate limits, and other transient failure modes are explicitly
+// NOT auto-voided (they might still resolve).
+const NO_DATA_PATTERNS = [
+  /no final score/i,
+  /no search results/i,
+  /insufficient data/i,
+  /no (game |search )?data (found|available)/i,
+  /search data unavailable/i,
+];
+
+function evidenceLooksLikeNoData(evidence) {
+  if (!evidence) return false;
+  return NO_DATA_PATTERNS.some(p => p.test(evidence));
+}
+
+/**
+ * Return { attempts, hours } if this bet should be auto-voided for
+ * persistent no-data PENDINGs, or null otherwise.
+ *
+ * Parlays audit at `{betId}-leg%` suffixes, not at the parent bet_id,
+ * so the query covers both.
+ */
+function shouldAutoVoidNoData(bet) {
+  const MIN_AGE_MS = 12 * 60 * 60 * 1000;
+  const MIN_ATTEMPTS = 5;
+  if (!bet?.created_at) return null;
+  const ageMs = Date.now() - new Date(bet.created_at).getTime();
+  if (ageMs < MIN_AGE_MS) return null;
+  if ((bet.grading_attempts || 0) < MIN_ATTEMPTS) return null;
+
+  const recent = db.prepare(`
+    SELECT final_status, final_evidence
+    FROM grading_audit
+    WHERE bet_id = ? OR bet_id LIKE ?
+    ORDER BY timestamp DESC
+    LIMIT ?
+  `).all(bet.id, `${bet.id}-leg%`, MIN_ATTEMPTS);
+
+  if (recent.length < MIN_ATTEMPTS) return null;
+  if (!recent.every(r => r.final_status === 'PENDING')) return null;
+  if (!recent.every(r => evidenceLooksLikeNoData(r.final_evidence))) return null;
+
+  return {
+    attempts: bet.grading_attempts,
+    hours: Math.floor(ageMs / 3600000),
+  };
+}
+
+/** Write the terminal void row. Best-effort; never throws. */
+function autoVoidNoSearchableData(bet, info) {
+  console.log(`[AutoGrade] Auto-void no-data: ${bet.id} after ${info.attempts} PENDING over ${info.hours}h`);
+  try {
+    db.prepare(`UPDATE bets SET
+      result = 'void',
+      profit_units = 0,
+      graded_at = datetime('now'),
+      grade = 'VOID',
+      grade_reason = ?,
+      review_status = 'auto_void_no_searchable_data',
+      grading_state = 'done',
+      grading_lock_until = NULL
+    WHERE id = ? AND (result = 'pending' OR result IS NULL)`).run(
+      `Auto-voided: ${info.attempts} consecutive PENDING attempts over ${info.hours}h — search data unavailable for this event`,
+      bet.id
+    );
+  } catch (e) {
+    console.error(`[AutoGrade] Auto-void no-data write error: ${e.message}`);
+  }
+}
+
 const ODDS_API_BASE = 'https://api.the-odds-api.com/v4';
 const API_KEY = process.env.ODDS_API_KEY;
 
@@ -587,7 +668,15 @@ async function runAutoGrade(client) {
       // transition (pending_legs → scheduleRecheckAfterDenial; race-lost → skip).
       await delay(2000);
     } else if (aiResult && aiResult.status === 'PENDING') {
-      applyBackoff(bet.id, attemptsNow, aiResult.evidence || 'ai_pending');
+      // Terminal guard: 5+ no-data PENDINGs over 12h+ → auto-void.
+      // Only fires on "no searchable data" signals; other PENDINGs
+      // (AI timeout, parse error, etc.) still go through backoff.
+      const voidInfo = shouldAutoVoidNoData(bet);
+      if (voidInfo) {
+        autoVoidNoSearchableData(bet, voidInfo);
+      } else {
+        applyBackoff(bet.id, attemptsNow, aiResult.evidence || 'ai_pending');
+      }
     } else if (!aiResult) {
       // Providers all failed / no response; treat as backoff
       applyBackoff(bet.id, attemptsNow, 'no_result');
@@ -1615,6 +1704,9 @@ module.exports = {
   recordBackendResult,
   SUPPORTED_SPORTS,
   isSupportedSport,
+  shouldAutoVoidNoData,
+  autoVoidNoSearchableData,
+  evidenceLooksLikeNoData,
   calcProfit,
   delay,
   findMentionedTeams,
