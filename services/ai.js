@@ -552,7 +552,233 @@ function applyConfidenceGating(result, sourceText) {
   return result;
 }
 
-async function parseBetText(text, imageUrl) {
+// ═══════════════════════════════════════════════════════════
+// GEMMA 3:4b VISION FALLBACK (via Ollama on Surface Pro)
+//
+// Triggered when the primary Vision provider (Gemini et al.) returns
+// placeholder text ("missing legs: capper hid the picks") or empty
+// legs — typically dense slip images it can't parse. Gemma reads the
+// slip, Cerebras parses Gemma's text into JSON matching the primary
+// output shape, and parseBetText resumes as if Gemini had succeeded.
+//
+// Chain:
+//   Gemini   (primary)   → placeholder / empty / quota error
+//   ↓ fallback
+//   Gemma   (Ollama)     → raw slip text
+//   ↓
+//   Cerebras             → structured JSON {legs:[...], bet_type}
+//
+// Every failure at any stage is logged to vision_failures for later
+// review. If the whole chain produces nothing, we return the original
+// Gemini output (if any) — bouncer will still reject placeholders.
+// ═══════════════════════════════════════════════════════════
+
+// ── Gemma circuit breaker ──
+// Same shape as services/grading.js backendHealth. If Ollama hangs or
+// returns nothing, we trip the breaker for 30 min so subsequent vision
+// tweets don't stack 90-second timeouts while Surface Pro is stuck.
+// A successful call resets the breaker.
+const GEMMA_CONFIG = {
+  failCooldownMs: 30 * 60 * 1000, // 30 min — Ollama hangs tend to last a while
+  maxFails: 3,
+};
+const gemmaHealth = {
+  lastSuccess: null,
+  lastFailure: null,
+  failCount: 0,
+  openUntil: null,
+  lastError: null,
+};
+
+function isGemmaHealthy() {
+  if (!gemmaHealth.openUntil) return true;
+  if (Date.now() > gemmaHealth.openUntil) {
+    gemmaHealth.openUntil = null;
+    gemmaHealth.failCount = 0;
+    return true;
+  }
+  return false;
+}
+
+function recordGemmaResult(ok, errorCode = null) {
+  if (ok) {
+    gemmaHealth.lastSuccess = Date.now();
+    gemmaHealth.failCount = 0;
+    gemmaHealth.openUntil = null;
+    gemmaHealth.lastError = null;
+    return;
+  }
+  gemmaHealth.lastFailure = Date.now();
+  gemmaHealth.failCount++;
+  gemmaHealth.lastError = errorCode;
+  if (gemmaHealth.failCount >= GEMMA_CONFIG.maxFails) {
+    gemmaHealth.openUntil = Date.now() + GEMMA_CONFIG.failCooldownMs;
+    console.warn(`[Gemma] Circuit breaker OPEN — ${gemmaHealth.failCount} consecutive failures, cooldown ${GEMMA_CONFIG.failCooldownMs / 60000}m (last: ${errorCode})`);
+  }
+}
+
+const GEMMA_SLIP_PROMPT = `You are reading a sports betting slip image. Extract every pick/leg exactly as written.
+
+For each pick, output one line in this exact format:
+PICK: <player or team name> | <stat or market> | <line or spread> | <odds>
+
+If you cannot read a field, write UNKNOWN in its place. Do not invent values. If the image is not a betting slip, output NOT_A_SLIP.
+
+Example good output:
+PICK: Aaron Judge | HOME RUNS | Over 0.5 | +320
+PICK: Phoenix Suns | SPREAD | -3.5 | -110
+PICK: Yankees Angels | TOTAL RUNS | Over 9.5 | -115
+
+Output PICKs only, one per line, no commentary.`;
+
+/**
+ * Call Gemma 3:4b on Surface Pro Ollama via /api/generate with an image.
+ * Returns raw text output or null on failure.
+ */
+async function tryVisionGemma(imageBase64, mediaType = 'image/png') {
+  const url = process.env.OLLAMA_URL;
+  const secret = process.env.OLLAMA_PROXY_SECRET;
+  if (!url || !secret || !imageBase64) return null;
+
+  // Circuit breaker — if Ollama has been hanging, skip the 90s wait.
+  if (!isGemmaHealthy()) {
+    const remaining = Math.round((gemmaHealth.openUntil - Date.now()) / 60000);
+    console.log(`[Gemma] Circuit breaker OPEN — skipping (${remaining}m remaining, last: ${gemmaHealth.lastError || 'unknown'})`);
+    return null;
+  }
+
+  const model = process.env.OLLAMA_VISION_MODEL || 'gemma3:4b';
+  const start = Date.now();
+  try {
+    const res = await fetch(`${url}/api/generate`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(90_000),
+      headers: {
+        'Content-Type': 'application/json',
+        'x-ollama-secret': secret,
+      },
+      body: JSON.stringify({
+        model,
+        prompt: GEMMA_SLIP_PROMPT,
+        images: [imageBase64],
+        stream: false,
+        options: { temperature: 0 },
+      }),
+    });
+    const duration = Date.now() - start;
+    if (!res.ok) {
+      console.log(`[Gemma] Vision call FAILED: model=${model}, status=${res.status}, duration=${duration}ms`);
+      recordGemmaResult(false, `HTTP_${res.status}`);
+      return null;
+    }
+    const data = await res.json();
+    const output = (data.response || '').trim();
+    console.log(`[Gemma] Vision call: model=${model}, url=${url}, duration=${duration}ms, output_chars=${output.length}`);
+    if (output) {
+      recordGemmaResult(true);
+      return output;
+    }
+    recordGemmaResult(false, 'EMPTY_RESPONSE');
+    return null;
+  } catch (err) {
+    const code = /timeout/i.test(err.message) ? 'TIMEOUT' : 'ERROR';
+    console.log(`[Gemma] Vision call ${code}: ${err.message} (${Date.now() - start}ms)`);
+    recordGemmaResult(false, code);
+    return null;
+  }
+}
+
+/**
+ * Feed Gemma's raw slip text into Cerebras to produce structured JSON
+ * matching parseBetText's expected output shape.
+ *
+ * Returns:
+ *   { json: string, parsed: object }  on success
+ *   null                              on failure
+ */
+async function parseGemmaOutputWithCerebras(gemmaRaw) {
+  if (!gemmaRaw) return null;
+  if (/NOT_A_SLIP/i.test(gemmaRaw)) return { json: JSON.stringify({ type: 'ignore', is_bet: false, bets: [] }), parsed: { type: 'ignore', is_bet: false, bets: [] } };
+
+  const sys = `You are a strict JSON normalizer. Convert the following betting slip picks (one PICK per line) into the exact JSON shape below. Return ONLY valid JSON — no markdown, no commentary.
+
+Expected shape (copy exactly — NO other fields, NO other types):
+{"type":"bet","is_bet":true,"ticket_status":"new","bets":[{"sport":"NBA","league":"NBA","bet_type":"parlay","description":"• Leg 1\\n• Leg 2","odds":null,"units":1,"wager":null,"payout":null,"event_date":null,"legs":[{"description":"Leg 1","odds":-110,"team":"Lakers","line":"-3.5","type":"spread"}],"props":[]}]}
+
+Rules:
+- bet_type: "straight" if 1 leg, "parlay" if 2+ legs.
+- If a PICK line reads UNKNOWN for all fields, drop that leg entirely.
+- If 0 usable legs remain, return {"type":"ignore","is_bet":false,"bets":[]}.
+- odds: parse American odds (+320, -110) as integer. Missing → null.
+- For player props, populate "props" with {player_name, stat_category (snake_case), line (number), direction ("over"/"under"), odds}.
+- description for parlays = bullet list, one line per leg.
+- Sport: use specific league (MLB, NBA, NHL, NFL, UCL, EPL, etc).
+- NEVER fabricate. If the PICK lines do not support a field, use null.`;
+
+  const raw = await callLLM(gemmaRaw, sys, null, null);
+  if (!raw) return null;
+  const parsed = parseJSON(raw);
+  if (!parsed) return null;
+
+  // Accept ignore-shaped responses (not-a-slip / all-unknown) as valid
+  if (parsed.type === 'ignore' || parsed.is_bet === false) {
+    return { json: raw, parsed, cerebrasRaw: raw };
+  }
+
+  const bets = Array.isArray(parsed.bets) ? parsed.bets : [];
+  const anyLegs = bets.some(b => Array.isArray(b.legs) && b.legs.length > 0);
+  if (bets.length === 0 || !anyLegs) return null;
+
+  return { json: raw, parsed, cerebrasRaw: raw };
+}
+
+/** Write a vision_failures row. Best-effort; never throws. */
+function logVisionFailure({ tweetId, imageUrl, geminiResponse, gemmaResponse, cerebrasResponse, stage }) {
+  try {
+    const { db } = require('./database');
+    const id = crypto.randomBytes(8).toString('hex');
+    db.prepare(`INSERT INTO vision_failures
+      (id, tweet_id, image_url, gemini_response, gemma_response, cerebras_response, failure_stage)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+      id,
+      tweetId || null,
+      imageUrl || null,
+      (geminiResponse || '').slice(0, 4000),
+      (gemmaResponse || '').slice(0, 4000),
+      (cerebrasResponse || '').slice(0, 4000),
+      stage,
+    );
+  } catch (e) {
+    console.error(`[VisionFailure] log write error (non-fatal): ${e.message}`);
+  }
+}
+
+/**
+ * Run the Gemma → Cerebras fallback. Returns a JSON string (same shape
+ * callers expect from callLLM) on success, or null on failure.
+ */
+async function runGemmaVisionFallback({ imageBase64, mediaType, geminiResponse, tweetId, imageUrl }) {
+  const gemmaRaw = await tryVisionGemma(imageBase64, mediaType);
+  if (!gemmaRaw) {
+    logVisionFailure({ tweetId, imageUrl, geminiResponse, stage: 'gemma' });
+    return null;
+  }
+  console.log(`[Gemma→Cerebras] Gemma produced ${gemmaRaw.length} chars — parsing...`);
+
+  const parsed = await parseGemmaOutputWithCerebras(gemmaRaw);
+  if (!parsed) {
+    logVisionFailure({ tweetId, imageUrl, geminiResponse, gemmaResponse: gemmaRaw, stage: 'cerebras_parse' });
+    return null;
+  }
+  if (parsed.parsed.type === 'ignore') {
+    console.log('[Gemma→Cerebras] Cerebras flagged as non-bet/empty — returning ignore');
+    return parsed.json;
+  }
+  console.log(`[Gemma→Cerebras] success: ${parsed.parsed.bets?.length || 0} bet(s)`);
+  return parsed.json;
+}
+
+async function parseBetText(text, imageUrl, options = {}) {
   // If no image, try regex fast-path first
   if (!imageUrl) {
     const quick = regexParseBet(text);
@@ -636,7 +862,48 @@ STRICT RULES:
 - Parse ALL bets. For player props, include a "props" array: player_name, stat_category (snake_case), line (number), direction ("over"/"under"), odds (integer or null).
 - Raw OCR text may contain typos and garbage chars. Do your best (e.g., "0ver"="over", "und3r"="under", "Lebr0n"="LeBron").
 Output strictly valid JSON. Do not include markdown formatting, do not include \`\`\`json backticks, and do not include any conversational text.`;
-  const raw = await callLLM(text, sys, imageBase64, mediaType);
+  let raw = await callLLM(text, sys, imageBase64, mediaType);
+
+  // ── VISION FALLBACK: Gemma 3:4b on Surface Pro ──
+  // If the primary vision call returned nothing, placeholder text, or a
+  // parse with zero legs, try Gemma. This catches two failure modes:
+  //   (a) Gemini quota exhausted → raw is null
+  //   (b) Dense slip → Gemini returns "missing legs: capper hid..."
+  //   (c) Gemini returned valid JSON but extracted 0 legs
+  if (imageBase64) {
+    const rawText = typeof raw === 'string' ? raw : '';
+    const hasPlaceholder = FORBIDDEN_PLACEHOLDERS.some(p => rawText.toLowerCase().includes(p))
+      || /missing legs|capper hid|cannot read|cannot parse|unable to/i.test(rawText);
+    let noLegsFound = false;
+    if (raw && !hasPlaceholder) {
+      try {
+        const quick = parseJSON(raw);
+        if (quick && (quick.type === 'bet' || quick.is_bet === true)) {
+          const bets = Array.isArray(quick.bets) ? quick.bets : [];
+          noLegsFound = bets.length === 0 || !bets.some(b => Array.isArray(b.legs) && b.legs.length > 0);
+        }
+      } catch (_) {}
+    }
+    const shouldFallback = !raw || hasPlaceholder || noLegsFound;
+    if (shouldFallback) {
+      const trigger = !raw ? 'primary_null' : hasPlaceholder ? 'placeholder' : 'no_legs';
+      console.log(`[VisionFallback] Triggering Gemma (reason=${trigger})`);
+      const gemmaJson = await runGemmaVisionFallback({
+        imageBase64,
+        mediaType,
+        geminiResponse: rawText,
+        tweetId: options.tweetId || null,
+        imageUrl: imageUrl || null,
+      });
+      if (gemmaJson) {
+        console.log('[VisionFallback] Gemma+Cerebras succeeded — substituting primary output');
+        raw = gemmaJson;
+      } else {
+        console.log('[VisionFallback] Gemma chain failed — falling through to original output');
+      }
+    }
+  }
+
   if (!raw) return { bets: [], error: 'AI unavailable' };
   const parsed = parseJSON(raw);
   if (!parsed) return { bets: [], error: 'Parse failed' };
@@ -1171,4 +1438,4 @@ function normalizeEventDate(raw) {
   return null;
 }
 
-module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, evaluateTweet, validateParsedBet, validateLegSportConsistency, isSportsbookBrand, reclassifySport, inferLegSport, isInSeason, normalizeEventDate, AMBIGUITY_THRESHOLD };
+module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, evaluateTweet, validateParsedBet, validateLegSportConsistency, isSportsbookBrand, reclassifySport, inferLegSport, isInSeason, normalizeEventDate, AMBIGUITY_THRESHOLD, tryVisionGemma, parseGemmaOutputWithCerebras, runGemmaVisionFallback, logVisionFailure, GEMMA_SLIP_PROMPT, gemmaHealth, isGemmaHealthy, recordGemmaResult };

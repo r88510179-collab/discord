@@ -529,11 +529,29 @@ module.exports = {
       const autoVoided24h = db.prepare(
         "SELECT COUNT(*) AS c FROM bets WHERE review_status = 'auto_void_unscoped_bet' AND graded_at > datetime('now', '-24 hours')"
       ).get()?.c || 0;
+      let visionFallbacks24h = 0;
+      try {
+        visionFallbacks24h = db.prepare(
+          "SELECT COUNT(*) AS c FROM vision_failures WHERE created_at > datetime('now', '-24 hours')"
+        ).get()?.c || 0;
+      } catch (_) { /* migration 017 may not be applied yet on first deploy */ }
+      const { gemmaHealth } = require('../services/ai');
+      let gemmaLine = 'idle';
+      if (gemmaHealth?.openUntil && Date.now() < gemmaHealth.openUntil) {
+        const m = Math.ceil((gemmaHealth.openUntil - Date.now()) / 60000);
+        gemmaLine = `OPEN (${gemmaHealth.lastError || 'unknown'}, ${m}m)`;
+      } else if (gemmaHealth?.lastSuccess) {
+        const m = Math.floor((Date.now() - gemmaHealth.lastSuccess) / 60000);
+        gemmaLine = `healthy (${m}m ago)`;
+      } else if (gemmaHealth?.lastFailure) {
+        gemmaLine = `failing (${gemmaHealth.failCount} fails, last: ${gemmaHealth.lastError || 'unknown'})`;
+      }
       const gradeLines = [
         `**Last grade:** ${lastGrade}`,
         `**Pending queue:** ${pending}`,
         `**ESPN:** ${espnStats.grades} graded / ${espnStats.requests} req (${espnSportLine})`,
         `**Auto-voided (unscoped) 24h:** ${autoVoided24h}`,
+        `**Vision fallbacks 24h:** ${visionFallbacks24h} | **Gemma:** ${gemmaLine}`,
         `**Brave:** ${fmtBackend('brave')} | **DDG:** ${fmtBackend('ddg')}`,
         `**Bing:** ${fmtBackend('bing')} | **Serper:** ${fmtBackend('serper')}`,
       ];

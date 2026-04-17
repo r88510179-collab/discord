@@ -437,7 +437,7 @@ async function processSlipImage(client, imageUrl, capperId, capperName, opts = {
   const prompt = ocrText.length > 10
     ? `Read the attached betting slip image AND the following OCR text to extract all bets:\n\n${ocrText}${contextLine}`
     : `Read the attached betting slip image and extract all bets, players, lines, and odds.${contextLine}`;
-  const parsed = await parseBetText(prompt, imageUrl);
+  const parsed = await parseBetText(prompt, imageUrl, { imageUrl });
 
   if (!parsed.bets || parsed.bets.length === 0) {
     console.log('[SlipPipeline] Stage 2: No bets found in image.');
@@ -810,7 +810,7 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
         // Single image (or text-only) — normal path
         const imageUrl = imageUrls[0] || null;
         console.log(`[DEBUG] Sending to AI. Text length: ${cleanText.length} | hasImage: ${!!imageUrl} | preview: "${cleanText.slice(0, 100)}"`);
-        parsed = await parseBetText(textPrompt, imageUrl);
+        parsed = await parseBetText(textPrompt, imageUrl, { imageUrl });
       } else {
         // Multiple images — process each sequentially then merge
         console.log(`[DEBUG] Processing ${imageUrls.length} images sequentially...`);
@@ -820,7 +820,7 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
 
         for (let i = 0; i < imageUrls.length; i++) {
           console.log(`[DEBUG] Image ${i + 1}/${imageUrls.length}: ${imageUrls[i].slice(0, 60)}...`);
-          const imgParsed = await parseBetText(textPrompt, imageUrls[i]);
+          const imgParsed = await parseBetText(textPrompt, imageUrls[i], { imageUrl: imageUrls[i] });
           console.log(`[DEBUG] Image ${i + 1} result: type=${imgParsed.type} bets=${imgParsed.bets?.length || 0} ticket_status=${imgParsed.ticket_status || 'new'}`);
 
           if (imgParsed.bets?.length > 0) mergedBets.push(...imgParsed.bets);
