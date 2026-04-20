@@ -53,6 +53,10 @@ function parsePlayerPropDescription(description) {
   if (!description) return null;
   const raw = String(description).trim();
 
+  // Strip trailing pitcher context: "HRs vs Paddack" → "HRs".
+  // Applied to every statText match below.
+  const stripVs = (s) => (s || '').replace(/\s+vs\.?\s+.+$/i, '').trim();
+
   // Shape A: "<Player> (Over|Under|O|U) <threshold> <stat>"
   //   threshold may have a trailing "+"
   let m = raw.match(/^(.+?)\s+(over|under|o|u)\s+(\d+(?:\.\d+)?)\s*\+?\s+(.+?)$/i);
@@ -61,7 +65,7 @@ function parsePlayerPropDescription(description) {
     const dirRaw = m[2].toLowerCase();
     const direction = dirRaw.startsWith('o') ? 'over' : 'under';
     const threshold = parseFloat(m[3]);
-    const statText = m[4].trim();
+    const statText = stripVs(m[4]);
     if (player && !isNaN(threshold) && statText) {
       return { player, statText, threshold, direction };
     }
@@ -73,7 +77,7 @@ function parsePlayerPropDescription(description) {
   if (m) {
     const player = cleanPlayerName(m[1]);
     const nInt = parseInt(m[2], 10);
-    const statText = m[3].trim();
+    const statText = stripVs(m[3]);
     if (player && !isNaN(nInt) && statText) {
       return { player, statText, threshold: nInt - 0.5, direction: 'over' };
     }
@@ -82,8 +86,30 @@ function parsePlayerPropDescription(description) {
   // Shape C: "<Player> <threshold>+ <stat>" (no "To Record") — covered by
   // Shape B via optional prefix.
 
+  // Shape D: "<Player> <stat> <N>+" — stat-before-threshold.
+  // Common on slip exports: "Trevor Larnach Hits + Runs + RBIs 1+".
+  // The stat group is anchored to known MLB stat tokens (with optional
+  // "+" joins for composite stats) so greedy player capture doesn't
+  // steal a stat token, and gibberish like "Some Random Words 5+" is
+  // rejected. Multi-line blobs never match because `.` excludes \n.
+  m = raw.match(SHAPE_D_RX);
+  if (m) {
+    const player = cleanPlayerName(m[1]);
+    const nInt = parseInt(m[3], 10);
+    const statText = stripVs(m[2]);
+    if (player && !isNaN(nInt) && statText) {
+      return { player, statText, threshold: nInt - 0.5, direction: 'over' };
+    }
+  }
+
   return null;
 }
+
+const _STAT_TOKEN = '(?:hits?|runs?|rbis?|home\\s+runs?|hrs?|total\\s+bases?|tbs?|walks?|bbs?|strikeouts?|ks?|stolen\\s+bases?|sbs?|innings?|ip|outs?|earned\\s+runs?|ers?)';
+const SHAPE_D_RX = new RegExp(
+  '^(.+?)\\s+(' + _STAT_TOKEN + '(?:\\s*\\+\\s*' + _STAT_TOKEN + ')*)\\s+(\\d+)\\s*\\+\\s*$',
+  'i',
+);
 
 function cleanPlayerName(raw) {
   const s = String(raw || '').trim()
