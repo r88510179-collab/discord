@@ -72,7 +72,10 @@ module.exports = {
         .addStringOption(opt => opt.setName('ingest_id').setDescription('Ingest id (e.g. disc_12345, twit_67890)').setRequired(true)))
     .addSubcommand(sub =>
       sub.setName('pipeline-drops-24h')
-        .setDescription('Aggregated DROP counts by reason from the last 24h')),
+        .setDescription('Aggregated DROP counts by reason from the last 24h'))
+    .addSubcommand(sub =>
+      sub.setName('resolver-health')
+        .setDescription('Check MLB StatsAPI resolver health + circuit-breaker state')),
 
   async execute(interaction) {
     const sub = interaction.options.getSubcommand();
@@ -765,6 +768,40 @@ module.exports = {
         '```',
         ...lines,
         '```',
+      ].join('\n');
+
+      return interaction.editReply(body.slice(0, 1990));
+    }
+
+    // ── Resolver health: MLB StatsAPI sidecar status ──
+    if (sub === 'resolver-health') {
+      if (process.env.OWNER_ID && interaction.user.id !== process.env.OWNER_ID) return interaction.reply({ content: '🚫', ephemeral: true });
+      await interaction.deferReply({ ephemeral: true });
+
+      const { checkHealth, getStats } = require('../services/resolver');
+      const [health, s] = [await checkHealth(), getStats()];
+
+      const statusLine = health.ok
+        ? `✅ **UP** (HTTP ${health.status}, ${health.latency_ms}ms)`
+        : `❌ **DOWN** (${health.status ? `HTTP ${health.status}` : health.error || 'unreachable'}, ${health.latency_ms}ms)`;
+
+      const circuitLine = s.circuit_open
+        ? `🔴 OPEN until ${s.circuit_open_until}`
+        : `🟢 closed (consecutive failures: ${s.consecutive_failures})`;
+
+      const body = [
+        `**MLB Resolver Health**`,
+        `URL: \`${s.resolver_url}\``,
+        `Status: ${statusLine}`,
+        `Circuit: ${circuitLine}`,
+        `Supported stats loaded: ${s.supported_stats_loaded}`,
+        '',
+        `**Counters (process-lifetime):**`,
+        `• hits: ${s.hits}`,
+        `• pending: ${s.pending}`,
+        `• unknown: ${s.unknown}`,
+        `• fell through: ${s.fell_through}`,
+        `• errors: ${s.errors}`,
       ].join('\n');
 
       return interaction.editReply(body.slice(0, 1990));

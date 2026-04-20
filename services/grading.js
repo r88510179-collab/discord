@@ -17,6 +17,90 @@ const SUPPORTED_SPORTS = new Set([
   'MMA', 'UFC', 'BOXING',
 ]);
 
+// ═══════════════════════════════════════════════════════════
+// Player prop detector + description parser (MLB StatsAPI pre-check)
+// Permissive by design — false positives cost one cheap resolver call;
+// false negatives cost an AI call. Parser returns null when not
+// confident; caller falls through to ESPN/AI.
+// ═══════════════════════════════════════════════════════════
+
+const PLAYER_PROP_STAT_HINTS = /\b(hits?|runs?|rbis?|home\s*runs?|hrs?|total\s*bases?|tbs?|walks?|bbs?|strikeouts?|ks?|stolen\s*bases?|sbs?|innings?|ip|outs?|earned\s*runs?|ers?)\b/i;
+
+function looksLikePlayerProp(bet) {
+  if (!bet || !bet.description) return false;
+  const desc = String(bet.description);
+  // Heuristic: at least one capitalized two-word name followed later by
+  // a stat hint plus a numeric threshold.
+  const hasPlayer = /\b[A-Z][a-z'’.-]+(?:\s+(?:Jr\.?|Sr\.?|I{1,3}|IV|V))?\s+[A-Z][a-z'’.-]+/.test(desc);
+  const hasStat = PLAYER_PROP_STAT_HINTS.test(desc);
+  const hasThreshold = /\b\d+(?:\.\d+)?\s*\+?\b/.test(desc);
+  return hasPlayer && hasStat && hasThreshold;
+}
+
+/**
+ * Best-effort parse of a player-prop slip description into
+ * { player, statText, threshold, direction }.
+ * Returns null if the parse is not confident — never guesses.
+ *
+ * Handles common shapes like:
+ *   "Shohei Ohtani Over 1.5 Hits"
+ *   "Aaron Judge Under 2.5 Total Bases"
+ *   "Mookie Betts To Record 2+ Hits"
+ *   "Gerrit Cole O 5.5 Strikeouts"
+ *   "Kyle Tucker 1+ Hits"
+ */
+function parsePlayerPropDescription(description) {
+  if (!description) return null;
+  const raw = String(description).trim();
+
+  // Shape A: "<Player> (Over|Under|O|U) <threshold> <stat>"
+  //   threshold may have a trailing "+"
+  let m = raw.match(/^(.+?)\s+(over|under|o|u)\s+(\d+(?:\.\d+)?)\s*\+?\s+(.+?)$/i);
+  if (m) {
+    const player = cleanPlayerName(m[1]);
+    const dirRaw = m[2].toLowerCase();
+    const direction = dirRaw.startsWith('o') ? 'over' : 'under';
+    const threshold = parseFloat(m[3]);
+    const statText = m[4].trim();
+    if (player && !isNaN(threshold) && statText) {
+      return { player, statText, threshold, direction };
+    }
+  }
+
+  // Shape B: "<Player> To Record <threshold>+ <stat>" — "N+" maps to
+  // over (N − 0.5), which is how every sportsbook graders it.
+  m = raw.match(/^(.+?)\s+(?:to\s+(?:record|score|have|get|hit|collect)\s+)?(\d+)\s*\+\s+(.+?)$/i);
+  if (m) {
+    const player = cleanPlayerName(m[1]);
+    const nInt = parseInt(m[2], 10);
+    const statText = m[3].trim();
+    if (player && !isNaN(nInt) && statText) {
+      return { player, statText, threshold: nInt - 0.5, direction: 'over' };
+    }
+  }
+
+  // Shape C: "<Player> <threshold>+ <stat>" (no "To Record") — covered by
+  // Shape B via optional prefix.
+
+  return null;
+}
+
+function cleanPlayerName(raw) {
+  const s = String(raw || '').trim()
+    .replace(/^[•·\-*]\s+/, '')
+    .replace(/\s+/g, ' ');
+  // Require at least two tokens starting uppercase — avoids misfiring on
+  // "Lakers -3.5" where the first token is a team.
+  const parts = s.split(' ');
+  if (parts.length < 2) return null;
+  const firstTwo = parts.slice(0, 2).join(' ');
+  if (!/^[A-Z][a-z'’.-]+(?:\s+(?:Jr\.?|Sr\.?|I{1,3}|IV|V))?\s+[A-Z][a-z'’.-]+/.test(firstTwo)) {
+    // Also accept names that span more tokens (e.g. "Luisangel Acuña")
+    if (!/^[A-Z][a-z'’.-]+(?:\s+[A-Z][a-z'’.-]+)+$/.test(s)) return null;
+  }
+  return s;
+}
+
 function isSupportedSport(sport) {
   if (!sport) return false;
   const s = String(sport).trim().toUpperCase();
@@ -1317,6 +1401,65 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
   const betTeamList = [...betTeams];
   console.log(`[AI Grader] Bet teams: [${betTeamList.join(', ')}] | Sport: ${sportContext || '?'}`);
 
+  // ── MLB StatsAPI RESOLVER PRE-CHECK ──
+  // Deterministic grading for MLB player props. Runs BEFORE ESPN so we
+  // only fall through to ESPN/AI when the resolver cannot decide.
+  // Non-MLB / non-player-prop bets skip this entirely.
+  if ((bet.sport || '').toUpperCase() === 'MLB' && looksLikePlayerProp(bet)) {
+    const parsed = parsePlayerPropDescription(bet.description || '');
+    if (parsed) {
+      const { resolvePlayerProp, mapToResolverStat } = require('./resolver');
+
+      // Pitching-context rewrite: bare "strikeouts" defaults to batter,
+      // so pitchers (whose slips often read "O 5.5 Strikeouts") would
+      // otherwise resolve against the wrong stat. If the description
+      // names a pitching cue, steer the mapper toward the pitcher key.
+      let statText = parsed.statText;
+      if (/\b(pitching|pitcher|thrown|pitched)\b/i.test(bet.description || '')
+          && /^strikeouts?$/i.test(statText.trim())) {
+        statText = `pitching ${statText}`;
+      }
+
+      const stat = mapToResolverStat(statText);
+      if (stat) {
+        const rawDate = bet.event_date || bet.created_at;
+        const gameDate = (rawDate && typeof rawDate === 'string' && rawDate.length >= 10)
+          ? rawDate.slice(0, 10)
+          : new Date(rawDate || Date.now()).toISOString().slice(0, 10);
+
+        try {
+          const r = await resolvePlayerProp({
+            player: parsed.player,
+            stat,
+            threshold: parsed.threshold,
+            direction: parsed.direction,
+            date: gameDate,
+          });
+          if (r.graded) {
+            console.log(`[grade] resolved via StatsAPI bet=${bet.id?.slice(0, 8)} source=${r.source} result=${r.result} actual=${r.actual}`);
+            audit.search_backend = 'resolver';
+            audit.provider_used = r.source || 'mlb.statsapi';
+            audit.search_hits = 1;
+            const playerName = r.player?.full_name || parsed.player;
+            return earlyReturn({
+              status: r.result,
+              evidence: `${playerName} ${stat}=${r.actual} vs ${parsed.direction} ${parsed.threshold} (${r.source || 'mlb.statsapi'})`,
+            });
+          }
+          if (r.reason === 'pending') {
+            console.log(`[grade] resolver says pending bet=${bet.id?.slice(0, 8)}, returning PENDING`);
+            audit.search_backend = 'resolver';
+            audit.provider_used = 'mlb.statsapi';
+            return earlyReturn({ status: 'PENDING', evidence: 'Game not yet Final (resolver)' });
+          }
+          console.log(`[grade] resolver non-decisive bet=${bet.id?.slice(0, 8)} reason=${r.reason} detail=${r.detail || ''} — falling through`);
+        } catch (err) {
+          console.error(`[Resolver] error (non-fatal, falling through): ${err.message}`);
+        }
+      }
+    }
+  }
+
   // ── ESPN PRE-CHECK: deterministic grading for standard MLB/NBA/NHL/NFL bets ──
   // Runs BEFORE the expensive searchWeb + AI chain. Skips props, parlays,
   // and unparseable descriptions — those fall through to the existing path.
@@ -1704,6 +1847,8 @@ module.exports = {
   recordBackendResult,
   SUPPORTED_SPORTS,
   isSupportedSport,
+  // Exported for unit tests only — do not rely on these from bot code:
+  _internal: { looksLikePlayerProp, parsePlayerPropDescription },
   shouldAutoVoidNoData,
   autoVoidNoSearchableData,
   evidenceLooksLikeNoData,
