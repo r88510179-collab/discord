@@ -45,6 +45,29 @@ Grader logs show 100% HTTP 402 responses from Brave backend. DDG circuit breaker
 ### Action-keyword validation (P2 follow-up to sport consistency)
 Current validateLegSportConsistency() only checks team keywords. Player-only props with cross-sport action words (e.g. "Matt Turner Goalie Saves" in a LoL parlay, "Emmet Sheehan Pitching" in a Soccer parlay) can evade detection if no team names appear. Add a second validator that checks action/prop keywords per sport: soccer=goalie saves/corners/yellow card, mlb=pitching/strikeouts/RBIs, nba=rebounds/assists/PRAs, nhl=saves/shots on goal, etc. Action-keyword mismatch against declared parlay sport = reject.
 
+### Stuck MLB parlays in backoff — two failure modes (Apr 20 v292 verification)
+**Symptom**: 5 MLB parlays in `grading_state='backoff'` with 8 grading_attempts each, surfaced during v292 resolver-telemetry verification. Two distinct root causes; both predate v291.
+
+**Mode A: Slip extraction captured only 1 leg** (3 bets)
+Failure reason: `Parlay has 1 recorded legs — cannot grade without leg data. Manual review required.`
+- `f71cbbc5` — "• Marlins ML +130"
+- `ee2f755d` — "• New York Yankees ML (-145)"
+- `fe9256d0` — "Homerun parlay"
+
+Hypothesis: dense Hard Rock Bet slips defeating current Vision preprocessing — only 1 leg extracted from multi-leg slips. Same class of problem the parked Gemma 4 investigation targets (1120-token OCR budget).
+
+**Mode B: Legs unresolved via ESPN/AI** (2 bets)
+Failure reason: `Parlay PENDING — N leg(s) unresolved.` with individual legs returning "No final score found for this game on YYYY-MM-DD".
+- `34f1b488` — mixed MLB/UCL parlay, 2 legs WIN, 1+ PENDING
+- `e196b33b` — 8-leg HR-vs-pitcher parlay, all legs PENDING since 2026-04-15
+
+Hypothesis: exactly the bet types the v291 resolver pre-check was built for. They predate v291 so they took the old ESPN/AI path, failed, and are now stuck in backoff. Worth retrying after the next live MLB slate confirms resolver is grading cleanly on fresh traffic.
+
+**Next debug steps**:
+1. After first organic resolver hit on v292, manually reset `grading_state='ready'` and `grading_attempts=0` on the 2 Mode B bets and confirm they grade via resolver
+2. For Mode A, wait until Gemma 4 investigation resumes (parked until P0/P1 complete)
+3. Consider a backfill script that force-resolves stuck Mode B bets in batch — no new Vision calls, just resolver retries
+
 ## Ingestion Expansion
 
 ### DubClub email → Discord bridge
@@ -93,6 +116,9 @@ GitHub Actions workflow that blocks PRs on failing `npm run check` + `npm run te
 
 ### README comprehensive documentation
 Architecture, env vars, admin commands, scraper setup, troubleshooting, guard chain reference
+
+### Resolver telemetry — shipped v292 (commit 940f3d2)
+Migration 019 added `resolver_events` table. `/admin snapshot` renders a Resolver block with 24h outcome counts, latency, error breakdown, and last successful resolve timestamp. End-to-end verified via forced `resolvePlayerProp` call on Apr 20.
 
 ## Surface Pro
 
