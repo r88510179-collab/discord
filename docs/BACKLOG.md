@@ -1,5 +1,41 @@
 # ZoneTracker Backlog
 
+## ✅ SHIPPED - Weekend 1 (Apr 20)
+
+### MLB StatsAPI Resolver — live in production
+
+**Deployed:** v291 (bot) + v10 (resolver app `zonetracker-resolver`)
+
+**What it does:** Deterministic grading for MLB player props via `statsapi.mlb.com`. Bot calls resolver before ESPN pre-check; falls through cleanly on non-decisive results. Zero AI calls, zero web searches, sub-second grades.
+
+**Architecture:**
+- Resolver app (`zonetracker-resolver.fly.dev`, internal `http://zonetracker-resolver.internal:8080`)
+- Schedule puller: every 15 min, D-1 through D+1 in ET
+- Boxscore puller: every 2 min, drains `status='F' AND boxscore_fetched_at IS NULL`
+- Teams seeded on first boot (30 teams)
+- Schema: `mlb_games`, `mlb_teams`, `mlb_players`, `mlb_player_game_stats`, `fetch_log`, `schema_migrations`
+- DB at `/data/resolver.db` on Fly volume (path resolves via `FLY_APP_NAME` detection — not `NODE_ENV`)
+
+**Endpoints:**
+- `GET /mlb/stats` → 15 supported stat keys
+- `GET /mlb/schedule?date=YYYY-MM-DD`
+- `GET /mlb/game?teams=XXX,YYY&date=YYYY-MM-DD`
+- `GET /mlb/player-prop?player=...&stat=...&threshold=N&direction=over|under&date=YYYY-MM-DD` → `{ result: win|loss|push|pending|unknown, actual, player, game, source }`
+- `POST /admin/*` (seed-teams, pull-schedule, pull-boxscore, pull-pending-boxscores) — requires `X-Admin-Key` secret
+
+**Bot integration (`services/resolver.js`):**
+- 2.5s timeout, 1h stats cache, 3-strike circuit breaker (2 min open)
+- Inserted in `gradeSingleBet` before ESPN pre-check, gated to `sport === 'MLB'`
+- `/admin resolver-health` shows live status + counters
+- Pitcher-context rewrite: bare "strikeouts" → `pitching strikeouts` when description contains pitching cues
+
+**Stats supported:** hits, runs, rbis, home_runs, total_bases, walks, strikeouts_batter, stolen_bases, strikeouts_pitcher, hits_allowed, runs_allowed, earned_runs, innings_pitched, outs_recorded, hits+runs+rbis
+
+**Verified live (Apr 20):** `Jose Altuve Over 0.5 Hits` on 2026-04-19 → WIN actual=3 via `mlb.statsapi`, sub-second response.
+
+---
+
+
 ## 🚨 KNOWN BUG - Priority 1
 
 ### DatDude #datdude-slips Hard Rock bet slips not staging to war-room
