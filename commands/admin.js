@@ -637,6 +637,78 @@ module.exports = {
         alertText = alerts.lines.join('\n');
       } catch (_) {}
 
+      // ── 11. Resolver (MLB StatsAPI) — last 24h telemetry ──
+      // Reads from resolver_events (migration 019). Every row is one
+      // resolvePlayerProp invocation. Silent on bots that have not
+      // applied the migration yet (try/catch returns a stub).
+      let resolverBlock = 'No resolver_events rows in the last 24h.';
+      try {
+        const cutoffMs = Date.now() - 24 * 60 * 60 * 1000;
+        const aggRows = db.prepare(`
+          SELECT outcome, COUNT(*) AS n, AVG(latency_ms) AS avg_ms, MAX(latency_ms) AS p_max_ms
+          FROM resolver_events
+          WHERE called_at >= ?
+          GROUP BY outcome
+        `).all(cutoffMs);
+        const total = aggRows.reduce((s, r) => s + r.n, 0);
+        if (total > 0) {
+          const byOutcome = Object.fromEntries(aggRows.map(r => [r.outcome, r]));
+          const resolved = byOutcome.resolved?.n || 0;
+          const unresolved = byOutcome.unresolved?.n || 0;
+          const errors = byOutcome.error?.n || 0;
+          const timeouts = byOutcome.timeout?.n || 0;
+          const pct = total > 0 ? Math.round((resolved / total) * 100) : 0;
+          const allMs = aggRows.filter(r => r.avg_ms != null);
+          const avgMs = allMs.length
+            ? Math.round(allMs.reduce((s, r) => s + r.avg_ms * r.n, 0) / allMs.reduce((s, r) => s + r.n, 0))
+            : 0;
+          const maxMs = allMs.length ? Math.max(...allMs.map(r => r.p_max_ms || 0)) : 0;
+
+          const topTypes = db.prepare(`
+            SELECT bet_type, COUNT(*) AS n FROM resolver_events
+            WHERE called_at >= ? AND outcome = 'resolved'
+            GROUP BY bet_type ORDER BY n DESC LIMIT 5
+          `).all(cutoffMs);
+          const topTypesLine = topTypes.length
+            ? topTypes.map(r => `${r.bet_type || 'unknown'} ${r.n}`).join(' · ')
+            : 'none';
+
+          const errBreakdown = db.prepare(`
+            SELECT error_type, COUNT(*) AS n FROM resolver_events
+            WHERE called_at >= ? AND outcome = 'error'
+            GROUP BY error_type ORDER BY n DESC
+          `).all(cutoffMs);
+          const errLine = errBreakdown.length
+            ? errBreakdown.map(r => `${r.error_type || 'unknown'} ${r.n}`).join(' · ')
+            : 'none';
+
+          const lastOk = db.prepare(`SELECT MAX(called_at) AS last_ok FROM resolver_events WHERE outcome = 'resolved'`).get()?.last_ok;
+          const lastOkLine = lastOk
+            ? (() => {
+                const mins = Math.round((Date.now() - Number(lastOk)) / 60000);
+                if (mins < 1) return 'just now';
+                if (mins < 60) return `${mins}m ago`;
+                const h = Math.floor(mins / 60);
+                return `${h}h ${mins % 60}m ago`;
+              })()
+            : 'never';
+
+          const { __internal } = require('../services/resolver');
+          const version = __internal?.RESOLVER_VERSION || process.env.RESOLVER_VERSION || 'unknown';
+
+          resolverBlock = [
+            `**RESOLVER (${version}, last 24h)**`,
+            `Calls: ${total} — resolved ${resolved} (${pct}%) · unresolved ${unresolved} · errors ${errors} · timeouts ${timeouts}`,
+            `Latency: avg ${avgMs}ms · max ${maxMs}ms`,
+            `Top bet types: ${topTypesLine}`,
+            `Errors: ${errLine}`,
+            `Last successful resolve: ${lastOkLine}`,
+          ].join('\n');
+        }
+      } catch (err) {
+        resolverBlock = `resolver_events unavailable: ${err.message}`;
+      }
+
       // Build embeds
       const embed1 = new EmbedBuilder()
         .setTitle('📸 Bot State Snapshot')
@@ -658,6 +730,7 @@ module.exports = {
           { name: '🏆 Top 3 Cappers', value: top3, inline: true },
           { name: '🥶 Bottom 3', value: bot3, inline: true },
           { name: '⚙️ Runtime', value: `Handles: ${handles} | Requests: ${requests}`, inline: true },
+          { name: '🎯 Resolver', value: resolverBlock.slice(0, 1000), inline: false },
           { name: '🚨 Alerts', value: alertText.slice(0, 1000), inline: false },
         );
 

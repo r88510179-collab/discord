@@ -11,6 +11,9 @@
 //     MUST treat { graded: false } as "keep going with ESPN/AI"
 //   - Circuit breaker: 3 consecutive failures → trip open for 2min
 //   - Node 20 native fetch; no new HTTP client dependencies
+//   - Every invocation writes one row to resolver_events (migration
+//     019) for /admin snapshot. Telemetry failures NEVER break the
+//     caller.
 // ═══════════════════════════════════════════════════════════
 
 const { mapToResolverStat } = require('./resolverStatMap');
@@ -18,6 +21,7 @@ const { mapToResolverStat } = require('./resolverStatMap');
 const RESOLVER_URL = process.env.RESOLVER_URL
   || (process.env.FLY_APP_NAME ? 'http://zonetracker-resolver.internal:8080' : 'http://localhost:8080');
 const TIMEOUT_MS = Number(process.env.RESOLVER_TIMEOUT_MS || 2500);
+const RESOLVER_VERSION = process.env.RESOLVER_VERSION || 'unknown';
 
 // Supported-stats cache
 let supportedStats = null;
@@ -32,6 +36,78 @@ const FAILURE_THRESHOLD = 3;
 
 // Lightweight stats — exposed via /admin resolver-health
 const stats = { hits: 0, pending: 0, unknown: 0, fell_through: 0, errors: 0 };
+
+// ── Telemetry: resolver_events (migration 019) ──────────────
+// Lazy-prepared insert so the statement is built after migrations
+// run. A shared prepare survives hot reloads in dev.
+let _resolverInsertStmt = null;
+function getResolverInsertStmt() {
+  if (_resolverInsertStmt) return _resolverInsertStmt;
+  try {
+    const { db } = require('./database');
+    _resolverInsertStmt = db.prepare(`
+      INSERT INTO resolver_events
+        (bet_id, called_at, latency_ms, outcome, error_type, bet_type, resolver_version)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    return _resolverInsertStmt;
+  } catch (err) {
+    console.error('[ResolverTelemetry] prepare failed:', err.message);
+    return null;
+  }
+}
+
+/**
+ * Classify a caught fetch/parse error into a short error_type tag.
+ * Deliberately simple — switch on error shape, nothing fancy.
+ */
+function classifyResolverError(err) {
+  if (!err) return 'unknown';
+  if (err.name === 'AbortError' || /abort/i.test(err.message || '')) return 'timeout';
+  if (/timeout/i.test(err.message || '')) return 'timeout';
+  if (err.message && err.message.startsWith('status ')) {
+    const code = parseInt(err.message.slice(7), 10);
+    if (code >= 500) return 'http_5xx';
+    if (code >= 400) return 'http_4xx';
+  }
+  if (/JSON|parse|unexpected/i.test(err.message || '')) return 'malformed_response';
+  if (err.code && typeof err.code === 'string' && /ENOTFOUND|ECONNREFUSED|ENETUNREACH|ETIMEDOUT/.test(err.code)) return 'network';
+  return 'unknown';
+}
+
+/**
+ * Map a detail string from resolvePlayerProp's { reason:'error', detail } shape
+ * onto one of the error_type tags. Used when the resolver call returned a
+ * non-throwing error result.
+ */
+function detailToErrorType(detail) {
+  if (!detail) return 'unknown';
+  if (/^status 5/.test(detail)) return 'http_5xx';
+  if (/^status 4/.test(detail)) return 'http_4xx';
+  if (/stats_unavailable/.test(detail)) return 'network';
+  if (/abort|timeout/i.test(detail)) return 'timeout';
+  if (/JSON|parse|unexpected/i.test(detail)) return 'malformed_response';
+  return 'unknown';
+}
+
+function logResolverEvent({ betId, startedAt, outcome, errorType, betType }) {
+  try {
+    const stmt = getResolverInsertStmt();
+    if (!stmt) return;
+    stmt.run(
+      String(betId || 'unknown'),
+      Number(startedAt),
+      Number(Date.now() - startedAt),
+      String(outcome),
+      errorType ? String(errorType) : null,
+      betType ? String(betType) : 'unknown',
+      RESOLVER_VERSION,
+    );
+  } catch (err) {
+    console.error('[ResolverTelemetry] log failed', err.message);
+    // never let telemetry failure break grading
+  }
+}
 
 async function fetchWithTimeout(url) {
   const ac = new AbortController();
@@ -88,22 +164,30 @@ function resetCircuitForTests() {
  * @param {number} p.threshold  numeric threshold from the slip (e.g. 1.5, 2.5)
  * @param {'over'|'under'} p.direction
  * @param {string} p.date       YYYY-MM-DD game date
+ * @param {string} [p.betId]    optional — bet id for resolver_events telemetry
+ * @param {string} [p.betType]  optional — bet_type tag for telemetry (prop, parlay_leg, …)
  * @returns {Promise<{graded: true, result: 'WIN'|'LOSS'|'PUSH', actual: number, source: string, player: any, game: any}
  *                  | {graded: false, reason: string, detail?: string}>}
  */
-async function resolvePlayerProp({ player, stat, threshold, direction, date }) {
+async function resolvePlayerProp({ player, stat, threshold, direction, date, betId, betType }) {
+  const startedAt = Date.now();
+  const telemetry = { betId: betId || 'unknown', startedAt, betType: betType || 'prop' };
+
   if (circuitOpen()) {
     stats.fell_through += 1;
+    logResolverEvent({ ...telemetry, outcome: 'error', errorType: 'circuit_open' });
     return { graded: false, reason: 'circuit_open' };
   }
 
   const supported = await loadSupportedStats();
   if (supported.size === 0) {
     stats.errors += 1;
+    logResolverEvent({ ...telemetry, outcome: 'error', errorType: 'network' });
     return { graded: false, reason: 'error', detail: 'stats_unavailable' };
   }
   if (!supported.has(stat)) {
     stats.fell_through += 1;
+    logResolverEvent({ ...telemetry, outcome: 'unresolved', errorType: null });
     return { graded: false, reason: 'unsupported_stat', detail: stat };
   }
 
@@ -116,13 +200,24 @@ async function resolvePlayerProp({ player, stat, threshold, direction, date }) {
     if (!res.ok) {
       recordFailure();
       stats.errors += 1;
+      const errorType = detailToErrorType(`status ${res.status}`);
+      logResolverEvent({ ...telemetry, outcome: 'error', errorType });
       return { graded: false, reason: 'error', detail: `status ${res.status}` };
     }
-    const json = await res.json();
+    let json;
+    try {
+      json = await res.json();
+    } catch (parseErr) {
+      recordFailure();
+      stats.errors += 1;
+      logResolverEvent({ ...telemetry, outcome: 'error', errorType: 'malformed_response' });
+      return { graded: false, reason: 'error', detail: parseErr.message };
+    }
     recordSuccess();
 
     if (json.result === 'win' || json.result === 'loss' || json.result === 'push') {
       stats.hits += 1;
+      logResolverEvent({ ...telemetry, outcome: 'resolved', errorType: null });
       return {
         graded: true,
         result: json.result.toUpperCase(),
@@ -135,10 +230,18 @@ async function resolvePlayerProp({ player, stat, threshold, direction, date }) {
     if (json.result === 'pending') stats.pending += 1;
     else if (json.result === 'unknown') stats.unknown += 1;
     else stats.fell_through += 1;
+    logResolverEvent({ ...telemetry, outcome: 'unresolved', errorType: null });
     return { graded: false, reason: json.result, detail: json.reason };
   } catch (err) {
     recordFailure();
     stats.errors += 1;
+    const errorType = classifyResolverError(err);
+    const outcome = errorType === 'timeout' ? 'timeout' : 'error';
+    logResolverEvent({
+      ...telemetry,
+      outcome,
+      errorType: outcome === 'timeout' ? null : errorType,
+    });
     return { graded: false, reason: 'error', detail: err.message };
   }
 }
@@ -185,5 +288,7 @@ module.exports = {
   mapToResolverStat,
   checkHealth,
   getStats,
-  __internal: { circuitOpen, loadSupportedStats, resetCircuitForTests, RESOLVER_URL, TIMEOUT_MS },
+  classifyResolverError,
+  detailToErrorType,
+  __internal: { circuitOpen, loadSupportedStats, resetCircuitForTests, logResolverEvent, RESOLVER_URL, TIMEOUT_MS, RESOLVER_VERSION },
 };

@@ -1434,6 +1434,8 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
             threshold: parsed.threshold,
             direction: parsed.direction,
             date: gameDate,
+            betId: bet.id,
+            betType: _auditCtx.is_parlay ? 'parlay_leg' : (bet.bet_type || 'prop'),
           });
           if (r.graded) {
             console.log(`[grade] resolved via StatsAPI bet=${bet.id?.slice(0, 8)} source=${r.source} result=${r.result} actual=${r.actual}`);
