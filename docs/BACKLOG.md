@@ -61,6 +61,19 @@
 
 **Hypothesis**: Post-Vision-AI bet creation path has a silent drop for second channel in HUMAN_SUBMISSION_CHANNEL_IDS, OR buffer key collision drops one when both post near-simultaneously.
 
+## Stage 2 — BetService (next deploy)
+
+Scope: follow-on to Stage 1 BetService that shipped v297. Each item is independently deployable.
+
+### Idempotency keys
+Prevent double-writes when the grader retries a bet through the pipeline. Add idempotency key column to `bets` or a separate `grading_attempts` table; every `recordDrop` call passes a key derived from `(bet_id, grading_attempt, stage)`. Duplicates are rejected at insert time.
+
+### Reaper (cron)
+Converts long-stuck bets into explicit `GRADE_BACKOFF_EXHAUSTED` drops. Runs hourly. Reads bets with `grading_state='backoff'` and `grading_attempts > N` and `event_date` older than 48h — marks them with the enum, stops retry loop. Cleans up the "stuck in backoff forever" class of parlays seen pre-v293.
+
+### Parent-bet resolution for parlay leg ids
+Current `<parent>-leg<N>` ids don't stamp `drop_reason` on the parent bet row — only on `pipeline_events`. Reaper (or a separate resolver) should aggregate leg-level drops into a parent-level drop reason so admin snapshot doesn't report parents as "pending, no reason given."
+
 ## Grading Enhancements
 
 ### Oracle: CapperLedger as grading source
@@ -71,6 +84,12 @@ The SPORT_TEAM_KEYWORDS list only contains team nicknames (Thunder, Lakers, Capi
 
 ### Capper ROI display bug
 `/admin snapshot` shows Top 3 cappers all at "+500%" ROI (rbssportsplays, dangambleai, Dan). Suspiciously uniform cap or calculation error. Investigate ROI formula in snapshot handler and `/health quick` — likely capping at 500% or dividing by wrong denominator. Should show actual ROI per capper.
+
+### Snapshot polish: bet type breakdown
+The Resolver block in `/admin` snapshot shows "Top bet types: straight 2" but only surfaces resolved bet types, not the full call breakdown. Fix: include all outcomes (resolved, unresolved, errored) in the bet-type GROUP BY. 5-line fix in `commands/admin.js` snapshot handler.
+
+### MLB backfill script using resolver
+Batch script that reads bets with `grading_state='backoff'` and MLB player prop descriptions, resets `grading_state='ready'` on those that the resolver would now handle, lets the normal grader pick them up. Dry-run mode mandatory. Use `resolver_events` and the new `GRADE_*` drop counts as success metric.
 
 ### Brave Search returning HTTP 402 — free tier exhausted or API key issue
 Grader logs show 100% HTTP 402 responses from Brave backend. DDG circuit breaker is open. Only Bing fallback is returning results. Need to: (1) verify BRAVE_API_KEY is still valid, (2) check Brave dashboard for usage/billing status, (3) circuit-breaker Brave on 402 like we do for DDG timeouts, (4) add 402 detection to Brave health check so /admin snapshot reflects real state.
@@ -136,6 +155,9 @@ ROI charts, capper leaderboards with date ranges, unit tracking
 ### Edit modal: parlay ↔ singles conversion
 Let user split a parlay into singles or merge singles into a parlay from the war room embed
 
+### Fly.toml RESOLVER_VERSION — consider moving to secret
+Currently hardcoded `RESOLVER_VERSION = 'v10'` in `fly.toml [env]`. Not sensitive, but moving to a fly secret makes version bumps easier (no PR cycle). Tradeoff: secret rotation requires a restart.
+
 ## Foundation
 
 ### Grading audit table
@@ -155,6 +177,9 @@ Architecture, env vars, admin commands, scraper setup, troubleshooting, guard ch
 
 ### Resolver telemetry — shipped v292 (commit 940f3d2)
 Migration 019 added `resolver_events` table. `/admin snapshot` renders a Resolver block with 24h outcome counts, latency, error breakdown, and last successful resolve timestamp. End-to-end verified via forced `resolvePlayerProp` call on Apr 20.
+
+### BetService + drop telemetry (Stage 1 + 1.2) — shipped v297 (commit b3413c5)
+Migrations 020/021. New `services/bets.js` with grading-side write contract (`sourceType='grading'`, nullable `ingest_id`). `earlyReturn` wrapper in `services/grading.js` auto-records PENDING drops, classifier matches evidence prefixes to 11 `GRADE_*` drop reasons. Explicit enums at high-volume sites (`GRADE_TOO_RECENT`, `GRADE_NO_SEARCH_HITS`). Telemetry queryable via `pipeline_events` with `source_type='grading'`.
 
 ## Surface Pro
 
