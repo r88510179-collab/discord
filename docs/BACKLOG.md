@@ -61,9 +61,9 @@
 
 **Hypothesis**: Post-Vision-AI bet creation path has a silent drop for second channel in HUMAN_SUBMISSION_CHANNEL_IDS, OR buffer key collision drops one when both post near-simultaneously.
 
-### Retry storm: ai_pending_legs denial loops indefinitely when event_date is null
+### Retry storm: ai_pending_legs denial bypasses attempt cap
 
-**Symptom**: Parlay bets with `event_date = NULL` and one or more pending legs hit `canFinalizeBet()` P0 gate, which calls `scheduleRecheckAfterDenial(ai_pending_legs_N, 30)`. That schedule flips `grading_state` back to `'ready'`, not `'backoff'`. Grader picks it up 30s later, same pending legs, same denial, same 30s requeue. Loop is unbounded — observed 162-163 `grading_attempts` on 2 NBA parlays over 6-7 days.
+**Symptom**: Parlay bets with pending legs hit `canFinalizeBet()` P0 gate, which calls `scheduleRecheckAfterDenial(ai_pending_legs_N, 30)`. That schedule flips `grading_state` back to `'ready'`, not `'backoff'`. Grader picks it up 30s later, same pending legs, same denial, same 30s requeue. Normal bets cap at ~20 attempts via state machine escalation to backoff, but this path bypasses that cap. Observed 162-163 `grading_attempts` on 2 NBA parlays over 6-7 days.
 
 **Observed bets (voided manually Apr 21)**:
 - `8260a66122cc1bd80731f02049071cbf` — 163 attempts, Portland/Phoenix play-in parlay
@@ -71,15 +71,16 @@
 
 Both created ~Apr 14-15, `event_date = null`, never resolved.
 
-**Hypotheses for root cause**:
-1. `ai_pending_legs` path in `scheduleRecheckAfterDenial` should cap retries. After N denials for same reason, escalate to `backoff` instead of `ready`.
-2. `event_date = null` bets bypass the "too recent" early bail in `earlyReturn`. Time check at line 1418 can't fire if `event_date` is null. Separate bug.
-3. Ingest path is producing `event_date = null` on parlay bets — needs audit.
+**Root cause (refined Apr 21 after data check)**:
+`scheduleRecheckAfterDenial(ai_pending_legs_N, 30)` flips `grading_state='ready'` unconditionally. The normal attempt-cap logic (which forces `backoff` at ~20 attempts for most bets) doesn't apply here. Effectively a backdoor around the state machine.
+
+The original hypothesis that `event_date = NULL` caused the loop was wrong. Null `event_date` is ubiquitous — 480 of ~580 all-time bets have it, most of which grade successfully (141 win, 98 loss, 145 void). The 2 voided bets (Apr 14-15 NBA parlays) were exceptional specifically because of this retry path, not their `event_date` state.
 
 **Next debug steps when resumed**:
-1. Grep `scheduleRecheckAfterDenial` call sites; review retry cap logic
-2. Count all-time bets with `event_date IS NULL AND result='pending'` — any still active?
-3. Ingest audit: how does `event_date` get set, and what's the null path?
+1. `grep -n "scheduleRecheckAfterDenial" services/grading.js` — find the call sites and review the retry escalation path
+2. Fix: cap `ai_pending_legs_N` recheck scheduling at N attempts (match the cap that applies to other failure modes), escalate to `backoff` after cap hit
+3. Consider a separate `grading_denial_count` column or use existing `grading_attempts` against a new threshold
+4. Note: null `event_date` itself is NOT a bug — it's the ingest default when source (Twitter, Discord text) doesn't have a clear game date. Ingest audit not needed for this issue.
 
 **Interim mitigation**: Stage 1.2 classifier now captures `ai_pending_legs_N` drops via `GRADE_AI_PENDING_NO_DATA` or `GRADE_PENDING_UNCLASSIFIED` depending on the evidence string. If you see a bet over 50 attempts in `/admin snapshot`, query its `drop_reason` in the `bets` table.
 
