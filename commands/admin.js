@@ -666,7 +666,7 @@ module.exports = {
 
           const topTypes = db.prepare(`
             SELECT bet_type, COUNT(*) AS n FROM resolver_events
-            WHERE called_at >= ? AND outcome = 'resolved'
+            WHERE called_at >= ?
             GROUP BY bet_type ORDER BY n DESC LIMIT 5
           `).all(cutoffMs);
           const topTypesLine = topTypes.length
@@ -700,7 +700,7 @@ module.exports = {
             `**RESOLVER (${version}, last 24h)**`,
             `Calls: ${total} — resolved ${resolved} (${pct}%) · unresolved ${unresolved} · errors ${errors} · timeouts ${timeouts}`,
             `Latency: avg ${avgMs}ms · max ${maxMs}ms`,
-            `Top bet types: ${topTypesLine}`,
+            `Bet types (all calls): ${topTypesLine}`,
             `Errors: ${errLine}`,
             `Last successful resolve: ${lastOkLine}`,
           ].join('\n');
