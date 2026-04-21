@@ -14,8 +14,17 @@ const crypto = require('crypto');
 const { db } = require('./database');
 
 // ── Canonical enum lists (kept close to the SQL schema) ─────
-const SOURCE_TYPES = ['discord', 'twitter', 'webhook', 'manual'];
-const STAGES = ['RECEIVED', 'AUTHORIZED', 'BUFFERED', 'EXTRACTED', 'PARSED', 'VALIDATED', 'STAGED', 'DROPPED'];
+const SOURCE_TYPES = ['discord', 'twitter', 'webhook', 'manual', 'grading'];
+const STAGES = [
+  'RECEIVED', 'AUTHORIZED', 'BUFFERED', 'EXTRACTED', 'PARSED', 'VALIDATED', 'STAGED', 'DROPPED',
+  // Grading-side stages (added alongside BetService skeleton — migration 020)
+  'GRADING_ENTER',
+  'GRADING_SEARCH',
+  'GRADING_AI',
+  'GRADING_GUARDS',
+  'GRADING_COMPLETE',
+  'GRADING_DROPPED',
+];
 const EVENT_TYPES = ['STAGE_ENTER', 'STAGE_EXIT', 'DROP', 'ERROR'];
 const DROP_REASONS = [
   'DUPLICATE_IMAGE',
@@ -30,6 +39,18 @@ const DROP_REASONS = [
   'CAPPER_UNRESOLVED',
   'CHANNEL_UNAUTHORIZED',
   'EXCEPTION_THROWN',
+  // Grading-side drops (added alongside BetService skeleton — migration 020)
+  'GRADE_TOO_RECENT',
+  'GRADE_NO_SEARCH_HITS',
+  'GRADE_AI_PENDING_NO_DATA',
+  'GRADE_AI_HALLUCINATION',
+  'GRADE_SPORT_MISMATCH_POST_AI',
+  'GRADE_RESOLVER_UNRESOLVED',
+  'GRADE_EXCEPTION',
+  'GRADE_BACKOFF_EXHAUSTED',
+  'GRADE_POST_GUARD_REJECTED',      // post-AI guard rejected verdict (hallucination, team/player mismatch, cross-sport)
+  'GRADE_AI_NO_PROVIDERS',          // all AI providers failed or none configured
+  'GRADE_PENDING_UNCLASSIFIED',     // wrapper catch-all — PENDING not matching known prefixes
 ];
 
 // Lazy-prepare the insert — avoids a stmt reference before the
@@ -57,10 +78,13 @@ function safeJson(payload) {
 
 function writeRow({ ingestId, betId, sourceType, sourceRef, stage, eventType, dropReason, payload }) {
   try {
-    if (!ingestId) return;
+    // Grading-side writes don't have an ingest_id (bets enter grading
+    // long after the original ingest flow completed). Ingest-side
+    // callers still MUST supply ingestId — enforced by category check.
+    if (!ingestId && sourceType !== 'grading') return;
     const stmt = getInsertStmt();
     stmt.run(
-      String(ingestId),
+      ingestId != null ? String(ingestId) : null,
       betId ? String(betId) : null,
       String(sourceType || 'manual'),
       sourceRef != null ? String(sourceRef) : null,
@@ -159,6 +183,7 @@ module.exports = {
   recordDrop,
   recordError,
   makeIngestId,
+  writeRow,
   SOURCE_TYPES,
   STAGES,
   EVENT_TYPES,

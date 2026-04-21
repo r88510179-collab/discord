@@ -1,8 +1,7 @@
 const { getPendingBets, gradeBet, updateBankroll, saveDailySnapshot, getBankroll, db, payoutTailers } = require('./database');
 const { gradeBetAI } = require('./ai');
-
+const bets = require('./bets');
 const delay = ms => new Promise(res => setTimeout(res, ms));
-
 // ── Supported sports for grading ──
 // Bets outside this set get auto-voided at the top of gradePropWithAI
 // (see the "AUTO-VOID UNSCOPED BETS" block). Keep in sync with the
@@ -1379,7 +1378,55 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
     } catch (e) { console.error(`[GradeAudit] Write FAILED: ${e.message}`); }
   }
 
-  function earlyReturn(result) {
+  function earlyReturn(result, opts = {}) {
+    // Auto-record PENDING drops to pipeline_events.
+    // Callers may pass opts.dropReason to use a specific enum;
+    // otherwise we classify by evidence prefix, falling back to
+    // GRADE_PENDING_UNCLASSIFIED.
+    if (result && result.status === 'PENDING') {
+      let dropReason = opts.dropReason;
+      if (!dropReason) {
+        const ev = String(result.evidence || '');
+        if (/^No final score found/i.test(ev)) {
+          dropReason = 'GRADE_NO_SEARCH_HITS';
+        } else if (/^Event was [\d.]+h ago/i.test(ev) || /^Game has not started/i.test(ev) || /^No event date/i.test(ev) || /^Invalid event date/i.test(ev)) {
+          dropReason = 'GRADE_TOO_RECENT';
+        } else if (/^HALLUCINATION:|^Soft hallucination:|^Team mismatch:|^Player \[.*\] not in evidence|^Cross-sport:/i.test(ev)) {
+          dropReason = 'GRADE_POST_GUARD_REJECTED';
+        } else if (/^All AI providers failed|^No AI providers configured|^JSON parse error/i.test(ev)) {
+          dropReason = 'GRADE_AI_NO_PROVIDERS';
+        } else if (/^AI returned PENDING with no explanation/i.test(ev)) {
+          dropReason = 'GRADE_AI_PENDING_NO_DATA';
+        } else if (/^Parlay has \d+ recorded legs/i.test(ev)) {
+          dropReason = 'GRADE_PENDING_UNCLASSIFIED'; // parlay leg-count failure; known but rare
+        } else {
+          dropReason = 'GRADE_PENDING_UNCLASSIFIED';
+        }
+      }
+
+      try {
+        bets.recordDrop({
+          betId: bet?.id || _auditCtx?.bet_id,
+          stage: 'GRADING_AI',
+          dropReason,
+          payload: {
+            evidence_preview: String(result.evidence || '').slice(0, 200),
+            bet_desc_preview: String(bet?.description || '').slice(0, 200),
+            is_parlay_leg: _auditCtx?.is_parlay === 1,
+            leg_index: _auditCtx?.leg_index ?? null,
+            leg_count: _auditCtx?.leg_count ?? null,
+            search_backend: audit?.search_backend || null,
+            search_hits: audit?.search_hits ?? null,
+            resolver_attempted: audit?.search_backend === 'resolver',
+          },
+          ingestId: bet?.ingest_id || null,
+        });
+      } catch (err) {
+        // Fire-and-forget — observability must not break grading
+        console.error(`[BetService] earlyReturn recordDrop error: ${err.message}`);
+      }
+    }
+
     audit.final_status = result.status;
     audit.final_evidence = result.evidence;
     audit.sport_out = bet.sport;
@@ -1414,7 +1461,10 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
   console.log(`[AI Grader] Time check: ${bet.id?.slice(0, 8)} event=${eventDate} hours_since=${hoursSinceEvent.toFixed(2)}`);
   if (hoursSinceEvent < 3) {
     console.log(`[AI Grader] SKIP too recent: ${bet.id?.slice(0, 8)} ${hoursSinceEvent.toFixed(1)}h ago`);
-    return earlyReturn({ status: 'PENDING', evidence: `Event was ${hoursSinceEvent.toFixed(1)}h ago — too soon to grade` });
+    return earlyReturn(
+      { status: 'PENDING', evidence: `Event was ${hoursSinceEvent.toFixed(1)}h ago — too soon to grade` },
+      { dropReason: 'GRADE_TOO_RECENT' }
+    );
   }
 
   // Sport reclassification already done in gradePropWithAI dispatcher
@@ -1555,7 +1605,10 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
   // ── GUARD 4: NO SEARCH RESULTS = PENDING. NEVER call AI without evidence. ──
   if (searchResults.length === 0 || !searchSnippets) {
     console.log(`[AI Grader] NO SEARCH RESULTS for ${bet.id?.slice(0, 8)} — returning PENDING (will not call AI)`);
-    return earlyReturn({ status: 'PENDING', evidence: 'No search results available — game may not have completed yet' });
+    return earlyReturn(
+      { status: 'PENDING', evidence: 'No search results available — game may not have completed yet' },
+      { dropReason: 'GRADE_NO_SEARCH_HITS' }
+    );
   }
 
   // ── Step 2: Provider chain — ordered by hallucination rate (lowest first) ──
@@ -1757,6 +1810,7 @@ CRITICAL RULES:
   // Ensure evidence is never empty
   if (!parsed.evidence || parsed.evidence.trim().length === 0) {
     if (parsed.status === 'PENDING') {
+      // Sentinel evidence string — matched by earlyReturn classifier to stamp GRADE_AI_PENDING_NO_DATA.
       parsed.evidence = 'AI returned PENDING with no explanation — insufficient data in search results';
     } else {
       parsed.evidence = `AI graded ${parsed.status} via ${winnerProvider || 'unknown'} but provided no evidence`;
