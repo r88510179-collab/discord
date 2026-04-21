@@ -61,6 +61,28 @@
 
 **Hypothesis**: Post-Vision-AI bet creation path has a silent drop for second channel in HUMAN_SUBMISSION_CHANNEL_IDS, OR buffer key collision drops one when both post near-simultaneously.
 
+### Retry storm: ai_pending_legs denial loops indefinitely when event_date is null
+
+**Symptom**: Parlay bets with `event_date = NULL` and one or more pending legs hit `canFinalizeBet()` P0 gate, which calls `scheduleRecheckAfterDenial(ai_pending_legs_N, 30)`. That schedule flips `grading_state` back to `'ready'`, not `'backoff'`. Grader picks it up 30s later, same pending legs, same denial, same 30s requeue. Loop is unbounded — observed 162-163 `grading_attempts` on 2 NBA parlays over 6-7 days.
+
+**Observed bets (voided manually Apr 21)**:
+- `8260a66122cc1bd80731f02049071cbf` — 163 attempts, Portland/Phoenix play-in parlay
+- `5c963d41f9ee262d27e5e6e2c8878adc` — 162 attempts, Paul George / Franz Wagner parlay
+
+Both created ~Apr 14-15, `event_date = null`, never resolved.
+
+**Hypotheses for root cause**:
+1. `ai_pending_legs` path in `scheduleRecheckAfterDenial` should cap retries. After N denials for same reason, escalate to `backoff` instead of `ready`.
+2. `event_date = null` bets bypass the "too recent" early bail in `earlyReturn`. Time check at line 1418 can't fire if `event_date` is null. Separate bug.
+3. Ingest path is producing `event_date = null` on parlay bets — needs audit.
+
+**Next debug steps when resumed**:
+1. Grep `scheduleRecheckAfterDenial` call sites; review retry cap logic
+2. Count all-time bets with `event_date IS NULL AND result='pending'` — any still active?
+3. Ingest audit: how does `event_date` get set, and what's the null path?
+
+**Interim mitigation**: Stage 1.2 classifier now captures `ai_pending_legs_N` drops via `GRADE_AI_PENDING_NO_DATA` or `GRADE_PENDING_UNCLASSIFIED` depending on the evidence string. If you see a bet over 50 attempts in `/admin snapshot`, query its `drop_reason` in the `bets` table.
+
 ## Stage 2 — BetService (next deploy)
 
 Scope: follow-on to Stage 1 BetService that shipped v297. Each item is independently deployable.
@@ -180,6 +202,11 @@ Migration 019 added `resolver_events` table. `/admin snapshot` renders a Resolve
 
 ### BetService + drop telemetry (Stage 1 + 1.2) — shipped v297 (commit b3413c5)
 Migrations 020/021. New `services/bets.js` with grading-side write contract (`sourceType='grading'`, nullable `ingest_id`). `earlyReturn` wrapper in `services/grading.js` auto-records PENDING drops, classifier matches evidence prefixes to 11 `GRADE_*` drop reasons. Explicit enums at high-volume sites (`GRADE_TOO_RECENT`, `GRADE_NO_SEARCH_HITS`). Telemetry queryable via `pipeline_events` with `source_type='grading'`.
+
+Verified in production Apr 21: 20 grading rows in ~45 min. Distribution: `GRADE_NO_SEARCH_HITS` 50%, `GRADE_TOO_RECENT` 40%, `GRADE_AI_PENDING_NO_DATA` 10%. Zero `GRADE_PENDING_UNCLASSIFIED` — classifier regexes have coverage for all PENDING evidence strings seen in production. Stage 2 (reaper + parent-bet resolution for parlay legs) still pending.
+
+### Snapshot polish: bet type breakdown (all outcomes) — shipped v298 (commit 56228e1)
+`/admin snapshot` Resolver block previously showed only resolved bet types. Now shows full breakdown of all call types (resolved + unresolved + errored). Label updated to "Bet types (all calls):". 2-line fix in `commands/admin.js`.
 
 ## Surface Pro
 
