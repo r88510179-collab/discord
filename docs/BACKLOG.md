@@ -108,9 +108,6 @@ The SPORT_TEAM_KEYWORDS list only contains team nicknames (Thunder, Lakers, Capi
 ### Capper ROI display bug
 `/admin snapshot` shows Top 3 cappers all at "+500%" ROI (rbssportsplays, dangambleai, Dan). Suspiciously uniform cap or calculation error. Investigate ROI formula in snapshot handler and `/health quick` — likely capping at 500% or dividing by wrong denominator. Should show actual ROI per capper.
 
-### Snapshot polish: bet type breakdown
-The Resolver block in `/admin` snapshot shows "Top bet types: straight 2" but only surfaces resolved bet types, not the full call breakdown. Fix: include all outcomes (resolved, unresolved, errored) in the bet-type GROUP BY. 5-line fix in `commands/admin.js` snapshot handler.
-
 ### MLB backfill script using resolver
 Batch script that reads bets with `grading_state='backoff'` and MLB player prop descriptions, resets `grading_state='ready'` on those that the resolver would now handle, lets the normal grader pick them up. Dry-run mode mandatory. Use `resolver_events` and the new `GRADE_*` drop counts as success metric.
 
@@ -203,6 +200,9 @@ Full decision trail per grading attempt. Admin command to dump trail for any bet
 ### CI reliability gate
 GitHub Actions workflow that blocks PRs on failing `npm run check` + `npm run test:reliability`
 
+### Test suite: migration-validation.js fails — pre-existing
+Codex audit Apr 22 ran `npm run test:reliability` and found it fails on `tests/migration-validation.js` with an assertion expecting `006_add_season_to_bets.sql` ordering/name mismatch. Not caused by recent work — predates Stage 1. Investigate before next major deploy that needs CI gating.
+
 ### Deploy verification protocol
 `docs/DEPLOY_CHECKLIST.md` required for every non-trivial deploy
 
@@ -216,6 +216,8 @@ Migration 019 added `resolver_events` table. `/admin snapshot` renders a Resolve
 Migrations 020/021. New `services/bets.js` with grading-side write contract (`sourceType='grading'`, nullable `ingest_id`). `earlyReturn` wrapper in `services/grading.js` auto-records PENDING drops, classifier matches evidence prefixes to 11 `GRADE_*` drop reasons. Explicit enums at high-volume sites (`GRADE_TOO_RECENT`, `GRADE_NO_SEARCH_HITS`). Telemetry queryable via `pipeline_events` with `source_type='grading'`.
 
 Verified in production Apr 21: 20 grading rows in ~45 min. Distribution: `GRADE_NO_SEARCH_HITS` 50%, `GRADE_TOO_RECENT` 40%, `GRADE_AI_PENDING_NO_DATA` 10%. Zero `GRADE_PENDING_UNCLASSIFIED` — classifier regexes have coverage for all PENDING evidence strings seen in production. Stage 2 (reaper + parent-bet resolution for parlay legs) still pending.
+
+Apr 22 extended classifier with `GRADE_RESOLVER_PENDING` and `GRADE_PARLAY_LEGS_PENDING` after Codex audit found the fallback was reachable via resolver/parlay evidence strings. Now 13 `GRADE_*` drop reasons total.
 
 ### Snapshot polish: bet type breakdown (all outcomes) — shipped v298 (commit 56228e1)
 `/admin snapshot` Resolver block previously showed only resolved bet types. Now shows full breakdown of all call types (resolved + unresolved + errored). Label updated to "Bet types (all calls):". 2-line fix in `commands/admin.js`.
@@ -232,15 +234,6 @@ Offload grading AI calls from Groq to local Ollama instance. Zero marginal cost.
 
 ### Sports data caching
 Nightly precompute of hit rates, trends, splits. Cached locally, served to Fly bot on demand via Tailscale.
-
-### Code Tab prompt template library
-Reusable prompt templates in ~/Documents/discord/.code-prompts/:
-- audit-only.md — "read DB / read code / report findings, no changes"
-- single-file-fix.md — "modify one rule, ship via DEPLOY_CHECKLIST"
-- multi-file-refactor.md — "signature change + N call sites + verification"
-- migration-backfill.md — "schema change + data migration + safety budget"
-
-Each is a fill-in-the-blank template. We've been writing these from scratch — saves 10-15min per Code session. Build next time we have low-pressure time.
 
 ### Code Tab prompt template library
 Reusable prompt templates in ~/Documents/discord/.code-prompts/:

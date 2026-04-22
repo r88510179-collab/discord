@@ -51,6 +51,8 @@ const DROP_REASONS = [
   'GRADE_POST_GUARD_REJECTED',      // post-AI guard rejected verdict (hallucination, team/player mismatch, cross-sport)
   'GRADE_AI_NO_PROVIDERS',          // all AI providers failed or none configured
   'GRADE_PENDING_UNCLASSIFIED',     // wrapper catch-all — PENDING not matching known prefixes
+  'GRADE_RESOLVER_PENDING',         // MLB StatsAPI resolver says game not yet Final
+  'GRADE_PARLAY_LEGS_PENDING',      // parlay has unresolved legs, rescheduled for recheck
 ];
 
 // Lazy-prepare the insert — avoids a stmt reference before the

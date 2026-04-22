@@ -1427,6 +1427,10 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
           dropReason = 'GRADE_AI_PENDING_NO_DATA';
         } else if (/^Parlay has \d+ recorded legs/i.test(ev)) {
           dropReason = 'GRADE_PENDING_UNCLASSIFIED'; // parlay leg-count failure; known but rare
+        } else if (/^Game not yet Final \(resolver\)/i.test(ev)) {
+          dropReason = 'GRADE_RESOLVER_PENDING';
+        } else if (/^Parlay PENDING — \d+ leg/i.test(ev)) {
+          dropReason = 'GRADE_PARLAY_LEGS_PENDING';
         } else {
           dropReason = 'GRADE_PENDING_UNCLASSIFIED';
         }
