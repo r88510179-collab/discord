@@ -181,6 +181,17 @@ Let user split a parlay into singles or merge singles into a parlay from the war
 ### Fly.toml RESOLVER_VERSION — consider moving to secret
 Currently hardcoded `RESOLVER_VERSION = 'v10'` in `fly.toml [env]`. Not sensitive, but moving to a fly secret makes version bumps easier (no PR cycle). Tradeoff: secret rotation requires a restart.
 
+
+### View Original button — mobile Discord opens x.com homepage instead of tweet
+
+Desktop Discord: "View Original" button correctly opens the tweet URL in browser.
+
+Mobile Discord: tapping the button opens x.com homepage or redirects to the X app's home feed instead of the specific tweet. Source URL in DB is correct (verified Apr 21 — bobby__tracker bets had full `https://x.com/<handle>/status/<tweet_id>` format in source_url column).
+
+Root cause is Discord mobile's URL deep-link handler or X app's URL scheme — not our bug. Workarounds tested and rejected: fxtwitter.com wrapper (works for embed previews, not direct navigation), query string suffixes (`?s=19` etc., no effect).
+
+No fix available from our side. Desktop works correctly. Mobile users can long-press → Copy Link → open manually in Safari.
+
 ## Foundation
 
 ### Grading audit table
