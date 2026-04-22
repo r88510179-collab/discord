@@ -24,7 +24,7 @@ Each bet's result must include these fields:
   "grade_reason": "short factual statement, no hedging",
   "evidence_url": "URL of the specific page you verified the outcome against",
   "evidence_source": "string from source whitelist below",
-  "evidence_quote": "verbatim text from the source (10+ chars)"
+  "evidence_quote": "verbatim text from source, 10+ chars, must name teams/players/numbers from the bet"
 }
 ```
 
@@ -81,7 +81,7 @@ If you cannot find a SPECIFIC, CITABLE source for this exact bet's outcome (spec
 
 ## Required rules
 
-1. Every non-unknown verdict MUST include a working `evidence_url`, `evidence_source` from the whitelist, and `evidence_quote` (10+ chars, verbatim from source).
+1. Every non-unknown verdict MUST include a working `evidence_url`, `evidence_source` from the whitelist, and `evidence_quote`. The quote must be verbatim (copy-pasted from source, not paraphrased), 10+ characters, AND must contain at least one of: a team name or player name from the bet description, the specific numeric value being graded (stat threshold, final score, spread), or the opponent name. Quotes like "Final Score", "Box Score", or "Game Result" without identifying teams/players/numbers are NOT acceptable.
 2. Verbatim means copy-pasted from the page. Do not paraphrase into `evidence_quote`.
 3. Parlays: grade as a single atomic unit. The entire parlay wins only if ALL legs win. Any leg losing = parlay loss. Any unresolvable leg = whole parlay "unknown" unless another leg already confirms a loss.
 4. Player props: verify the specific stat line against the player's box score. If the stat category is ambiguous (e.g. "Fantasy Score" without a scoring system), return unknown.
