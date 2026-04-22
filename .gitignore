@@ -6,3 +6,4 @@ bettracker.db
 bettracker.db-wal
 bettracker.db-shm
 test-fixtures/
+regrade-exports/
