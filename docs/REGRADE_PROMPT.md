@@ -63,6 +63,7 @@ Each bet's result must include these fields:
 - Result 'push': profit_units = 0 (stake returned)
 - Result 'void': profit_units = 0 (bet cancelled)
 - Result 'unknown': profit_units = null
+- After calculating `profit_units`, round to 4 decimal places.
 
 ---
 
@@ -82,6 +83,8 @@ Your `evidence_source` value MUST be one of these strings, matched to the bet's 
 - UFC/MMA: ufcstats | sherdog | espn_mma
 
 If your actual source is NOT on this list (Reddit, Twitter, blog, aggregator, Wikipedia, unofficial site), you MUST return `result: "unknown"` and explain in grade_reason.
+
+**Source precedence**: where multiple sources are listed for a sport, prefer them in the order shown. Tennis: ATP/WTA official first, ESPN as fallback. NBA: ESPN or NBA.com (either is primary). MLB: `mlb_statsapi` for current-season games (API is authoritative), `espn_mlb` for older games or when StatsAPI lookup fails. If a primary source has the result, use it — don't "shop" for a source that matches a preferred verdict.
 
 **Sport inference for Unknown/N/A/unclear sport fields**: if the bet's `sport` field is "Unknown", "N/A", empty, or a non-standard label (e.g. "soccer" lowercase, "ATP", "College Baseball", "MMA/UFC"), infer the sport from the bet description before selecting a source. Examples: "Shohei Ohtani Home Runs" → MLB, "Jokic Triple-Double" → NBA, "Rublev ML" → Tennis, "UCL Round of 16" → Soccer. Then choose an `evidence_source` from the whitelist for that inferred sport. If the description is ALSO ambiguous or covers no recognizable subject, return `result: "unknown"`.
 
@@ -110,10 +113,11 @@ If you cannot find a SPECIFIC, CITABLE source for this exact bet's outcome (spec
 2. Verbatim means copy-pasted from the page. Do not paraphrase into `evidence_quote`.
 3. Parlays: grade as a single atomic unit. The entire parlay wins only if ALL legs win. Any leg losing = parlay loss. Any unresolvable leg = whole parlay "unknown" unless another leg already confirms a loss.
 4. Player props: verify the specific stat line against the player's box score. If the stat category is ambiguous (e.g. "Fantasy Score" without a scoring system), return unknown.
-5. Cross-sport or nonsense bets (e.g. "NBA team ML in an NHL game"): return "void" with evidence_quote explaining the cross-sport mismatch.
-6. Old bets where the source page no longer exists: return "unknown". Do not guess.
+5. **Cross-sport / structurally impossible bets default to unknown, not void.** A cross-sport mismatch (e.g. "Los Angeles Dodgers Sacramento Kings ML") is usually a parse error on the ingest side, not a bookmaker-settled void. Default: `result: "unknown"` with `grade_reason` explaining the mismatch. Only return `result: "void"` if you find explicit evidence from the book or league that the wager was cancelled, no-action, or officially voided.
+6. **Unresolved identity or date → unknown.** If the exact event, date, opponent, or prop line cannot be matched with confidence to a specific official result page, return `unknown`. Old bets where the source page no longer exists → `unknown`. Ambiguous player names (multiple players with same name) → `unknown` unless uniquely disambiguated by capper context. Do not guess.
 7. **Pushes on whole-number lines**: spreads/totals that land EXACTLY on the line are pushes, not losses. Lakers -3 with final margin exactly 3 = push. Over 210.5 where total is 210 = loss (not a push, line was not whole). Over 210 with total exactly 210 = push. Same for player props: "Over 25 points" with player scoring exactly 25 = push. Return `result: "push"`, `profit_units: 0`.
 8. **DNP / postponement void policy**: if the graded subject did not participate, return `void` (not loss). Specifically: (a) player was a DNP (injury scratch, coach decision, did not enter the game) → void. (b) Game was postponed, cancelled, or rained out and not played on the scheduled date → void. (c) Player technically active but played 0 minutes/innings/seconds → void. In all three cases: `result: "void"`, `profit_units: 0`, `evidence_quote` must cite the DNP/postponement source (injury report, box score showing no minutes, or league announcement).
+9. **API evidence sources.** When `evidence_source` is an API (currently only `mlb_statsapi`), `evidence_url` may be the endpoint URL (e.g. `https://statsapi.mlb.com/api/v1/game/778123/boxscore`) and `evidence_quote` may be an exact field value copied verbatim from the JSON response (e.g. `"homeScore": 4` or `"status": {"abstractGameState": "Final"}`). The verbatim-and-identifying rules still apply: the quoted field value must uniquely support the verdict.
 
 ---
 
