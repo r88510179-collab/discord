@@ -84,6 +84,138 @@ The original hypothesis that `event_date = NULL` caused the loop was wrong. Null
 
 **Interim mitigation**: Stage 1.2 classifier now captures `ai_pending_legs_N` drops via `GRADE_AI_PENDING_NO_DATA` or `GRADE_PENDING_UNCLASSIFIED` depending on the evidence string. If you see a bet over 50 attempts in `/admin snapshot`, query its `drop_reason` in the `bets` table.
 
+## Grading Reconciliation Project — all-time regrade with Claude + ChatGPT
+
+**Status**: Spec drafted Apr 22. Diagnostic findings: of 6 sampled outlier bets (+500% ROI cappers), 6/6 stored profit_units values matched the American odds formula exactly. Profit math is correct. The regrade is motivated by: (a) outcome assignments may have drifted across grader versions, (b) some old bets may have wrong win/loss calls, (c) a dual-LLM cross-check establishes a ground-truth baseline going forward, (d) builds documented truth-source provenance for future grading improvements.
+
+**Approach — manual LLM regrading, import back to DB**:
+- No API integrations. Claude + ChatGPT web sessions do the regrading in parallel.
+- Export pending-regrade bets as structured batch files (JSON).
+- Paste each batch into Claude and ChatGPT separately, collect verdicts.
+- Import verdicts back to DB as v2 (Claude) / v3 (ChatGPT) side records.
+- Compare v1 vs v2 vs v3 — any disagreement or missing evidence flags for human review pile.
+
+### Phase 1 — Infrastructure (1 session)
+- **Migration 022** — two new tables:
+  - `regrade_results`: `bet_id`, `model` (claude|chatgpt), `batch_id`, `result_v2`, `profit_units_v2`, `grade_reason_v2`, `evidence_url`, `evidence_source`, `evidence_quote`, `pile_flag` (boolean), `pile_reasons` (JSON array), `regraded_at`
+  - `bet_grade_history`: preserves v1 before any overwrite. Columns: `bet_id`, `old_result`, `old_profit_units`, `old_grade_reason`, `archived_at`, `archived_by`, `reason`
+  - `regrade_batches`: tracks batch progress. Columns: `batch_id`, `bet_count`, `exported_at`, `claude_imported_at`, `chatgpt_imported_at`
+- **Export script** `scripts/regrade-export.js`:
+  - Queries all bets with `result IN ('win','loss','push','void')` all-time (~580 bets).
+  - Splits into ~12 batches of 50 bets each.
+  - Writes `regrade_batch_{01..12}.json`. Each row: `{bet_id, capper, description, odds, units, bet_type, sport, original_result, original_profit_units, created_at, source_url}`.
+  - Records batch metadata in `regrade_batches`.
+
+### Phase 2 — Prompt template + truth sources (same session as Phase 1)
+- **Prompt template** `docs/REGRADE_PROMPT.md`. Identical for both LLMs.
+- Prompt structure: role (sports betting grader), strict output format (JSON only, no prose), explicit hallucination rules, source whitelist, edge-case handling.
+- **Output format per bet** (strict JSON):
+```json
+  {
+    "bet_id": "...",
+    "result": "win|loss|push|void|unknown",
+    "profit_units": 0.91,
+    "grade_reason": "concise factual statement",
+    "evidence_url": "https://...",
+    "evidence_source": "espn_mlb",
+    "evidence_quote": "verbatim text from source, 20+ chars"
+  }
+```
+- **Required evidence fields for any non-unknown verdict**: `evidence_url`, `evidence_source` (from whitelist below), `evidence_quote` (verbatim, 20+ chars).
+
+### Phase 3 — Hallucination prevention (NON-NEGOTIABLE)
+The greatest risk in LLM-driven regrading is confident-but-wrong verdicts. Every rule below is mandatory and enforced at ingest, not trust-based.
+
+**Rule 1 — "Unknown" is correct behavior, not failure.**
+If the LLM cannot find a specific citable source for a bet's outcome, the correct output is `result: "unknown"`. The LLM must never infer, estimate, or extrapolate. Historical averages, capper patterns, typical outcomes — all forbidden.
+
+**Rule 2 — Every non-unknown verdict REQUIRES evidence_url + evidence_source + evidence_quote.**
+Missing any → auto-downgrade to `unknown` at import. `evidence_quote` must be verbatim (not a paraphrase), 20+ chars, and support the verdict.
+
+**Rule 3 — Source whitelist per sport.** Enforced by import validator:
+MLB:     mlb_statsapi | espn_mlb
+NBA:     espn_nba | nba_com
+NHL:     espn_nhl | nhl_com
+NFL:     espn_nfl | nfl_com
+NCAAB:   espn_ncaab
+NCAAF:   espn_ncaaf
+Soccer:  espn_soccer | official_league_site
+Tennis:  atp_official | wta_official | espn_tennis
+Golf:    espn_golf | pga_tour | european_tour
+UFC/MMA: ufcstats | sherdog | espn_mma
+
+Non-whitelisted sources (Reddit, blogs, aggregators, Twitter, unofficial sites) → auto-pile.
+
+**Rule 4 — Prompt explicitly forbids hedge language.**
+Prompt's "Forbidden" section lists: "based on typical outcomes", "most likely", "probably", "seems to have", "historical data suggests", "likely won", "could have". Must cite specific sources only.
+
+**Rule 5 — Strict pile-flagging.** A bet enters the `human_review_pile` if ANY of these conditions hit:
+- LLM returned `unknown`
+- Missing/invalid `evidence_url`, `evidence_source`, or `evidence_quote`
+- `evidence_source` not in whitelist for the bet's sport
+- Claude and ChatGPT disagree on `result` (win vs loss vs push vs void)
+- Profit_units disagreement >5% of original value
+- Bad JSON (failed to parse)
+- `grade_reason` contains hedging keywords: "likely", "probably", "seems", "based on", "typical", "probably won", "most likely"
+- `evidence_quote` < 20 chars or appears to be paraphrased (doesn't match domain of evidence_url)
+
+Bets in the pile are NEVER auto-promoted. User reviews each manually, grades by hand, or marks "cannot verify — keep v1."
+
+**Rule 6 — Enforcement at ingest, not trust-based.**
+`scripts/regrade-import.js` validates every verdict against all rules above before writing. Failed validation → write as `pile_flag=true` with `pile_reasons` array populated. Never reject silently — every attempt is recorded for audit.
+
+### Phase 4 — Provenance + auditability
+**`regrade_evidence` table** (provenance store, separate from `regrade_results` for query performance):
+- Columns: `bet_id`, `model`, `batch_id`, `evidence_url`, `evidence_source`, `evidence_quote`, `captured_at`
+- Never overwritten — survives promotion. Enables retroactive audit of any grade months later.
+
+**Audit report** `scripts/regrade-audit-report.js`:
+- Runs after each full regrade pass.
+- Outputs `docs/REGRADE_AUDIT_{YYYY-MM-DD}.md` with:
+  - Per-sport breakdown (total bets, verdicts, pile count, pile rate)
+  - Per-source usage (which sources each model trusted most)
+  - Disagreement matrix (Claude vs ChatGPT divergence by sport, capper, odds range)
+  - Coverage gaps (sports with >30% pile rate — flag for upstream truth-source improvements)
+- This document is a reusable artifact — future grader work references it.
+
+### Phase 5 — Execution (user-paced, multiple sittings)
+- Run export script → generates 12 batch files.
+- For each batch (1 through 12):
+  1. Open Claude web chat → paste `docs/REGRADE_PROMPT.md` + `regrade_batch_{N}.json` → save output as `batch_{N}_claude.json`.
+  2. Open ChatGPT web chat → paste same prompt + batch → save as `batch_{N}_chatgpt.json`.
+  3. Run `scripts/regrade-import.js batch_{N}_claude.json batch_{N}_chatgpt.json` → validates every rule, writes to `regrade_results` + `regrade_evidence`.
+  4. Script confirms: count of bets imported, count flagged to pile, count clean.
+- Both LLMs may not grade a bet fully (LLMs sometimes skip items). Import script rejects batches where bet_id count mismatch ≠ exported count.
+
+### Phase 6 — Review + promote (1-2 sessions after execution)
+- **Admin command** `/admin regrade-status` shows: total regraded, agreement rate (v1=v2=v3), disagreement count, pile count, breakdown by pile reason.
+- **Review query** `scripts/regrade-review.sql`: outputs disagreement + pile rows with all three verdicts side-by-side plus evidence URLs.
+- **Promotion script** `scripts/regrade-promote.js`:
+  - Dry-run mandatory first (`--dry-run` flag).
+  - Accepts per-bet-id decisions from a curated TSV input file the user prepares.
+  - For each promoted bet: archives v1 to `bet_grade_history`, updates `result` and `profit_units` in `bets`, logs to `pipeline_events` with `stage='REGRADE_PROMOTE'`.
+- **No retroactive ROI update needed** — capper ROI computed on read.
+
+### Success criteria
+- All ~580 bets have v2 (Claude) + v3 (ChatGPT) values written to `regrade_results`, each with structured evidence or pile_flag reason.
+- Disagreement rate established as empirical baseline for grader quality.
+- Every non-pile grade has citable, whitelisted-source evidence in `regrade_evidence`.
+- `docs/REGRADE_AUDIT_{date}.md` generated and documents sport/source/coverage patterns.
+- Zero destructive writes: v1 preserved in `bet_grade_history` before any overwrite, every bet recoverable.
+
+### Estimated cost
+- Zero API cost (manual LLM web sessions).
+- Human time: ~12 batches × (paste Claude + paste ChatGPT + import) ≈ 5-10 min per batch × 12 = 1-2 hours of execution, spread over multiple sittings.
+- Phase 1-2 build: ~1 code session (migration + export script + prompt template).
+- Phase 6 build: ~1 code session (review query + promote script + /admin regrade-status).
+
+### Known risks / open questions
+- **LLM output format drift** — both models occasionally add commentary around JSON or return invalid structure. Import script strips markdown fences and validates strictly. Pile flag on parse failure.
+- **Truth source gaps** — bets from 4+ months ago may not have ESPN box scores easily searchable. Large pile rate for old bets is expected and acceptable.
+- **Capper identity** — regrade uses bet_id as key, not capper. Capper renames/merges don't affect regrade.
+- **Parlay legs** — regrade treats parlays as atomic units (one verdict per parent bet_id). Leg-level disagreement is not captured. If leg-level accuracy becomes important later, this spec doesn't cover it — separate project.
+- **Prompt versioning** — if the prompt is changed mid-run, later batches aren't comparable to earlier ones. Prompt is frozen per run; version-stamped in `regrade_batches` table.
+
 ## Stage 2 — BetService (next deploy)
 
 Scope: follow-on to Stage 1 BetService that shipped v297. Each item is independently deployable.
