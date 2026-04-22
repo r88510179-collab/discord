@@ -12,6 +12,29 @@ Do not skip bets. Do not add commentary outside the JSON array. Do not wrap the 
 
 ---
 
+## Input schema
+
+Each batch file is a JSON object with a `bets` array. Each bet has these fields:
+
+- `bet_id` — unique identifier, echo back verbatim in your output
+- `capper.display_name`, `capper.twitter_handle` — who made the pick (context only, not used for grading)
+- `sport` — the sport label (may be Unknown/N/A/nonstandard; use inference rule below)
+- `league` — more specific league context when available (MLB, Premier League, etc.)
+- `bet_type` — "straight", "parlay", "sgp" (same-game parlay)
+- `description` — free-text bet description with player names, teams, lines, thresholds
+- `odds` — American odds as integer (positive = underdog payout, negative = favorite price)
+- `units` — stake in units (1.0 = 1u, 2.5 = 2.5u)
+- `original_result` — what the existing grader decided. DO NOT anchor on this. Grade fresh.
+- `original_profit_units` — what the existing grader calculated. DO NOT anchor on this either.
+- `event_date` — scheduled game/match date (may be null)
+- `created_at` — when the bet was placed
+- `source_url` — original tweet or Discord link (context only; use for date disambiguation if needed)
+
+Your job is to re-verify each bet from scratch against external sources. The `original_result` and `original_profit_units` fields are the very thing we are reconciling — treat them as informational only, not as ground truth.
+
+---
+
+
 ## Required output format
 
 Each bet's result must include these fields:
@@ -21,7 +44,7 @@ Each bet's result must include these fields:
   "bet_id": "string (matches input bet_id exactly)",
   "result": "win | loss | push | void | unknown",
   "profit_units": "number (see profit_units rules below)",
-  "grade_reason": "short factual statement, no hedging",
+  "grade_reason": "short factual statement. For verdicts (win/loss/push/void): no hedging language. For unknown: describe specifically what evidence was searched and why it was insufficient.",
   "evidence_url": "URL of the specific page you verified the outcome against",
   "evidence_source": "string from source whitelist below",
   "evidence_quote": "verbatim text from source, 10+ chars, must name teams/players/numbers from the bet"
@@ -60,6 +83,8 @@ Your `evidence_source` value MUST be one of these strings, matched to the bet's 
 
 If your actual source is NOT on this list (Reddit, Twitter, blog, aggregator, Wikipedia, unofficial site), you MUST return `result: "unknown"` and explain in grade_reason.
 
+**Sport inference for Unknown/N/A/unclear sport fields**: if the bet's `sport` field is "Unknown", "N/A", empty, or a non-standard label (e.g. "soccer" lowercase, "ATP", "College Baseball", "MMA/UFC"), infer the sport from the bet description before selecting a source. Examples: "Shohei Ohtani Home Runs" → MLB, "Jokic Triple-Double" → NBA, "Rublev ML" → Tennis, "UCL Round of 16" → Soccer. Then choose an `evidence_source` from the whitelist for that inferred sport. If the description is ALSO ambiguous or covers no recognizable subject, return `result: "unknown"`.
+
 ---
 
 ## FORBIDDEN — Hallucination guardrails
@@ -87,6 +112,8 @@ If you cannot find a SPECIFIC, CITABLE source for this exact bet's outcome (spec
 4. Player props: verify the specific stat line against the player's box score. If the stat category is ambiguous (e.g. "Fantasy Score" without a scoring system), return unknown.
 5. Cross-sport or nonsense bets (e.g. "NBA team ML in an NHL game"): return "void" with evidence_quote explaining the cross-sport mismatch.
 6. Old bets where the source page no longer exists: return "unknown". Do not guess.
+7. **Pushes on whole-number lines**: spreads/totals that land EXACTLY on the line are pushes, not losses. Lakers -3 with final margin exactly 3 = push. Over 210.5 where total is 210 = loss (not a push, line was not whole). Over 210 with total exactly 210 = push. Same for player props: "Over 25 points" with player scoring exactly 25 = push. Return `result: "push"`, `profit_units: 0`.
+8. **DNP / postponement void policy**: if the graded subject did not participate, return `void` (not loss). Specifically: (a) player was a DNP (injury scratch, coach decision, did not enter the game) → void. (b) Game was postponed, cancelled, or rained out and not played on the scheduled date → void. (c) Player technically active but played 0 minutes/innings/seconds → void. In all three cases: `result: "void"`, `profit_units: 0`, `evidence_quote` must cite the DNP/postponement source (injury report, box score showing no minutes, or league announcement).
 
 ---
 
