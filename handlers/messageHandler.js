@@ -993,6 +993,35 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
       // Untracked winner — send yellow embed to War Room
       if (parsed.type === 'untracked_win') {
         console.log(`[UntrackedWin] Detected: ${parsed.description}`);
+
+        // Determine source URL. Two cases:
+        //   (a) Twitter-vision relay from mobile-ingest: message has an embed
+        //       whose URL points to the original tweet.
+        //   (b) Native Discord message in a capper channel: construct the
+        //       discord.com deep-link so admins can jump to the source post.
+        let sourceUrl = null;
+        let sourceLabel = null;
+        try {
+          // Check for a tweet URL in message embeds first (relay case)
+          const tweetEmbed = (message.embeds || []).find(e => {
+            const u = e?.url || '';
+            return u.includes('x.com/') || u.includes('twitter.com/');
+          });
+          if (tweetEmbed?.url) {
+            sourceUrl = tweetEmbed.url;
+            // Extract handle for label: https://x.com/<handle>/status/<id>
+            const handleMatch = tweetEmbed.url.match(/(?:x\.com|twitter\.com)\/([^/]+)\/status/);
+            sourceLabel = handleMatch ? `Tweet by @${handleMatch[1]}` : 'Tweet';
+          } else if (message.guildId && message.channelId && message.id) {
+            // Native Discord message
+            sourceUrl = `https://discord.com/channels/${message.guildId}/${message.channelId}/${message.id}`;
+            const chName = message.channel?.name || 'channel';
+            sourceLabel = `Discord #${chName}`;
+          }
+        } catch (e) {
+          console.warn('[UntrackedWin] source URL construction failed:', e.message);
+        }
+
         const { sendUntrackedWinEmbed } = require('../services/warRoom');
         await sendUntrackedWinEmbed(message.client, {
           description: parsed.description,
@@ -1000,6 +1029,8 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
           subject: parsed.subject || [],
           capperName: capperInfo.name,
           capperId: capper.id,
+          sourceUrl,
+          sourceLabel,
         });
         return;
       }

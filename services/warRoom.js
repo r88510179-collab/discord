@@ -691,12 +691,17 @@ async function sendUntrackedWinEmbed(client, data) {
     embed.addFields({ name: 'Subjects', value: data.subject.join(', '), inline: false });
   }
 
+  // Source field — short domain label for quick scanning
+  if (data.sourceLabel) {
+    embed.addFields({ name: 'Source', value: data.sourceLabel, inline: false });
+  }
+
   // Store capper ID in footer for retrieval on button click (avoids customId length limit)
   embed.setFooter({ text: `cid:${data.capperId}` });
 
   // Use short unique suffix to avoid customId collisions
   const shortId = (data.capperId || '').slice(0, 16);
-  const row = new ActionRowBuilder().addComponents(
+  const buttons = [
     new ButtonBuilder()
       .setCustomId(`war_logwin:${shortId}`)
       .setLabel('Log as Win')
@@ -705,7 +710,19 @@ async function sendUntrackedWinEmbed(client, data) {
       .setCustomId(`war_rejectwin:${shortId}`)
       .setLabel('Reject')
       .setStyle(ButtonStyle.Danger),
-  );
+  ];
+
+  // Add View Original link button if sourceUrl is present and valid https URL
+  if (data.sourceUrl && String(data.sourceUrl).startsWith('https://')) {
+    buttons.push(
+      new ButtonBuilder()
+        .setLabel('View Original')
+        .setStyle(ButtonStyle.Link)
+        .setURL(data.sourceUrl),
+    );
+  }
+
+  const row = new ActionRowBuilder().addComponents(buttons);
 
   await channel.send({ embeds: [embed], components: [row] });
 }
