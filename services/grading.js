@@ -222,6 +222,34 @@ function applyBackoff(betId, attempts, reason) {
 
 /** Gateway-denial recheck: do not change state or touch attempts; just requeue. */
 function scheduleRecheckAfterDenial(betId, reason, minutes = 30) {
+  // Attempt cap — prevents backdoor around the state machine when a denial
+  // (e.g. pending_legs) keeps flipping state back to 'ready' faster than
+  // the normal backoff ladder. At cap, stamp GRADE_BACKOFF_EXHAUSTED and
+  // move far into the future so the grader stops re-picking.
+  const RETRY_CAP = 15;
+  const bet = db.prepare('SELECT grading_attempts FROM bets WHERE id = ?').get(betId);
+  const attempts = bet?.grading_attempts || 0;
+
+  if (attempts >= RETRY_CAP) {
+    db.prepare(`UPDATE bets
+      SET grading_state = 'backoff',
+          grading_next_attempt_at = datetime('now', '+24 hours'),
+          grading_last_failure_reason = ?,
+          grading_lock_until = NULL
+      WHERE id = ?`).run(`${String(reason).slice(0, 180)}_capped`, betId);
+
+    bets.recordDrop({
+      betId,
+      stage: 'GRADING_DROPPED',
+      dropReason: 'GRADE_BACKOFF_EXHAUSTED',
+      payload: { denial_reason: reason, attempts },
+      ingestId: null,
+    });
+
+    console.log(`[canFinalizeBet] retry cap reached (attempts=${attempts}) for bet=${String(betId).slice(0,8)} reason=${reason} — stamped GRADE_BACKOFF_EXHAUSTED`);
+    return;
+  }
+
   db.prepare(`UPDATE bets
     SET grading_next_attempt_at = datetime('now', ?),
         grading_last_failure_reason = ?,
