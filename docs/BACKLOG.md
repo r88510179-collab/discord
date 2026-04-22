@@ -216,6 +216,25 @@ Bets in the pile are NEVER auto-promoted. User reviews each manually, grades by 
 - **Parlay legs** — regrade treats parlays as atomic units (one verdict per parent bet_id). Leg-level disagreement is not captured. If leg-level accuracy becomes important later, this spec doesn't cover it — separate project.
 - **Prompt versioning** — if the prompt is changed mid-run, later batches aren't comparable to earlier ones. Prompt is frozen per run; version-stamped in `regrade_batches` table.
 
+### Phase 3 import script — enforcement hooks (captured Apr 22 EOD)
+
+The prompt template v1 tells LLMs what evidence_quote content to include, but the import script (`scripts/regrade-import.js`, not yet built) is the only place that can enforce it. LLMs will sometimes ignore the rule. The import script MUST validate:
+
+1. **evidence_quote substring check**: quote contains at least one of (case-insensitive):
+   - A team name token from the bet description (nouns, skip stopwords)
+   - A player name token from the bet description
+   - The numeric threshold being graded (extract from description: "over 8.5", "1+", "25+", etc.)
+   - The opponent name (for straight bets, parse vs/vs./@ from description)
+
+2. **Generic-quote rejection**: auto-pile any quote matching the exact strings "Final Score", "Box Score", "Game Result", "Final", "Result", or a short list of similar generic phrases (configurable list, start small, expand as we see abuse patterns).
+
+3. **Sport alias normalization**: the `sport` field has inconsistent values in production (NCAA vs NCAAB for basketball, Soccer vs various league names). Import script normalizes before checking the source whitelist. Initial aliases to handle:
+   - "NCAA" + bet_type contains "basketball" keywords -> NCAAB
+   - "NCAA" + bet_type contains "football" keywords -> NCAAF
+   - Any league-specific soccer name (Premier League, La Liga, etc.) -> Soccer
+
+These hooks add enforcement teeth to Phase 3 rules 2 and 5 from the main spec.
+
 ## Stage 2 — BetService (next deploy)
 
 Scope: follow-on to Stage 1 BetService that shipped v297. Each item is independently deployable.
