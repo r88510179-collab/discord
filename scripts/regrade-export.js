@@ -18,7 +18,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const BATCH_SIZE = 50;
+const BATCH_SIZE = 25;
 const PROMPT_VERSION = 'v1';
 const DEFAULT_OUT_DIR = './regrade-exports';
 
