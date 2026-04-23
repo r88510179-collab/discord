@@ -63,6 +63,12 @@ Each bet's result must include these fields:
 - Result 'push': profit_units = 0 (stake returned)
 - Result 'void': profit_units = 0 (bet cancelled)
 - Result 'unknown': profit_units = null
+- **Odds format normalization** (apply BEFORE American odds formula):
+  - If `odds` is a positive integer >= 100 (e.g. +150, +5097): treat as American positive odds (formula above).
+  - If `odds` is a negative integer <= -100 (e.g. -110, -130): treat as American negative odds (formula above).
+  - If `odds` is a positive number between 1.01 and 99.99 (e.g. 3, 2.5, 1.91): treat as DECIMAL odds. Profit formula: `profit = units * (odds - 1)`. Example: 1u win at decimal 3.00 → profit = 1 * (3 - 1) = 2.0 units.
+  - If `odds` is zero, negative between -1 and -99 (invalid), or does not match any of the above patterns: treat as missing (see below).
+- **Missing or invalid odds**: if `odds` is `null`, missing, zero, or fails the format checks above, return `profit_units: null` regardless of result. The bet cannot be settled without valid odds. Include a note in `grade_reason`.
 - After calculating `profit_units`, round to 4 decimal places.
 
 ---
