@@ -17,7 +17,7 @@ Do not skip bets. Do not add commentary outside the JSON array. Do not wrap the 
 Each batch file is a JSON object with a `bets` array. Each bet has these fields:
 
 - `bet_id` — unique identifier, echo back verbatim in your output
-- `capper.display_name`, `capper.twitter_handle` — who made the pick (context only, not used for grading)
+- `capper.display_name`, `capper.twitter_handle` — who made the pick. Capper fields are NOT used to determine outcomes, but MAY be used to disambiguate which player or event a bet refers to when the description alone is ambiguous.
 - `sport` — the sport label (may be Unknown/N/A/nonstandard; use inference rule below)
 - `league` — more specific league context when available (MLB, Premier League, etc.)
 - `bet_type` — "straight", "parlay", "sgp" (same-game parlay)
@@ -73,6 +73,7 @@ Your `evidence_source` value MUST be one of these strings, matched to the bet's 
 
 - MLB: mlb_statsapi | espn_mlb
 - NBA: espn_nba | nba_com
+- WNBA: espn_wnba | wnba_com
 - NHL: espn_nhl | nhl_com
 - NFL: espn_nfl | nfl_com
 - NCAAB: espn_ncaab
@@ -109,12 +110,12 @@ If you cannot find a SPECIFIC, CITABLE source for this exact bet's outcome (spec
 
 ## Required rules
 
-1. Every non-unknown verdict MUST include a working `evidence_url`, `evidence_source` from the whitelist, and `evidence_quote`. The quote must be verbatim (copy-pasted from source, not paraphrased), 10+ characters, AND must contain at least one of: a team name or player name from the bet description, the specific numeric value being graded (stat threshold, final score, spread), or the opponent name. Quotes like "Final Score", "Box Score", or "Game Result" without identifying teams/players/numbers are NOT acceptable.
+1. Every non-unknown verdict MUST include an `evidence_url` (URL to the specific page used to verify this outcome), `evidence_source` from the whitelist, and `evidence_quote`. The quote must be verbatim (copy-pasted from source, not paraphrased), 10+ characters, AND must contain at least one of: a team name or player name from the bet description, the specific numeric value being graded (stat threshold, final score, spread), or the opponent name. Quotes like "Final Score", "Box Score", or "Game Result" without identifying teams/players/numbers are NOT acceptable. For tabular data (box scores, stat lines), a reconstructed row with the player name and stat values is acceptable (e.g., `Tatum 28 7 4 1 1` to verify "Tatum 25+ points").
 2. Verbatim means copy-pasted from the page. Do not paraphrase into `evidence_quote`.
-3. Parlays: grade as a single atomic unit. The entire parlay wins only if ALL legs win. Any leg losing = parlay loss. Any unresolvable leg = whole parlay "unknown" unless another leg already confirms a loss.
+3. Parlays: grade as a single atomic unit. The entire parlay wins only if ALL legs win. Any leg losing = parlay loss. Any unresolvable leg = whole parlay "unknown" unless another leg already confirms a loss. Pushed or voided legs: the parlay's outcome is `unknown` unless all other legs independently confirm a loss (in which case: loss). We do NOT attempt reduced-odds parlay math because per-leg odds are not structured in the input.
 4. Player props: verify the specific stat line against the player's box score. If the stat category is ambiguous (e.g. "Fantasy Score" without a scoring system), return unknown.
 5. **Cross-sport / structurally impossible bets default to unknown, not void.** A cross-sport mismatch (e.g. "Los Angeles Dodgers Sacramento Kings ML") is usually a parse error on the ingest side, not a bookmaker-settled void. Default: `result: "unknown"` with `grade_reason` explaining the mismatch. Only return `result: "void"` if you find explicit evidence from the book or league that the wager was cancelled, no-action, or officially voided.
-6. **Unresolved identity or date → unknown.** If the exact event, date, opponent, or prop line cannot be matched with confidence to a specific official result page, return `unknown`. Old bets where the source page no longer exists → `unknown`. Ambiguous player names (multiple players with same name) → `unknown` unless uniquely disambiguated by capper context. Do not guess.
+6. **Unresolved identity or date → unknown.** If the exact event, date, opponent, or prop line cannot be matched with confidence to a specific official result page, return `unknown`. If no game is found on the stated `event_date`, also check ±1 day to account for timezone differences between the bet source (often ET-based) and the data source. Old bets where the source page no longer exists → `unknown`. Ambiguous player names → `unknown` unless uniquely disambiguated by capper context. Do not guess.
 7. **Pushes on whole-number lines**: spreads/totals that land EXACTLY on the line are pushes, not losses. Lakers -3 with final margin exactly 3 = push. Over 210.5 where total is 210 = loss (not a push, line was not whole). Over 210 with total exactly 210 = push. Same for player props: "Over 25 points" with player scoring exactly 25 = push. Return `result: "push"`, `profit_units: 0`.
 8. **DNP / postponement void policy**: if the graded subject did not participate, return `void` (not loss). Specifically: (a) player was a DNP (injury scratch, coach decision, did not enter the game) → void. (b) Game was postponed, cancelled, or rained out and not played on the scheduled date → void. (c) Player technically active but played 0 minutes/innings/seconds → void. In all three cases: `result: "void"`, `profit_units: 0`, `evidence_quote` must cite the DNP/postponement source (injury report, box score showing no minutes, or league announcement).
 9. **API evidence sources.** When `evidence_source` is an API (currently only `mlb_statsapi`), `evidence_url` may be the endpoint URL (e.g. `https://statsapi.mlb.com/api/v1/game/778123/boxscore`) and `evidence_quote` may be an exact field value copied verbatim from the JSON response (e.g. `"homeScore": 4` or `"status": {"abstractGameState": "Final"}`). The verbatim-and-identifying rules still apply: the quoted field value must uniquely support the verdict.
