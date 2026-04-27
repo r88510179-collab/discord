@@ -26,6 +26,7 @@ Every `evidence_url` must come from a source on this list. Every `evidence_quote
 | UFC/MMA | ESPN MMA | `espn.com/mma/fightcenter/_/id/{id}` | Fight recaps |
 | Golf | PGA Tour | `pgatour.com/tournaments/{year}/{slug}` | Live leaderboards, cuts |
 | Golf | ESPN Golf | `espn.com/golf/leaderboard` | Results |
+| Jai Alai | World Jai-Alai League (Battle Court) | `jaialaiworld.com/BattleCourt-Results/{YYYY-MM-DD}` or `/BattleCourt-Results/{YYYY-MM-DD-HH-MM}` | Match results, set scores, doubles team standings — ⚠ **JS-rendered**, see §Jai Alai fetching below |
 
 ## Tier 2 — Player-stat aggregators (acceptable with a same-day recap cite)
 
@@ -63,6 +64,21 @@ For "Player +N.5 sets" in a best-of-3: apply N.5 to the set score. If actual is 
 
 For "Player +N.5 games" in match: sum all games across all sets. Apply handicap to the game total.
 
+### Jai Alai (Battle Court / WJAL) fetching
+**The jaialaiworld.com results page is JavaScript-rendered.** Static `web_fetch` returns only the navigation shell — match results load client-side after page load. To verify a verbatim score quote from this source, you MUST use a JS-capable fetcher.
+
+**Operational pattern:**
+- **Manual regrades (this skill):** Ask the user to confirm the result, OR escalate to Surface Pro via Tailscale and run a Playwright fetch against the date URL. Do not accept Gemini / ChatGPT verdicts citing this source without re-verification.
+- **P2b production agent:** Route Jai Alai grading through the Surface Pro endpoint `https://tracker-surface-pro.tail65f8f0.ts.net/jaialai/results/{YYYY-MM-DD}` (Playwright-rendered, returns parsed match table as JSON). Do not call jaialaiworld.com directly from the Fly bot — the results won't render.
+
+**URL patterns observed:**
+- Day-level: `/BattleCourt-Results/{YYYY-MM-DD}` (full session)
+- Time-slot: `/BattleCourt-Results/{YYYY-MM-DD-HH-MM}` (specific match block)
+- Player: `/{lastname}` (season stats)
+- Doubles team: `/doubles/{player1}-{player2}` (team-level stats)
+
+**Match format:** Doubles teams are listed by surname pair (e.g., "CRB & Ikeda" = doubles team). Scores are set-based, typically "Set1. Set2." with first-to-7 winning each set. Division (Div 1–5) indicates singles ranking tier carried into doubles. Example row: `CRB & Ikeda. 5. 1. Div 4. Etcheberry & Kubala. 6. 6.` reads as "CRB & Ikeda lost 5-1, 1-6 in the Div 4 doubles match to Etcheberry & Kubala."
+
 ## When a primary source is unreachable
 
 If ESPN / NBA.com / etc. are down or the specific page returns 404:
@@ -71,3 +87,5 @@ If ESPN / NBA.com / etc. are down or the specific page returns 404:
 3. If neither works, mark `unknown` with `grade_reason` noting the source was unreachable
 
 Do NOT substitute a Tier 3 source. Do NOT guess. `unknown` is a valid outcome.
+
+For JS-rendered Tier 1 sources (currently: jaialaiworld.com), unreachability via static fetch is expected. Escalate to a Playwright-capable fetcher per the source's section above before marking `unknown`.
