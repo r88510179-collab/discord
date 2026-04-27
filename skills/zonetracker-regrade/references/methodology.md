@@ -138,3 +138,24 @@ Interpretation test: at PFL Belfast 2026-04-16, Yagshimuradov fought Pedro and M
 - Sport: ATP. odds: null. units: null.
 
 The supplement does not apply (null odds). Stays `unknown` per base rule. Even though the capper class is the same as e101c301, structural ambiguity cannot be resolved without odds-field anchoring.
+
+## Mixed-class capper anchoring with clear timing windows
+
+The base rule (above): mixed-class cappers (those who post both pregame picks AND recap commentary) without an explicit signal default to `unknown`.
+
+**Refinement:** when raw `created_at` lands the post within 12 hours pregame of a same-day game in the bet's named sport, anchor to that game. The default-to-unknown rule applies only when timing is itself ambiguous (post lands hours post-game, or no relevant game on the apparent target day).
+
+How to test:
+1. Look up raw `created_at` from the DB (do NOT decode tweet IDs — see anti-pattern below).
+2. Identify the bet's sport and any game on that day (per the `created_at` date in ET).
+3. If post timestamp is 0–12h before game start → pregame anchor, grade against that game.
+4. If post is post-game OR no same-day game exists → default unknown unless other signal.
+
+### Worked example — B15 `6f371722` (Mariners ML, guess_pray_bets)
+- raw `created_at`: 2026-04-18 17:31:15 UTC = 13:31 ET 4/18
+- Mariners @ Rangers played that evening; first pitch ~7 PM ET → ~5.5h pregame
+- guess_pray_bets is mixed-class but timing is unambiguous same-day pregame
+- Anchor to 4/18 game → Mariners won 7-3 → WIN, 5u at -110 = +4.5455u
+
+### Counter-example — would still be unknown
+If a mixed-class capper posts "Mariners ML" at 02:00 ET on a day with no Mariners game (or with a Mariners game already concluded the prior night), default to `unknown`. Timing alone doesn't rescue an absent game.

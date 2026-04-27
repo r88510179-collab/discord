@@ -81,3 +81,32 @@ Over 10 batches, the failure modes have shifted as the methodology improved:
 - Batch 10: **Pre-ingestion noise dominates** — 68% of batch was ungradable junk (placeholder labels, reactions, SGP headers without legs, ambiguous multi-side descriptions). Root cause is upstream in ingestion, not in grading. Rolled out ambiguous-multi-side rule in methodology.
 
 Track the failure mode mix per batch. If a "solved" failure mode reappears, the methodology update didn't stick — treat that as a bug and re-harden the relevant rule.
+
+## Anti-pattern: hallucinated verbatim quotes in evidence
+
+A grader pass returns a verdict with a confident verbatim `evidence_quote`, but the quote does not appear in the cited source — or worse, the quote contradicts what the source actually says.
+
+**Symptom:** the verdict is plausible (matches the bet's most likely outcome based on context) but the quoted evidence is fabricated, mis-attributed, or paraphrased into existence.
+
+**Mitigation:** for high-stakes legs (parlay legs, bets with units > 1, bets with odds > +200), re-verify against at least two independent whitelisted sources. The `evidence_quote` field must be copy-pasteable from the cited URL — if it can't be grep'd in a fresh fetch of the source, treat as anti-pattern #2 violation.
+
+### Worked example — B15 `d9669f8f` (Cody parlay)
+- 3-leg parlay at +137: Hart 6+ reb / NAW 20+ Pts+Ast / Brunson 30+ Pts+Ast
+- Pass A returned WIN +1.37u with evidence quote: "Brunson 29 points seven assists; Hart 15 points 13 rebounds; Alexander-Walker 36 points three assists in Hawks 107-106 Knicks Game 2"
+- Cross-verification against ESPN, NBA.com, RotoWire all confirmed: NAW had 9 pts, 5 reb, **6 ast**, 3 blocks. The "36 points three assists" quote was hallucinated.
+- Real outcome: NAW = 9 + 6 = 15 P+A, FAILS the 20+ threshold → parlay LOSS -1u
+- Verdict swing: +1.37u (Pass A) → -1u (corrected), a 2.37u correction prevented from corrupting cumulative P&L
+
+**Lesson:** when a Pass A quote is the SOLE basis for a leg verdict and the leg outcome is the difference between WIN and LOSS, always verify against a second whitelisted source before accepting.
+
+## Anti-pattern: tweet-ID timestamp decoding
+
+Twitter/X status IDs encode a creation timestamp via Snowflake-style bit-packing (post-2010 IDs). Some grader passes attempt to decode the ID directly to derive `created_at`. **This decoding is unreliable in practice** — observed accuracy ~67% in B15, with errors of 16+ hours in two cases (`8e5a432d` Pirates ML off by 16h, `daaac8ab` CHA+Draymond off by 24h).
+
+**Mitigation:** always use the raw DB `created_at` field for timestamp anchoring. Do not decode tweet IDs. The DB row is the source of truth.
+
+### Worked examples — B15
+- `8e5a432d`: Pass A decoded ID → "21:35 ET 4/17 = recap of Pirates 4/17 win." DB → 13:21 ET 4/18 = pregame for 4/18 loss. Verdict swing: WIN → LOSS.
+- `daaac8ab`: Pass A decoded ID → "30 min before 4/17 CHA-ORL tipoff = pregame." DB → 18:25 ET 4/18 (24 hours later, post-elimination). Reasoning was wrong; verdict happened to land right via different path (CHA was already eliminated, so still anchors to 4/17 LOSS).
+
+**Why ID decoding fails here:** unclear, possibly a graders' library version mismatch or epoch confusion. Symptom is consistent enough that it should be considered unreliable until root-caused.
