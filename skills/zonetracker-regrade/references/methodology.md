@@ -114,3 +114,27 @@ When producing the final summary, always include:
 - Grade rate as a percentage (graded / total)
 
 This lets the user sanity-check that the grading process itself is stable across batches. A sudden grade-rate drop signals the methodology or evidence sources degraded.
+
+## Odds-field disambiguation of multi-name records (supplement to ambiguous-multi-side rule)
+
+The base rule (above): when a record contains multiple proper names without explicit structure markers (no leg separators, no "ML"/"+/-" per name, no "vs" with only one name on each side), mark `unknown` because the bet structure is ambiguous (parlay vs separate singles vs head-to-head).
+
+**Supplement:** if the raw bet row has a populated `odds` field AND the odds value is consistent with parlay math but NOT with any single-bet interpretation, treat as a parlay and grade per failed-leg rule.
+
+How to test: for a 2-name record with combined odds of -X, ask whether -X is plausible as a single ML on either named entity. If both entities are heavy favorites (e.g., -200 each) and the record's odds are in the -150 to -400 range, that's parlay math. If the record's odds are around -110 / +110, that's likely a single-side ML and the structure is still ambiguous (which side?).
+
+**Edge case — odds are null:** the supplement does NOT apply. Record stays `unknown` per the base rule. Null odds means the parser couldn't extract a stake-relevant signal, and we don't infer structure from absent data.
+
+### Worked example — B13 `e101c301` (Yagshimuradov vs McKee)
+- Description: `"Yagshimuradov vs McKee"` (no leg separator, no per-name market markers)
+- Capper: bobby__tracker (recap_tracker)
+- Sport: MMA. odds: -185. units: 10.
+
+Interpretation test: at PFL Belfast 2026-04-16, Yagshimuradov fought Pedro and McKee fought Lohore — they were not opponents. So "vs" can't mean head-to-head. -185 combined parlay odds is plausible for two MMA favorites both winning by U Dec; -185 is implausible as a single ML on either fighter alone (both were closer-to-pick'em than -185 would suggest). Conclusion: parlay. Both legs hit → WIN, 10u at -185 = 5.4054u.
+
+### Counter-example — B11 `7ad74564` (Fonseca x Darderi, Shelton, Bergs)
+- Description: 4 surnames, "x" between first two, comma-separated rest
+- Capper: bobby__tracker (recap_tracker)
+- Sport: ATP. odds: null. units: null.
+
+The supplement does not apply (null odds). Stays `unknown` per base rule. Even though the capper class is the same as e101c301, structural ambiguity cannot be resolved without odds-field anchoring.
