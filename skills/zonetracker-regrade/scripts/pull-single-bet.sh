@@ -9,7 +9,7 @@
 # sport, league, capper_id, source, source_url, result for each bet.
 #
 # Implementation: writes JS to a local temp file, uploads via sftp, executes
-# via ssh console. Avoids nested quote-escape collisions from inline `node -e`.
+# via ssh console. Avoids nested quote-escape collisions from inline node-e.
 
 set -euo pipefail
 
