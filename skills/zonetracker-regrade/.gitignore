@@ -1,0 +1,3 @@
+regrade_batch_*.json
+graded_batch_*.json
+regrade_batch_*_results.json
