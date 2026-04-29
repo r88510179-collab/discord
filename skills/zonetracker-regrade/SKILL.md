@@ -132,6 +132,8 @@ See `references/anti-patterns.md` for the full list. Top three that bite in almo
 2. **Hallucinated evidence quotes** — fabricating a quote that sounds plausible. Every `evidence_quote` must be copy-pasted from a real source.
 3. **Over-voiding** — marking as `unknown` when one confirmed failed leg already settles a parlay as LOSS.
 
+See `references/methodology.md` § Tightened rules from B16–B18 retrospective for: (a) loss profit_units = −wager rule, (b) recap_tracker hours-precision anchoring, (c) evidence-quote validator.
+
 ## For the P2b production agent
 
 When lifting this skill into the P2b Grader Agent:

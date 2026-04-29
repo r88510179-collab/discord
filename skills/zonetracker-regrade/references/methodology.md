@@ -159,3 +159,58 @@ How to test:
 
 ### Counter-example — would still be unknown
 If a mixed-class capper posts "Mariners ML" at 02:00 ET on a day with no Mariners game (or with a Mariners game already concluded the prior night), default to `unknown`. Timing alone doesn't rescue an absent game.
+
+## Tightened rules from B16–B18 retrospective
+
+Three rules locked in after recurring failures across batches 16, 17, and 18. These supersede any softer phrasing earlier in the document.
+
+### 1. Loss profit_units is always −wager
+
+When a bet loses, `profit_units = -units` — the negative of the staked units from the input row. Loss math does not depend on the odds. Win math does, but loss math does not.
+
+Correctness check before submitting any LOSS entry: `abs(profit_units) == abs(row.units)`. If the magnitude differs from the staked units (e.g. `-0.9091` for a 1u bet, `-1.5` for a 1u bet at -150, `-0.667` for a 1u bet at -150), the entry is wrong.
+
+#### Worked example — 1u loss at -110
+- input: `units: 1`, `odds: -110`, leg verifiably failed
+- correct: `profit_units: -1`
+- common bug: `profit_units: -0.9091` (computed as `-(1 × (100/110))` — that's the win-profit formula, applied to a loss)
+- correct check: `abs(-1) == abs(1)` ✓; `abs(-0.9091) == abs(1)` ✗
+
+#### Worked example — 1u loss at -150
+- input: `units: 1`, `odds: -150`
+- correct: `profit_units: -1`
+- common bug variants: `-1.5` (treating -150 as a win-side multiplier), `-0.6667` (decimal-payout math)
+
+Motivation: across B16/B17/B18, the secondary grader emitted six losses with `profit_units` set via `-(wager × decimal_payout - 1)` instead of `-wager` — six bets, all six values `-0.9091` on -110 odds. The defect is small per-bet but compounds into capper P&L drift across a quarter.
+
+### 2. Recap_tracker anchoring is hours-precision, not date-precision
+
+For `recap_tracker` cappers (see `capper-classes.md`), "anchor to the last completed event before `created_at`" is evaluated at hours-precision in the capper's relevant local timezone — not date-precision. The comparison is `event_end_time < created_at`, not `event_date <= post_date`. If a same-day event finishes before the post is made, that event is the anchor — even when an earlier-day event in the same series exists.
+
+Operational test:
+1. Convert `created_at` to the relevant local timezone for the sport (e.g. Madrid for ATP Madrid, ET for MLB/NBA).
+2. List all completed events in the named player/team's series whose end time is strictly earlier than the post timestamp.
+3. Take the most recent such event. Do NOT walk back further "for safety" — that discards public information that was available at post time.
+
+#### Worked example — B18 `fb5911b62fe8` (bobby__tracker, ATP Madrid)
+- raw `created_at`: 2026-04-21 20:40:18 UTC = 22:40 Madrid local
+- description: "Garin x Kjaer MLP + Bonzi ML" (3-leg parlay, recap_tracker convention)
+- Madrid Q-Finals played that afternoon; Garin's Q-Final ended ~18:00 Madrid local
+- Garin lost his Q-Final to Damm 6-2, 4-6, 6-7
+- date-precision anchor: walks back to 4/20 Q1 (Garin won) → grades parlay WIN — wrong
+- hours-precision anchor: stays on 4/21 Q-Final (Garin LOSS) → failed-leg kills parlay → LOSS — correct
+- Q-Final results were public at 22:40 Madrid; treating the post as if they weren't would be choosing to ignore evidence
+
+### 3. Evidence-quote must mention the players/events claimed in grade_reason
+
+Every proper noun (player surname, team name) and every specific event reference in `grade_reason` must appear literally in `evidence_quote`. Case-insensitive substring match is sufficient. If a name in the reason is absent from the quote, the grade is invalid — return `result: unknown` with reason "evidence_quote does not support grade_reason claim" and pull a real source. Do not push the WIN/LOSS through.
+
+This is a structural validator. It does not catch every form of bad evidence, but it catches the specific failure mode where a confident reason is paired with an unrelated quote — because the URL was wrong, the quote was copy-pasted from a different bet, or the reason was fabricated without checking the source.
+
+#### Worked example — B17 `e3550efcd198`
+- graded WIN with `grade_reason` containing "Ohtani homered"
+- `evidence_url`: an NBA recap article (wrong sport)
+- `evidence_quote`: text about Jokic's triple-double — "Ohtani" did not appear
+- validator check: `"ohtani" in evidence_quote.lower()` → False → grade invalid
+- actual outcome: Ohtani did not homer that day; bet was a parlay (Ohtani HR + Jokic TD); LOSS at 1u, -110 → `-1.0u`
+- as graded: WIN at +5.5556u (1u at +556 odds) → +6.56u P&L error from one validator failure
