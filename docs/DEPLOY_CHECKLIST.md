@@ -63,13 +63,30 @@ git push origin <branch>
 
 The output must show "main -> main" or similar success line. If it shows "403", "permission denied", or "rejected", the push failed and nothing landed. Stop and report the error rather than retrying silently.
 
-### 5. Fly auto-deploy ran
+### 5. Fly deploy ran and succeeded
+
+Deploys are **manual**. There is no GitHub Action or git-push hook on this repo. After committing and pushing, run:
+
+```bash
+flydeploy
+```
+
+(alias for `fly deploy --local-only --yes --no-cache -a bettracker-discord-bot`)
+
+The `--no-cache` flag is mandatory. Without it, Docker reuses a stale `COPY . .` layer and ships the previous build despite a successful "deploy" message. This pattern has shipped phantom deploys at v281 and v289.
+
+The output must end with:
+```
+--> v<NN> deployed successfully
+```
+
+Then confirm the release landed:
 
 ```bash
 fly releases -a bettracker-discord-bot | head -3
 ```
 
-The latest release version must have a timestamp within the last 5 minutes of the push. If the latest release is older than the push, Fly did not pick up the change and a manual `fly deploy` is needed.
+The latest version must be newer than before the deploy and have a timestamp within the last few minutes. If `fly deploy` errored, exited non-zero, or was killed mid-build, the release will not advance — Step 6 will then fail and you stop and report rather than retry.
 
 ### 6. Bot picked up the new code
 
