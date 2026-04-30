@@ -351,6 +351,11 @@ Root cause is Discord mobile's URL deep-link handler or X app's URL scheme — n
 
 No fix available from our side. Desktop works correctly. Mobile users can long-press → Copy Link → open manually in Safari.
 
+
+### /admin pipeline-trace should accept bet_id
+
+Currently only accepts ingest_id (e.g. `disc_<message_id>`, `twit_<tweet_id>`). Operators have bet_ids handy from war-room embeds and /grade output but no ingest_id, forcing a SQL lookup before tracing. Fix: detect hex bet_id input and resolve to ingest_id via `SELECT ingest_id FROM pipeline_events WHERE bet_id = ? LIMIT 1`, then trace.
+
 ## Foundation
 
 ### Grading audit table
