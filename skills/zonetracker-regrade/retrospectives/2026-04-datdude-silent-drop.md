@@ -154,6 +154,81 @@ Both options are out of scope for this read-only retrospective — the next sess
 
 ---
 
+## ERRATA-3 (added 2026-04-30, fourth correction — supersedes the v335 footnote conclusions)
+
+**The v335 deploy (commit 289ce3b) introduced a regression that dropped every Type 1 bet at the new `PRE_FILTER_AI_RESPONSE_NOT_A_BET` filter. Rolled back to v334's image as v337. Defect 2's empty-description hypothesis is disproven by the AI_RESPONSE_RAW data captured during the v335 window.**
+
+### What v335 actually did
+
+The defect 1 fix in `handlers/messageHandler.js:1086` replaced strict `parsed.is_bet === false` with loose `parsed.is_bet !== true`. The intended semantic was *"the AI explicitly said is_bet:false → drop."* The implemented semantic was *"the AI didn't explicitly say is_bet:true → drop."* These are not equivalent, because `parseBetText`'s Type 1 path returns `{ type:'bet', bets:[...] }` with `is_bet` left undefined as the **steady state** for every successful Type 1 return — not only the empty-bets edge case the original ERRATA-2 narrative described.
+
+`normalizeParsedBets` ([services/ai.js:421](../../../services/ai.js#L421)) returns `{ bets: clean }` only. `applyConfidenceGating` ([services/ai.js:546](../../../services/ai.js#L546)) mutates per-bet `_confidence*` fields and returns `result` unchanged in shape. Neither sets `is_bet`. The Type 1 path at `services/ai.js:997` then sets `result.type = 'bet'` and returns. Every Type 1 return has `is_bet === undefined`, regardless of `bets.length`. The v335 check therefore dropped them all.
+
+### The v335 trace that revealed the bug
+
+Test post into `#datdude-slips` at 2026-04-30 ~05:26 UTC, source_ref `1499280867540078633`:
+
+```
+RECEIVED            channelName=datdude-slips
+AUTHORIZED          guardReason=human_ok
+BUFFERED
+EXTRACTED           imageCount=1
+AI_RESPONSE_RAW     hasRaw=true, rawLen=330, hasImage=true   ← see snippet below
+GATE_DECISION       hasRaw=true, hasPlaceholder=false, noLegsFound=false, shouldFallback=false
+NORMALIZE_INPUT     betCount=1, sampleBet (populated, see below)
+NORMALIZE_OUTPUT    betCount=1                               ← normalizeBet did NOT strip
+PARSED              type=bet, isBet=false, betCount=1, ticketStatus=new
+DROPPED             PRE_FILTER_AI_RESPONSE_NOT_A_BET
+                    is_bet_value="undefined", parsedType="bet", betCount=1
+```
+
+The full AI raw response (rawLen=330, captured complete in `rawSnippet`):
+
+```json
+{"type":"bet","is_bet":true,"ticket_status":"loser","bets":[{"sport":"MLB","league":"MLB","bet_type":"straight","description":"Rangers TO WIN","odds":"+100","units":1.0,"wager":2.0,"payout":null,"event_date":null,"legs":[{"description":"Rangers TO WIN","odds":"+100","team":"Rangers","line":"ML","type":"moneyline"}],"props":[]}]}
+```
+
+`NORMALIZE_INPUT.sampleBet` (post-AI parse, pre-normalize):
+
+```json
+{"sport":"MLB","league":"MLB","bet_type":"straight","description":"Rangers TO WIN","odds":"+100","units":1,"wager":2,"payout":null,"event_date":null,"legs":[{"description":"Rangers TO WIN","odds":"+100","team":"Rangers","line":"ML","type":"moneyline"}],"props":[]}
+```
+
+### What this proves (and disproves)
+
+- **Defect 2 hypothesis is disproven.** ERRATA-2's diagnosis claimed AI returns `bets:[{description:"", legs:[<populated>]}]` and `normalizeBet` strips them via the `if (!rawDesc) return null;` guard. The v335 capture shows the opposite: `description="Rangers TO WIN"` (non-empty), the leg is populated with `team:"Rangers", line:"ML", type:"moneyline"`, and `NORMALIZE_OUTPUT.betCount` matches `NORMALIZE_INPUT.betCount` at 1 — `normalizeBet` did **not** strip. The empty-top-level-description failure mode did not reproduce. It may be intermittent, or it may not be the actual failure mode at all.
+- **Defect 1 fix in 289ce3b is wrong.** The check is too loose. Under v334, the Rangers ML bet would have flowed past `parsed.is_bet === false` (false; undefined !== false), entered `if (parsed.bets?.length > 0)`, and been staged. Under v335 it was dropped before reaching the bets block.
+- **The original "two-defect" framing is no longer supported.** ERRATA-2 split the bug into (1) silent exit in messageHandler and (2) Gemma gate blind spot. The v335 capture undermines both: the trace would have produced a normal staged bet under v334, so it is unclear which posts actually exhibit the originally-reported silent drop, and the AI did not produce the shape that defect 2's gate-fix targets.
+
+### What is still unexplained
+
+The original retrospective documented an HRB image post at 2026-04-30 04:05:47 UTC where `PARSED` had `betCount=0` and no terminal event followed. The Rangers ML test (2026-04-30 ~05:26 UTC) does not reproduce that — the AI returned `betCount=1`. Possible explanations, none yet evidenced:
+
+- The earlier HRB slip image triggered the AI to return `bets:[]` or `is_bet:false` (untriggered by the test image used in v335).
+- A different normalize-strip path (something other than empty top-level description) zeroed the bets.
+- The "no terminal event" symptom was caused by an exception or async-orphan in the bet-staging path, not in `parseBetText`.
+
+The captured AI_RESPONSE_RAW for the Rangers slip is a single sample; the failure mode may be input-dependent.
+
+### What the next session should do
+
+1. **Re-read the original BACKLOG entry / the field reports that motivated this investigation.** The v335 trace makes it possible the bug is not where ERRATA-1 or ERRATA-2 located it.
+2. **Trace what would happen to the Rangers ML bet AFTER PARSED in the original (v334) flow.** v335 instrumentation stopped at the PARSED → drop boundary in messageHandler; the bet-creation path (`createBetWithLegs`, `validateParsedBet`, war-room post in [handlers/messageHandler.js:1118-1163](../../../handlers/messageHandler.js#L1118)) is not instrumented. If the silent drop happens *there* instead of in `parseBetText`, the v335 instrumentation would never catch it.
+3. **Add instrumentation on the bet-staging path** for the next investigation deploy: between PARSED and `createBetWithLegs`, around `validateParsedBet`, between `createBetWithLegs` and the `recordStage('STAGED')` call. Mirror the `evtCtx`-style optionality so non-instrumented callers no-op.
+4. **Do not write a new fix prompt yet.** The next deploy should be instrumentation-only, no behavior changes — until the bug location is confirmed by a fresh trace.
+
+### Hard rule for any subsequent prompt against this retrospective
+
+Any future "loosen the is_bet check" proposal must include a paired change that preserves the populated-bets path. Either:
+
+- (a) order checks so `bets.length > 0` is evaluated before any drop on `is_bet`, OR
+- (b) combine the conditions: drop only when `is_bet !== true && (!bets || bets.length === 0)`, OR
+- (c) revisit the prompt's current hard rule against setting `result.is_bet = true` on the Type 1 path — the v335 trace evidence may justify making the parser's return shape consistent with the messageHandler's expectations.
+
+The implemented v335 fix did none of (a), (b), or (c), and that is what produced the regression.
+
+---
+
 ## Section 1 — Tooling validation
 
 `pipeline_events` is healthy. Schema and counts confirmed via the new helper `skills/zonetracker-regrade/scripts/run-fly-sql.sh` (readonly, blocks DDL/DML at the client before sending to Fly).
