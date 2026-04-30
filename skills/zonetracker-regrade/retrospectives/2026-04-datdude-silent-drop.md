@@ -9,6 +9,147 @@
 
 ---
 
+## ERRATA-2 (added 2026-04-30, third correction)
+
+**This is the second ERRATA on this retrospective.** ERRATA-1 was a proposed correction (drafted in `prompts/datdude-fix.md`) that itself misidentified the failure path; it was caught during pre-implementation verification and never written into this file. ERRATA-2 supersedes it.
+
+### What was wrong before
+
+Both the original retrospective and the rejected ERRATA-1 draft pointed at the wrong location:
+
+- **Original (Section 4.3 + Section 5 H4):** claimed Vision AI returns `type: 'ignore'` for HRB images and the existing Gemma gate doesn't catch that. Proposed fixing the gate to also fire on `type: 'ignore'`. Symptom-pattern correct (silent perception); root cause wrong.
+- **ERRATA-1 (rejected):** claimed HRB image-attached posts go through `parseBetSlipImage` (which has no fallback gate) while text-with-image-URL posts go through `parseBetText` (which has one). Proposed mirroring the gate into `parseBetSlipImage`. **Wrong on call-path:** an exhaustive `grep -rn parseBetSlipImage` shows the only non-test caller is `handlers/messageHandler.js:441` inside `scanImage()`, and `scanImage()` is dead code — never invoked anywhere in the repo since the initial commit. `parseBetSlipImage` is not on any production path. Implementing ERRATA-1 would have been a no-op deploy.
+
+### Actual production path
+
+HRB image-attached posts to `#datdude-slips` flow through:
+
+```
+discord.js Message event
+  → handlers/messageHandler.js handleMessage (line 668)
+  → bufferMessage / flushBuffer
+  → processAggregatedMessage (line 876)
+  → parseBetText(textPrompt, imageUrl, { imageUrl })  [line 949 or 960]
+  → returns to processAggregatedMessage
+  → recordStage('PARSED', { type, isBet, betCount, ... })  [line 984]
+  → branches: result / untracked_win / ticket_status / is_bet===false / bets.length>0
+```
+
+`parseBetText` has the Gemma fallback gate at [services/ai.js:868-906](../../../services/ai.js#L868). The gate works correctly for its intended trigger conditions: placeholder text, `raw === null`, and JSON-with-zero-legs when `quick.type === 'bet' || quick.is_bet === true`.
+
+### The actual silent-drop point
+
+Test posts on 2026-04-30 by user (smokke5) into `#datdude-slips`:
+
+| time (UTC) | source_ref | trace |
+|---|---|---|
+| 04:05:47 | `disc_1499260454038667264` | HRB image attachment |
+| 04:06:32 | `disc_1499260646183796796` | text "test" |
+
+Both traces, pulled from `pipeline_events` (timestamps converted from `created_at` epoch using `strftime('%s', ...)` — not the broken `datetime('now', '-7 days')` filter that produced Section 1's bogus row counts):
+
+**Test post 1 (HRB image, the failing case):**
+```
+RECEIVED   → channelId=1355182920163262664, channelName=datdude-slips
+AUTHORIZED → guardReason=human_ok
+BUFFERED   → ─
+EXTRACTED  → imageCount=1, imageUrl=https://cdn.discordapp.com/attachments/.../ReactNative-snapshot-image461681713155507
+PARSED     → {"type":"bet","isBet":false,"betCount":0,"ticketStatus":"new"}
+[no further events]
+```
+
+**Test post 2 (plain text "test", control):**
+```
+RECEIVED   → channelId=1355182920163262664
+AUTHORIZED → guardReason=human_ok
+DROPPED    → PRE_FILTER_NO_BET_CONTENT (textLen=4)  ← visible drop
+```
+
+The control post's pre-filter drop is recorded explicitly. The HRB post reaches PARSED with `betCount=0` and then **emits no further events** — no DROPPED, no STAGED, no ERROR.
+
+### Why the silent exit happens
+
+[handlers/messageHandler.js:1084](../../../handlers/messageHandler.js#L1084):
+
+```js
+// Not a bet — silently ignore
+if (parsed.is_bet === false) {
+  console.log(`[Filter] AI rejected as non-bet: ${cleanText.substring(0, 60)}...`);
+  dropAll('DROPPED', 'PRE_FILTER_NO_BET_CONTENT', { filter: 'ai_is_bet_false', sample: cleanText.slice(0, 80) });
+  return;
+}
+
+if (parsed.bets?.length > 0) { ... }  // line 1090
+```
+
+`parsed.is_bet === false` is **strict equality**. When `parsed.is_bet === undefined`, the check is false — `dropAll` doesn't fire. The next branch (`parsed.bets?.length > 0`) is also false when bets is empty. Control falls out of the `if (cleanText.length > 5 || imageUrls.length > 0)` block, past the `allBets`/`reviewBets` empty checks at lines 1148/1156, exits the function with no terminal pipeline event written.
+
+`parsed.is_bet` ends up undefined when `parseBetText` returns from its **Type 1 Bet** path at [services/ai.js:941-944](../../../services/ai.js#L941):
+
+```js
+const result = applyConfidenceGating(normalizeParsedBets(parsed), text);
+result.type = 'bet';
+return result;
+```
+
+`normalizeParsedBets` returns `{ bets: clean }` only — no `is_bet` field. `applyConfidenceGating` mutates per-bet flags but doesn't add `is_bet`. The Type 1 path explicitly sets `result.type = 'bet'` but leaves `is_bet` unset.
+
+This path fires when the Vision AI returns valid JSON with `is_bet: true` and `bets: [{...,legs:[<at least one>]}]`, but `normalizeBet` ([services/ai.js:367-368](../../../services/ai.js#L367)) drops every bet because the top-level `description` is empty/whitespace:
+
+```js
+const rawDesc = String(bet.description || '').trim().slice(0, 250);
+if (!rawDesc) return null;
+```
+
+After `.filter(Boolean)`, `result.bets = []`. Returned object: `{ type: 'bet', bets: [] }` — **no `is_bet`**.
+
+### Why the Gemma gate didn't fire (and why that's a separate issue)
+
+The gate at [services/ai.js:868-906](../../../services/ai.js#L868) only marks `noLegsFound = true` when:
+
+```js
+if (quick && (quick.type === 'bet' || quick.is_bet === true)) {
+  const bets = Array.isArray(quick.bets) ? quick.bets : [];
+  noLegsFound = bets.length === 0 || !bets.some(b => Array.isArray(b.legs) && b.legs.length > 0);
+}
+```
+
+For our scenario the AI returned `bets: [{description: "", legs: [<at least one>]}]`. The gate sees `bets.length > 0` and `bets[0].legs.length > 0` → `noLegsFound = false` → `shouldFallback = false` → **gate skips**. The gate has no awareness that the bet's top-level description is empty (which is what `normalizeBet` will reject on downstream).
+
+Confirmation that Gemma was not invoked: **`vision_failures` has zero rows** in the 04:00–04:15 UTC window (`run-fly-sql.sh`). `runGemmaVisionFallback` calls `logVisionFailure` on every Gemma-stage failure path (env-missing, circuit-breaker open, HTTP error, timeout, empty response, cerebras-parse failure). Zero rows → gate did not call `runGemmaVisionFallback` → gate did not fire.
+
+The most recent `vision_failures` entry is from 2026-04-29 19:27:05 UTC (~9 h before the test) and all 10 most-recent entries are `pbs.twimg.com/...` Twitter images, never `cdn.discordapp.com` Discord attachments — circumstantial evidence that the gate has not fired for any Discord-attachment post in this window.
+
+### Updated diagnosis (supersedes Sections 4.3, 5 H4, and ERRATA-1)
+
+The HRB silent-drop bug has **two independent contributing defects**:
+
+1. **Primary (the silent exit):** [handlers/messageHandler.js:1084](../../../handlers/messageHandler.js#L1084) `parsed.is_bet === false` is strict-equal where it should accept `undefined` as the "ignored" case, OR the path needs an explicit fall-through drop when `parsed.bets.length === 0` after the type/result branches. As-is, any `parseBetText` return shape with undefined `is_bet` and empty `bets` exits silently with PARSED as the last recorded event.
+
+2. **Contributing (Gemma gate blind spot):** [services/ai.js:868-906](../../../services/ai.js#L868) gates on legs presence only. When the AI returns bet entries with populated legs but empty top-level descriptions, `normalizeBet` will subsequently strip them — but the gate has already decided not to invoke Gemma. A bet-level `description` check (or moving the gate to fire on `bets.length === 0` *after* `normalizeParsedBets`) would close this hole.
+
+Defect 1 is the silent-drop. Defect 2 is why Gemma never gets a second swing at slips that the primary AI returned with empty descriptions.
+
+### What the qualitative findings got right
+
+The retrospective's qualitative conclusions still hold and are reinforced by ERRATA-2:
+
+- **"Gemma fallback never fires for HRB images"** — confirmed (vision_failures has no Discord-attachment entries; gate doesn't trigger on the description-stripping path).
+- **"pipeline_events has a blind spot in AI processing path"** — confirmed (`services/ai.js` has zero `recordStage` calls; intermediate gate/Gemma decisions are not observable).
+
+What's wrong is the location and mechanism, not the symptom-pattern.
+
+### Validation pending
+
+The diagnosis above is high-confidence based on code-trace + pipeline_events evidence, but is not directly proven by AI response content (the `raw` string is not persisted). Definitive proof requires either:
+
+- (a) instrumented re-test that captures `raw` and the post-`normalizeBet` bet count, OR
+- (b) a one-shot diagnostic that adds `recordStage` between `callLLM` and `normalizeParsedBets` in `parseBetText` to log the pre-normalize bets array, lands as a temporary instrumentation deploy, and is reviewed against a fresh HRB test post.
+
+Both options are out of scope for this read-only retrospective — the next session will write the fix prompt against this diagnosis.
+
+---
+
 ## Section 1 — Tooling validation
 
 `pipeline_events` is healthy. Schema and counts confirmed via the new helper `skills/zonetracker-regrade/scripts/run-fly-sql.sh` (readonly, blocks DDL/DML at the client before sending to Fly).
