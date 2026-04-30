@@ -475,7 +475,7 @@ async function processSlipImage(client, imageUrl, capperId, capperName, opts = {
   const prompt = ocrText.length > 10
     ? `Read the attached betting slip image AND the following OCR text to extract all bets:\n\n${ocrText}${contextLine}`
     : `Read the attached betting slip image and extract all bets, players, lines, and odds.${contextLine}`;
-  const parsed = await parseBetText(prompt, imageUrl, { imageUrl, channelId: opts.channelId, authorId: capperId, messageId: opts.messageId });
+  const parsed = await parseBetText(prompt, imageUrl, { imageUrl });
 
   if (!parsed.bets || parsed.bets.length === 0) {
     console.log('[SlipPipeline] Stage 2: No bets found in image.');
@@ -646,7 +646,7 @@ async function handleAutoGrade(message, fullText) {
 
   if (cleanText.length < 3) return;
 
-  const parsed = await parseBetText(cleanText, null, { channelId: message.channel?.id, authorId: message.author?.id, messageId: message.id });
+  const parsed = await parseBetText(cleanText);
   if (parsed.type === 'result' && parsed.outcome && parsed.subject?.length > 0) {
     // Try capper-specific matching first (more accurate)
     const capperInfo = resolveCapper(message);
@@ -946,7 +946,7 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
         const imageUrl = imageUrls[0] || null;
         console.log(`[DEBUG] Sending to AI. Text length: ${cleanText.length} | hasImage: ${!!imageUrl} | preview: "${cleanText.slice(0, 100)}"`);
         if (imageUrl) stageAll('EXTRACTED', { imageCount: 1, imageUrl: imageUrl.slice(0, 120) });
-        parsed = await parseBetText(textPrompt, imageUrl, { imageUrl, channelId: message.channel?.id, authorId: message.author?.id, messageId: message.id });
+        parsed = await parseBetText(textPrompt, imageUrl, { imageUrl });
       } else {
         // Multiple images — process each sequentially then merge
         console.log(`[DEBUG] Processing ${imageUrls.length} images sequentially...`);
@@ -957,7 +957,7 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
 
         for (let i = 0; i < imageUrls.length; i++) {
           console.log(`[DEBUG] Image ${i + 1}/${imageUrls.length}: ${imageUrls[i].slice(0, 60)}...`);
-          const imgParsed = await parseBetText(textPrompt, imageUrls[i], { imageUrl: imageUrls[i], channelId: message.channel?.id, authorId: message.author?.id, messageId: message.id });
+          const imgParsed = await parseBetText(textPrompt, imageUrls[i], { imageUrl: imageUrls[i] });
           console.log(`[DEBUG] Image ${i + 1} result: type=${imgParsed.type} bets=${imgParsed.bets?.length || 0} ticket_status=${imgParsed.ticket_status || 'new'}`);
 
           if (imgParsed.bets?.length > 0) mergedBets.push(...imgParsed.bets);
@@ -1080,33 +1080,10 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
         return;
       }
 
-      // AI explicitly said not-a-bet OR returned a shape with undefined is_bet
-      // (Type 1 Bet path returns { type:'bet', bets:[] } with no is_bet field
-      // when normalizeBet filters every bet out — see ERRATA-2.)
-      if (parsed.is_bet !== true) {
-        console.log(`[Filter] AI response not a confirmed bet (is_bet=${parsed.is_bet}): ${cleanText.substring(0, 60)}...`);
-        dropAll('DROPPED', 'PRE_FILTER_AI_RESPONSE_NOT_A_BET', {
-          filter: 'ai_is_bet_not_true',
-          is_bet_value: parsed.is_bet === undefined ? 'undefined' : String(parsed.is_bet),
-          parsedType: parsed.type || null,
-          betCount: parsed.bets?.length || 0,
-          sample: cleanText.slice(0, 80),
-        });
-        return;
-      }
-
-      // Defense-in-depth: is_bet was true but bets array is empty.
-      // Should not happen with the current parseBetText paths (Type 1 always
-      // produces non-empty bets when is_bet is true), but if normalizeBet's
-      // behavior changes or a future return shape forgets to set is_bet=false
-      // on empty bets, this prevents another silent exit.
-      if (!parsed.bets || parsed.bets.length === 0) {
-        console.log(`[Filter] AI claimed is_bet=true but returned zero bets: ${cleanText.substring(0, 60)}...`);
-        dropAll('DROPPED', 'PRE_FILTER_AI_RETURNED_ZERO_BETS', {
-          filter: 'is_bet_true_but_no_bets',
-          parsedType: parsed.type || null,
-          sample: cleanText.slice(0, 80),
-        });
+      // Not a bet — silently ignore
+      if (parsed.is_bet === false) {
+        console.log(`[Filter] AI rejected as non-bet: ${cleanText.substring(0, 60)}...`);
+        dropAll('DROPPED', 'PRE_FILTER_NO_BET_CONTENT', { filter: 'ai_is_bet_false', sample: cleanText.slice(0, 80) });
         return;
       }
 
