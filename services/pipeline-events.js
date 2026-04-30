@@ -57,13 +57,25 @@ const DROP_REASONS = [
 
 // Lazy-prepare the insert — avoids a stmt reference before the
 // migrator has finished running on cold start.
+//
+// `created_at` is INTEGER unix-epoch seconds (migration 018). Schema
+// has DEFAULT (strftime('%s','now')) so omitting the column also
+// works, but we set it explicitly so:
+//   1. value is visible in slow-query logs
+//   2. behaviour does not silently change if the DEFAULT is altered
+//   3. audit-rebuild scripts can replay rows with custom timestamps
+//
+// Diagnostic queries that read created_at MUST format it with
+//   datetime(created_at, 'unixepoch')
+// — bare `datetime(created_at)` returns NULL because SQLite reads
+// the integer as a Julian-day number out of range.
 let _insertStmt = null;
 function getInsertStmt() {
   if (_insertStmt) return _insertStmt;
   _insertStmt = db.prepare(`
     INSERT INTO pipeline_events
-      (ingest_id, bet_id, source_type, source_ref, stage, event_type, drop_reason, payload)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      (ingest_id, bet_id, source_type, source_ref, stage, event_type, drop_reason, payload, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   return _insertStmt;
 }
@@ -94,6 +106,7 @@ function writeRow({ ingestId, betId, sourceType, sourceRef, stage, eventType, dr
       String(eventType),
       dropReason ? String(dropReason) : null,
       safeJson(payload),
+      Math.floor(Date.now() / 1000),
     );
   } catch (err) {
     console.error(`[PipelineEvents] write error: ${err.message}`);

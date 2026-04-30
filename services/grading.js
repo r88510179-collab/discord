@@ -133,6 +133,155 @@ function isSupportedSport(sport) {
   return SUPPORTED_SPORTS.has(s);
 }
 
+// ═══════════════════════════════════════════════════════════
+// Player-prop evidence guard (G6 sub-check)
+//
+// Background: G7 (team-name verification) is gated on
+// betTeamList.length >= 1. G8 (player-name verification) only
+// fires for INDIVIDUAL_SPORTS (TENNIS/GOLF/MMA/UFC/BOXING).
+// NBA/NFL/MLB/NHL player props with no team in the description
+// fall between both — neither check runs, and the AI was free to
+// grade WIN on team-only evidence (bet ada01c0, 2026-04-30:
+// "OVER 14.5 POINTS SCOOT HENDERSON" → "Spurs 114, Trail Blazers 93").
+// This guard closes that gap.
+// ═══════════════════════════════════════════════════════════
+
+const PLAYER_PROP_GUARD_STATS = [
+  'POINTS', 'PTS', 'PT', 'PRA',
+  'REB', 'REBOUNDS', 'RBS',
+  'AST', 'ASSISTS', 'ASTS',
+  '3PT', '3PM', 'THREES',
+  'STEALS', 'STL',
+  'BLOCKS', 'BLK',
+  'RBI', 'RBIS',
+  'HITS', 'RUNS', 'STRIKEOUTS', 'KS', 'K', 'HR', 'HRS', 'HOME RUNS',
+  'TOTAL BASES', 'TBS',
+  'GOALS', 'SAVES', 'SHOTS', 'SOG',
+  'YARDS', 'YDS', 'TDS',
+  'RECEPTIONS', 'COMPLETIONS',
+];
+
+const PLAYER_PROP_STAT_RX = new RegExp(
+  '\\b(' + PLAYER_PROP_GUARD_STATS.map(s => s.replace(/\s+/g, '\\s+')).join('|') + ')\\b',
+  'i',
+);
+
+const PLAYER_PROP_BET_VOCAB = new Set([
+  'OVER', 'UNDER', 'O', 'U', 'ML', 'MONEYLINE', 'SPREAD', 'TOTAL', 'BASES',
+  'POINTS', 'PTS', 'PT', 'PRA',
+  'REB', 'REBOUNDS', 'RBS',
+  'AST', 'ASSISTS', 'ASTS',
+  '3PT', '3PM', 'THREES',
+  'STEALS', 'STL',
+  'BLOCKS', 'BLK',
+  'RBI', 'RBIS',
+  'HITS', 'RUNS', 'STRIKEOUTS', 'KS', 'K', 'HR', 'HRS', 'HOME',
+  'GOALS', 'SAVES', 'SHOTS', 'SOG',
+  'YARDS', 'YDS', 'TDS', 'TD',
+  'RECEPTIONS', 'COMPLETIONS',
+  'TO', 'SCORE', 'RECORD', 'HAVE', 'HIT', 'GET', 'COLLECT',
+  'ANY', 'ANYTIME', 'TIME', 'GOAL', 'TOUCHDOWN',
+  'PROP', 'YES', 'NO', 'WIN', 'LOSE', 'PARLAY', 'SGP', 'STRAIGHT', 'ALT', 'LINE', 'LEG',
+  'JR', 'SR',
+]);
+
+/**
+ * Returns true if the description looks like a single-player prop
+ * across any major sport. Intentionally broader than
+ * `looksLikePlayerProp` (which is MLB-specific via stat hints).
+ */
+function isPlayerPropDescription(description) {
+  if (!description) return false;
+  const upper = String(description).toUpperCase();
+  // Pattern 1: OVER/UNDER (or O/U) + number + stat keyword somewhere
+  if (/\b(OVER|UNDER|O|U)\s+\d+(?:\.\d+)?\s+/.test(upper) && PLAYER_PROP_STAT_RX.test(upper)) return true;
+  // Pattern 2: number+ (e.g. "2+ HITS", "20+ POINTS")
+  if (/\b\d+\s*\+\s+/.test(upper) && PLAYER_PROP_STAT_RX.test(upper)) return true;
+  // Pattern 3: "TO SCORE", "TO RECORD", "ANY TIME GOAL", "ANYTIME"
+  if (/\b(TO\s+(SCORE|RECORD|HAVE|HIT|GET|COLLECT)|ANY\s*TIME\s+(GOAL|TOUCHDOWN)|ANYTIME)\b/.test(upper)) return true;
+  return false;
+}
+
+/**
+ * Best-effort extraction of the player's name from a player-prop
+ * description. Returns the longest run of capitalized tokens that
+ * aren't betting vocab. Returns null if no plausible name is found.
+ *
+ * "OVER 14.5 POINTS SCOOT HENDERSON" → "SCOOT HENDERSON"
+ * "Stephen Curry Over 25.5 Points"   → "Stephen Curry"
+ * "LeBron James 30+ Points"          → "LeBron James"
+ */
+function extractPlayerNameFromDescription(description) {
+  if (!description) return null;
+  const tokens = String(description)
+    .split(/[\s,()/\\]+/)
+    .map(t => t.replace(/^[•·\-*+]+/, '').replace(/[.:;'"+]+$/, ''));
+
+  let best = [];
+  let current = [];
+  const flush = () => {
+    if (current.length > best.length) best = current;
+    current = [];
+  };
+  for (const tok of tokens) {
+    const stripped = tok.replace(/[^A-Za-z']/g, '');
+    if (!stripped || stripped.length < 2) {
+      flush();
+      continue;
+    }
+    const upper = stripped.toUpperCase();
+    const isCap = /^[A-Z]/.test(stripped);
+    const isVocab = PLAYER_PROP_BET_VOCAB.has(upper);
+    if (isCap && !isVocab) {
+      current.push(stripped);
+    } else {
+      flush();
+    }
+  }
+  flush();
+  if (best.length < 1) return null;
+  return best.join(' ');
+}
+
+/**
+ * Player-prop evidence guard. If the bet description looks like a
+ * single-player prop, the evidence string MUST contain the player's
+ * surname (last token of the extracted name).
+ *
+ * Returns { passed: bool, reason?: string }.
+ *   - passed=true when bet is not a player prop (guard does not apply)
+ *   - passed=true when evidence references the player (surname match)
+ *   - passed=false when evidence omits the player entirely
+ *
+ * Conservative by design: surname-only matching avoids first-name
+ * truncation in snippets ("S. Henderson" still matches), and any
+ * evidence that names the player passes — even if the rest of the
+ * evidence is sparse. The guard catches the team-only evidence shape,
+ * not the underlying prop result.
+ */
+function evaluatePlayerPropEvidence(description, evidence) {
+  if (!isPlayerPropDescription(description)) {
+    return { passed: true };
+  }
+  const playerName = extractPlayerNameFromDescription(description);
+  if (!playerName) {
+    return { passed: true };
+  }
+  const surname = playerName.split(/\s+/).pop();
+  if (!surname || surname.length < 3) {
+    return { passed: true };
+  }
+  const haystack = String(evidence || '').toLowerCase();
+  if (haystack.includes(surname.toLowerCase())) {
+    return { passed: true };
+  }
+  return {
+    passed: false,
+    reason: `G6:player_not_in_evidence — bet references "${playerName}" but evidence does not name the player`,
+    playerName,
+  };
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // P0 grading state machine — gateway + claim + backoff helpers.
 // ═══════════════════════════════════════════════════════════════════
@@ -982,6 +1131,50 @@ function extractSubject(description) {
     .trim();
 }
 
+/**
+ * Build the web-search query for grading. CANONICAL SOURCE:
+ * `bet.description`. Never read `bet.raw_text` here — `raw_text`
+ * carries the ingestion-side payload (tweet body, message text) and
+ * may contain TweetShift relay captions, replies, memes, or other
+ * content that has nothing to do with the bet. Bet ada01c0 (2026-04-30)
+ * burned 6+ retries because earlier code paths used `raw_text` for
+ * the prop's surrounding text — only `description` is canonical.
+ *
+ * Exported for tests; used inline by gradePropWithAI.
+ *
+ * @param {object} bet - { description, sport, event_date?, created_at? }
+ * @param {string|number|Date} [eventDate] - optional override
+ * @returns {string} sanitized search query
+ */
+function buildGraderSearchQuery(bet, eventDate) {
+  const description = (bet && bet.description) || '';
+  const sport = (bet && bet.sport) || '';
+  const rawDate = eventDate || (bet && (bet.event_date || bet.created_at));
+  let dateStr = '';
+  if (rawDate) {
+    const dateObj = new Date(rawDate);
+    if (!isNaN(dateObj.getTime())) {
+      dateStr = dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+    }
+  }
+  const sportContext = normalizeSportContext(sport);
+  const { matchedTeams } = findMentionedTeams(description, sportContext);
+  const teamList = [...matchedTeams];
+  let query;
+  if (teamList.length >= 2) {
+    const t1 = teamList[0].split(' ').pop();
+    const t2 = teamList[1].split(' ').pop();
+    query = `${t1} vs ${t2} ${sport} final score ${dateStr}`.trim();
+  } else if (teamList.length === 1) {
+    const teamName = teamList[0].split(' ').pop();
+    query = `${teamName} ${sport} game ${dateStr} final score`.trim();
+  } else {
+    const subject = extractSubject(description);
+    query = `${subject} ${sport} final score ${dateStr}`.trim();
+  }
+  return query.replace(/\s+/g, ' ');
+}
+
 // ── Search chain: DDG (free) → Brave (free tier) → Serper (if budget remains) ──
 
 function sanitizeQuery(query) {
@@ -1590,28 +1783,11 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
     }
   }
 
-  // ── Step 1: Web search — use "team1 vs team2" format for precision ──
+  // ── Step 1: Web search — built from bet.description only (never raw_text) ──
   let searchResults = [];
   let searchSnippets = '';
   try {
-    const dateObj = new Date(eventDate);
-    const dateStr = dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
-    const sport = bet.sport || '';
-
-    // Build precise query
-    let query;
-    if (betTeamList.length >= 2) {
-      const t1 = betTeamList[0].split(' ').pop();
-      const t2 = betTeamList[1].split(' ').pop();
-      query = `${t1} vs ${t2} ${sport} final score ${dateStr}`;
-    } else if (betTeamList.length === 1) {
-      // Single-team bet: "Cavs -1.5" — search for the team's game on that date
-      const teamName = betTeamList[0].split(' ').pop();
-      query = `${teamName} ${sport} game ${dateStr} final score`;
-    } else {
-      const subject = extractSubject(bet.description);
-      query = `${subject} ${sport} final score ${dateStr}`;
-    }
+    const query = buildGraderSearchQuery(bet, eventDate);
     console.log(`[AI Grader] Searching: "${query.slice(0, 80)}"`);
     audit.search_query = query;
     const searchStart = Date.now();
@@ -1777,6 +1953,21 @@ CRITICAL RULES:
       return earlyReturn({ status: 'PENDING', evidence: `Soft hallucination: AI said "${softMatch}" — refusing to grade without concrete evidence` });
     }
     guardsLog.push('G6:no_soft_halluc');
+
+    // ── GUARD 6 sub-check: Player-prop evidence verification ──
+    // G7 only fires when betTeamList has teams; G8 only fires for
+    // INDIVIDUAL_SPORTS. NBA/NFL/MLB/NHL player props with no team in
+    // the description fall between both — see services/grading.js
+    // header comment for the Scoot Henderson incident (bet ada01c0).
+    const playerCheck = evaluatePlayerPropEvidence(bet.description, parsed.evidence || '');
+    if (!playerCheck.passed) {
+      console.warn(`[AI Grader] GUARD6 FAIL: ${bet.id?.slice(0, 8)} | ${playerCheck.reason}`);
+      audit.guards_failed.push('G6:player_not_in_evidence');
+      return earlyReturn({
+        status: 'PENDING',
+        evidence: `Player [${playerCheck.playerName}] not in evidence — likely wrong match (player-prop guard)`,
+      });
+    }
 
     // ── GUARD 7: Team-name verification (team sports) ──
     if (betTeamList.length >= 1) {
@@ -1963,6 +2154,12 @@ module.exports = {
   isSupportedSport,
   // Exported for unit tests only — do not rely on these from bot code:
   _internal: { looksLikePlayerProp, parsePlayerPropDescription },
+  // Exported for tests + observability — these are called from
+  // gradePropWithAI internally; importers MUST NOT mutate.
+  evaluatePlayerPropEvidence,
+  isPlayerPropDescription,
+  extractPlayerNameFromDescription,
+  buildGraderSearchQuery,
   shouldAutoVoidNoData,
   autoVoidNoSearchableData,
   evidenceLooksLikeNoData,
