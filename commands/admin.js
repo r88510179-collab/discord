@@ -520,19 +520,30 @@ module.exports = {
       const lastGrade = db.prepare("SELECT MAX(graded_at) as last FROM bets WHERE graded_at IS NOT NULL").get()?.last || 'never';
       const { backendHealth } = require('../services/grading');
       const { espnStats } = require('../services/espn');
+      // Per-backend health line. Always shows real state + last success +
+      // last failure (with reason) so the snapshot does not hide a recent
+      // 402/timeout behind a stale "healthy" label after the breaker
+      // cooldown expires.
+      const fmtAgo = (ts) => {
+        if (!ts) return null;
+        const m = Math.floor((Date.now() - ts) / 60000);
+        if (m < 1) return 'just now';
+        if (m < 60) return `${m}m ago`;
+        const hr = Math.floor(m / 60);
+        return `${hr}h ${m % 60}m ago`;
+      };
       const fmtBackend = (name) => {
         const h = backendHealth[name];
         if (!h) return 'unknown';
-        if (h.openUntil && Date.now() < h.openUntil) {
-          const m = Math.ceil((h.openUntil - Date.now()) / 60000);
-          return `OPEN (${h.lastError || 'unknown'}, ${m}m)`;
-        }
-        if (!h.lastSuccess && !h.lastFailure) return 'idle';
-        if (h.lastSuccess) {
-          const m = Math.floor((Date.now() - h.lastSuccess) / 60000);
-          return `healthy (${m}m ago)`;
-        }
-        return `failing (${h.failCount} fails, last: ${h.lastError || 'unknown'})`;
+        const isOpen = !!(h.openUntil && Date.now() < h.openUntil);
+        const state = isOpen
+          ? `open (${Math.ceil((h.openUntil - Date.now()) / 60000)}m)`
+          : 'closed';
+        const successPart = `success: ${fmtAgo(h.lastSuccess) || 'never'}`;
+        const failurePart = h.lastFailure
+          ? `failure: ${fmtAgo(h.lastFailure)} (${h.lastError || 'unknown'})`
+          : 'failure: never';
+        return `${state} | ${successPart} | ${failurePart}`;
       };
       const espnSportLine = Object.entries(espnStats.bySport || {})
         .map(([s, v]) => `${s}:${v.grades}/${v.requests}`)
@@ -566,8 +577,10 @@ module.exports = {
         `**ESPN:** ${espnStats.grades} graded / ${espnStats.requests} req (${espnSportLine})`,
         `**Auto-voided (unscoped) 24h:** ${autoVoided24h} | **Auto-voided (no-data) 24h:** ${autoVoidedNoData24h}`,
         `**Vision fallbacks 24h:** ${visionFallbacks24h} | **Gemma:** ${gemmaLine}`,
-        `**Brave:** ${fmtBackend('brave')} | **DDG:** ${fmtBackend('ddg')}`,
-        `**Bing:** ${fmtBackend('bing')} | **Serper:** ${fmtBackend('serper')}`,
+        `**Brave:** ${fmtBackend('brave')}`,
+        `**DDG:** ${fmtBackend('ddg')}`,
+        `**Bing:** ${fmtBackend('bing')}`,
+        `**Serper:** ${fmtBackend('serper')}`,
       ];
 
       // ── 5. Twitter ingestion ──

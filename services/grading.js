@@ -1008,9 +1008,11 @@ const decodeHTML = (s) => s.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace
 // if the quota window rolled over).
 //
 // Circuit policy is per-backend via BACKEND_CONFIG:
-//   - HTTP 402/401/403 → open for config.quotaCooldownMs (quota/auth exhaustion)
+//   - http_402/http_401/http_403 → open for config.quotaCooldownMs (quota/auth exhaustion)
 //   - config.maxFails consecutive other failures → open for config.failCooldownMs
 //   - A single success resets failCount + clears openUntil
+//   - lastError is preserved across successes so /admin snapshot can
+//     surface the most recent failure reason per backend
 //
 // Backends consulted by searchWeb(): brave, ddg, bing, serper.
 // DDG uses a 30min fail cooldown because DDG Lite rate-limits by IP and
@@ -1049,16 +1051,17 @@ function recordBackendResult(name, ok, errorCode = null) {
     h.lastSuccess = Date.now();
     h.failCount = 0;
     h.openUntil = null;
-    h.lastError = null;
-  } else {
-    h.lastFailure = Date.now();
-    h.failCount++;
-    h.lastError = errorCode;
-    if (errorCode === 'HTTP_402' || errorCode === 'HTTP_401' || errorCode === 'HTTP_403') {
-      h.openUntil = Date.now() + (cfg?.quotaCooldownMs ?? 60 * 60 * 1000);
-    } else if (h.failCount >= (cfg?.maxFails ?? 3)) {
-      h.openUntil = Date.now() + (cfg?.failCooldownMs ?? 5 * 60 * 1000);
-    }
+    // lastError is intentionally NOT cleared so /admin snapshot can
+    // surface the most recent failure reason even after a recovery.
+    return;
+  }
+  h.lastFailure = Date.now();
+  h.failCount++;
+  h.lastError = errorCode;
+  if (errorCode === 'http_401' || errorCode === 'http_402' || errorCode === 'http_403') {
+    h.openUntil = Date.now() + (cfg?.quotaCooldownMs ?? 60 * 60 * 1000);
+  } else if (h.failCount >= (cfg?.maxFails ?? 3)) {
+    h.openUntil = Date.now() + (cfg?.failCooldownMs ?? 5 * 60 * 1000);
   }
 }
 
@@ -1085,8 +1088,8 @@ async function searchDDG(query) {
       const duration = Date.now() - start;
 
       if (!res.ok) {
-        console.log(`[Search] Backend=DDG | Result=HTTP_${res.status} | Duration=${duration}ms`);
-        recordBackendResult('ddg', false, `HTTP_${res.status}`);
+        console.log(`[Search] Backend=DDG | Result=http_${res.status} | Duration=${duration}ms`);
+        recordBackendResult('ddg', false, `http_${res.status}`);
         return [];
       }
 
@@ -1114,12 +1117,12 @@ async function searchDDG(query) {
       return results;
     } catch (err) {
       const duration = Date.now() - start;
-      console.log(`[Search] Backend=DDG | Result=TIMEOUT | Duration=${duration}ms | Attempt=${attempt}/2`);
+      console.log(`[Search] Backend=DDG | Result=timeout | Duration=${duration}ms | Attempt=${attempt}/2`);
       if (attempt < 2) await delay(3000); // Retry after 3s
     }
   }
 
-  recordBackendResult('ddg', false, 'TIMEOUT');
+  recordBackendResult('ddg', false, 'timeout');
   return [];
 }
 
@@ -1136,8 +1139,8 @@ async function searchBing(query) {
     });
     const duration = Date.now() - start;
     if (!res.ok) {
-      console.log(`[Search] Backend=Bing | Result=HTTP_${res.status} | Duration=${duration}ms`);
-      recordBackendResult('bing', false, `HTTP_${res.status}`);
+      console.log(`[Search] Backend=Bing | Result=http_${res.status} | Duration=${duration}ms`);
+      recordBackendResult('bing', false, `http_${res.status}`);
       return [];
     }
 
@@ -1155,8 +1158,8 @@ async function searchBing(query) {
     recordBackendResult('bing', true);
     return results;
   } catch (err) {
-    console.log(`[Search] Backend=Bing | Result=TIMEOUT | Duration=${Date.now() - start}ms`);
-    recordBackendResult('bing', false, 'TIMEOUT');
+    console.log(`[Search] Backend=Bing | Result=timeout | Duration=${Date.now() - start}ms`);
+    recordBackendResult('bing', false, 'timeout');
     return [];
   }
 }
@@ -1179,8 +1182,8 @@ async function searchBrave(query) {
     });
     const duration = Date.now() - start;
     if (!res.ok) {
-      console.log(`[Search] Backend=Brave | Result=HTTP_${res.status} | Duration=${duration}ms`);
-      recordBackendResult('brave', false, `HTTP_${res.status}`);
+      console.log(`[Search] Backend=Brave | Result=http_${res.status} | Duration=${duration}ms`);
+      recordBackendResult('brave', false, `http_${res.status}`);
       return [];
     }
     const data = await res.json();
@@ -1189,8 +1192,9 @@ async function searchBrave(query) {
     recordBackendResult('brave', true);
     return results;
   } catch (err) {
-    console.log(`[Search] Backend=Brave | Result=ERROR | Duration=${Date.now() - start}ms | ${err.message}`);
-    recordBackendResult('brave', false, 'ERROR');
+    const reason = err.name === 'TimeoutError' || err.name === 'AbortError' ? 'timeout' : 'network';
+    console.log(`[Search] Backend=Brave | Result=${reason} | Duration=${Date.now() - start}ms | ${err.message}`);
+    recordBackendResult('brave', false, reason);
     return [];
   }
 }
@@ -1207,7 +1211,7 @@ async function searchSerper(query) {
       body: JSON.stringify({ q: query, num: 5 }),
     });
     if (!res.ok) {
-      recordBackendResult('serper', false, `HTTP_${res.status}`);
+      recordBackendResult('serper', false, `http_${res.status}`);
       return [];
     }
     const data = await res.json();
@@ -1217,7 +1221,8 @@ async function searchSerper(query) {
     recordBackendResult('serper', true);
     return results;
   } catch (err) {
-    recordBackendResult('serper', false, 'ERROR');
+    const reason = err.name === 'TimeoutError' || err.name === 'AbortError' ? 'timeout' : 'network';
+    recordBackendResult('serper', false, reason);
     return [];
   }
 }
