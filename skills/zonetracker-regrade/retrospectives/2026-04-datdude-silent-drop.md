@@ -150,6 +150,10 @@ Both options are out of scope for this read-only retrospective — the next sess
 
 ---
 
+**Update — v[NEW VERSION] / commit [HASH]:** addresses defect 1 (loose `is_bet` check + new `PRE_FILTER_AI_RESPONSE_NOT_A_BET` drop reason + secondary `PRE_FILTER_AI_RETURNED_ZERO_BETS` guard) and adds diagnostic instrumentation to `parseBetText` (AI_RESPONSE_RAW, GATE_DECISION, GEMMA_FALLBACK_TRIGGERED, GEMMA_FALLBACK_RESULT, NORMALIZE_INPUT, NORMALIZE_OUTPUT). Defect 2 (Gemma gate blind spot for empty-description bets) awaits raw payload data captured by AI_RESPONSE_RAW + NORMALIZE_INPUT in this deploy and lands in the next deploy.
+
+---
+
 ## Section 1 — Tooling validation
 
 `pipeline_events` is healthy. Schema and counts confirmed via the new helper `skills/zonetracker-regrade/scripts/run-fly-sql.sh` (readonly, blocks DDL/DML at the client before sending to Fly).

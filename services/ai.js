@@ -6,7 +6,7 @@
 const { normalizeDescription, normalizePlayer } = require('./normalization');
 const sharp = require('sharp');
 const crypto = require('crypto');
-const { recordDrop } = require('./pipeline-events');
+const { recordDrop, recordStage, makeIngestId } = require('./pipeline-events');
 
 // ── Image dedup cache (SHA-256 hash → timestamp, 12h window) ──
 const imageHashCache = new Map();
@@ -789,6 +789,17 @@ async function parseBetText(text, imageUrl, options = {}) {
     }
   }
 
+  // Diagnostic instrumentation context — only emit pipeline_events when caller
+  // threaded a Discord messageId. Twitter-handler and other callers omit it,
+  // so evtCtx stays null and recordStage calls below are no-ops.
+  const evtCtx = options.messageId
+    ? {
+        ingestId: makeIngestId('discord', options.messageId),
+        sourceType: 'discord',
+        sourceRef: options.messageId,
+      }
+    : null;
+
   // Download image for Gemini Vision if provided
   let imageBase64 = null;
   let mediaType = null;
@@ -865,6 +876,21 @@ STRICT RULES:
 Output strictly valid JSON. Do not include markdown formatting, do not include \`\`\`json backticks, and do not include any conversational text.`;
   let raw = await callLLM(text, sys, imageBase64, mediaType);
 
+  if (evtCtx) {
+    recordStage({
+      ...evtCtx,
+      stage: 'AI_RESPONSE_RAW',
+      eventType: 'STAGE_ENTER',
+      payload: {
+        hasRaw: !!raw,
+        rawLen: typeof raw === 'string' ? raw.length : 0,
+        rawSnippet: typeof raw === 'string' ? raw.slice(0, 2000) : null,
+        hasImage: !!imageBase64,
+        source: 'parseBetText',
+      },
+    });
+  }
+
   // ── VISION FALLBACK: Gemma 3:4b on Surface Pro ──
   // If the primary vision call returned nothing, placeholder text, or a
   // parse with zero legs, try Gemma. This catches two failure modes:
@@ -886,9 +912,31 @@ Output strictly valid JSON. Do not include markdown formatting, do not include \
       } catch (_) {}
     }
     const shouldFallback = !raw || hasPlaceholder || noLegsFound;
+    if (evtCtx) {
+      recordStage({
+        ...evtCtx,
+        stage: 'GATE_DECISION',
+        eventType: 'STAGE_ENTER',
+        payload: {
+          hasRaw: !!raw,
+          hasPlaceholder,
+          noLegsFound,
+          shouldFallback,
+          source: 'parseBetText',
+        },
+      });
+    }
     if (shouldFallback) {
       const trigger = !raw ? 'primary_null' : hasPlaceholder ? 'placeholder' : 'no_legs';
       console.log(`[VisionFallback] Triggering Gemma (reason=${trigger})`);
+      if (evtCtx) {
+        recordStage({
+          ...evtCtx,
+          stage: 'GEMMA_FALLBACK_TRIGGERED',
+          eventType: 'STAGE_ENTER',
+          payload: { reason: trigger, source: 'parseBetText' },
+        });
+      }
       const gemmaJson = await runGemmaVisionFallback({
         imageBase64,
         mediaType,
@@ -896,6 +944,14 @@ Output strictly valid JSON. Do not include markdown formatting, do not include \
         tweetId: options.tweetId || null,
         imageUrl: imageUrl || null,
       });
+      if (evtCtx) {
+        recordStage({
+          ...evtCtx,
+          stage: 'GEMMA_FALLBACK_RESULT',
+          eventType: 'STAGE_ENTER',
+          payload: { hasResult: !!gemmaJson, source: 'parseBetText' },
+        });
+      }
       if (gemmaJson) {
         console.log('[VisionFallback] Gemma+Cerebras succeeded — substituting primary output');
         raw = gemmaJson;
@@ -939,7 +995,31 @@ Output strictly valid JSON. Do not include markdown formatting, do not include \
   }
 
   // Type 1: Bet
+  if (evtCtx) {
+    const inputBets = Array.isArray(parsed.bets) ? parsed.bets : [];
+    recordStage({
+      ...evtCtx,
+      stage: 'NORMALIZE_INPUT',
+      eventType: 'STAGE_ENTER',
+      payload: {
+        betCount: inputBets.length,
+        sampleBet: inputBets[0] ? JSON.stringify(inputBets[0]).slice(0, 500) : null,
+        source: 'parseBetText',
+      },
+    });
+  }
   const result = applyConfidenceGating(normalizeParsedBets(parsed), text);
+  if (evtCtx) {
+    recordStage({
+      ...evtCtx,
+      stage: 'NORMALIZE_OUTPUT',
+      eventType: 'STAGE_ENTER',
+      payload: {
+        betCount: result.bets?.length || 0,
+        source: 'parseBetText',
+      },
+    });
+  }
   result.type = 'bet';
   return result;
 }
