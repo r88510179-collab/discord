@@ -583,3 +583,8 @@ Replace external AI dependencies with Surface Pro Ollama:
 ### Known drifts
 - Bouncer still lets promo/junk through (whatnot.com, BOOKIT BREAKS, etc.) - v283 catches at grader, but real fix is bouncer
 - Some bets have malformed sport values like "NCAAB/College Baseball" - parser issue upstream
+
+## Pipeline Observability
+
+### Parser PARSED event: `isBet` / `betCount` field mismatch
+In a v340 pipeline trace (msg=1499408189240774686, #datdude-slips, 2026-04-30), the PARSED payload showed `isBet:false` alongside `betCount:1` and `type:"bet"` — three fields telling different stories about the same parse. The bet went on to STAGED successfully so it is not blocking, but the inconsistency suggests stale flag wiring at the emit site. Audit wherever `pipeline_events.PARSED` is emitted and either drop the redundant flag or derive `isBet` from `betCount > 0` so the two cannot disagree. Risk if left: future filters that key off `isBet` could drop legitimate bets that the rest of the pipeline considers real.
