@@ -334,6 +334,10 @@ Enable per-capper emails in DubClub. Gmail filters → Discord webhook per cappe
 ### Profit tracker visual dashboard
 ROI charts, capper leaderboards with date ranges, unit tracking
 
+### slip-feed Edit/Delete buttons: `interaction.isButton is not a function`
+
+Production logs show `[SlipFeed] Interaction error: interaction.isButton is not a function` every time a user clicks Edit or Delete on a war-room embed posted to slip-feed. Discord shows "This interaction failed". Likely a discord.js v13→v14 API break (isButton became a getter, or check needs `interaction.isButton()` vs `interaction.isButton`) or wrong handler receiving a non-Button interaction type. Locate handler in services/slip-feed.js or similar and confirm the type guard matches the installed discord.js major version.
+
 ### Edit modal: parlay ↔ singles conversion
 Let user split a parlay into singles or merge singles into a parlay from the war room embed
 
