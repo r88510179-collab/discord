@@ -594,3 +594,13 @@ The leg sport validator drops legitimate bets when team names exist in multiple 
 
 ### Pre-existing test failures on main
 Three test files fail on `main` independent of recent changes (surfaced 2026-04-30 during validator and parser fixes): `tests/migration-validation.js` (assertion mismatch on `006_add_season_*.sql` filenames), `tests/twitter-pipeline-validation.js` (multi-pick mapping), and `tests/message-handler.integration.js` (mock omits `evaluateTweet` from `services/ai.js` export). Not blocking anything currently, but blocks the CI reliability gate from being meaningful. Triage all three — likely either fix the assertions/mocks or delete the dead tests.
+
+### Twitter slip-image extraction + missing tweet audit channel
+
+Tweet ingestion grabs surface text only — does not run vision on slip images attached to the tweet. Cappers most affected: Zach (zrob4444), Trent (bookitwithtrent). When a capper tweets a settled-slip screenshot with commentary, the bot extracts the commentary text as the bet rather than parsing the actual slip image. Smokke rejects these manually when they appear.
+
+Two gaps:
+1. Tweet-path doesn't hand image URLs to the vision pipeline (`parseBetSlipImage` → Gemini → Gemma fallback). Tweet text should be supplementary context only when an image is attached.
+2. No audit channel for tweet ingestion — tweets route directly to war-room or drop silently, so there's no way to inspect the raw tweet → extracted bet pairing later. Proposal: #tweet-receipts channel (parallel to #slip-receipts) showing tweet URL, image preview, and extracted bet.
+
+Example: msg_id 1499382543919611934 (war-room, graded WIN), source https://x.com/bobby__tracker/status/2049590413560893485 — surfaced 2026-04-30. Verify whether this parsed from the slip image or coincidentally hit the right answer from tweet text alone.
