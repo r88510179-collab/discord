@@ -595,12 +595,27 @@ The leg sport validator drops legitimate bets when team names exist in multiple 
 ### Pre-existing test failures on main
 Three test files fail on `main` independent of recent changes (surfaced 2026-04-30 during validator and parser fixes): `tests/migration-validation.js` (assertion mismatch on `006_add_season_*.sql` filenames), `tests/twitter-pipeline-validation.js` (multi-pick mapping), and `tests/message-handler.integration.js` (mock omits `evaluateTweet` from `services/ai.js` export). Not blocking anything currently, but blocks the CI reliability gate from being meaningful. Triage all three — likely either fix the assertions/mocks or delete the dead tests.
 
-### Twitter slip-image extraction + missing tweet audit channel
+### Twitter ingestion: recap leakage, slip-image bypass, missing audit trail
 
-Tweet ingestion grabs surface text only — does not run vision on slip images attached to the tweet. Cappers most affected: Zach (zrob4444), Trent (bookitwithtrent). When a capper tweets a settled-slip screenshot with commentary, the bot extracts the commentary text as the bet rather than parsing the actual slip image. Smokke rejects these manually when they appear.
+Three distinct problems in the tweet ingestion path. Surfaced 2026-04-30 via msg_id 1499382543919611934 (bobby__tracker tweet "WAY TOO EASY. Arthur Fils S1 ML (-165) 12u ✅🔨" — staged as Pending Review parlay 16h after the match settled).
 
-Two gaps:
-1. Tweet-path doesn't hand image URLs to the vision pipeline (`parseBetSlipImage` → Gemini → Gemma fallback). Tweet text should be supplementary context only when an image is attached.
-2. No audit channel for tweet ingestion — tweets route directly to war-room or drop silently, so there's no way to inspect the raw tweet → extracted bet pairing later. Proposal: #tweet-receipts channel (parallel to #slip-receipts) showing tweet URL, image preview, and extracted bet.
+**Issue 1 — Recap tweets staged as live bets.** Tweets with settled markers (✅ ❌, "WAY TOO EASY", "STOP PLAYING", past-tense framing) reach staging. The bobby__tracker case parsed cleanly text-wise but the match was already over. The `evaluateTweet` settled-detection logic discussed in earlier sessions either never shipped or doesn't run on the current scraper → `/api/mobile-ingest` path. Most-affected: bobby__tracker and any capper who recaps wins.
 
-Example: msg_id 1499382543919611934 (war-room, graded WIN), source https://x.com/bobby__tracker/status/2049590413560893485 — surfaced 2026-04-30. Verify whether this parsed from the slip image or coincidentally hit the right answer from tweet text alone.
+**Issue 2 — Slip-image tweets ignore the attached image.** When a capper tweets a screenshot of a settled slip with a generic caption ("LOCK 🔒"), the bot extracts the caption as the bet rather than running `parseBetSlipImage` on the image. Most-affected: zrob4444 (Zach), bookitwithtrent (Trent). Smokke rejects manually when caught.
+
+**Issue 3 — No audit trail for tweet ingestion.** Tweets route straight to war-room or drop silently — no paper trail showing tweet URL, image preview, raw text, and extracted bet for later review.
+
+**Resolution chosen for Issue 3 — Option B: scraper posts to sport channels.** Scraper posts tweets to the appropriate Discord sport channel (already in `HUMAN_SUBMISSION_CHANNEL_IDS`); the existing message handler picks up from there and runs bouncer/parse → war-room. Removes the direct ingest endpoint for tweets and gives a real audit trail in channels that are currently empty.
+
+Required for B:
+- Scraper posts via Discord webhook to sport channel (not `/api/mobile-ingest`)
+- Webhook username = capper's Twitter handle for attribution
+- Sport detection runs on the scraper before posting (or post to triage channel that fans out)
+- `CAPPER_CHANNEL_MAP` extended OR shift to webhook-author lookup
+- Bouncer flagged "from-Twitter" so recap markers + age gate apply
+
+**Order of work:**
+1. **P1a — Recap detection in bouncer** (Issue 1). Catches the bobby__tracker class immediately. Independent of B routing. Active now.
+2. **P1b — Tweet age gate** (event already started → drop). Catches the rest of the recap class.
+3. **P2 — Option B routing** (Issue 3). Pure value-add once 1+2 are in.
+4. **P2 — Slip-image vision pipeline for tweets** (Issue 2). Independent track.
