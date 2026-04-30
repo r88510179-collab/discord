@@ -7,6 +7,18 @@ const { extractTextFromImage } = require('../services/ocr');
 const { gradeFromCelebration, finalizeBetGrading, calcProfit, canFinalizeBet, scheduleRecheckAfterDenial } = require('../services/grading');
 const { recordStage, recordDrop, recordError, makeIngestId } = require('../services/pipeline-events');
 
+// Invariant: PARSED payload's `type` and `betCount` derive from the same
+// `parsed` object and cannot disagree by construction. The legacy `isBet`
+// field was redundant with `betCount > 0` and went stale because
+// `normalizeParsedBets` strips `is_bet`, so it has been removed.
+function buildParsedPayload(parsed) {
+  return {
+    type: parsed?.type || 'bet',
+    betCount: parsed?.bets?.length || 0,
+    ticketStatus: parsed?.ticket_status || 'new',
+  };
+}
+
 // ── Dedup guard: prevent double-processing of the same Discord message ──
 const processedMessages = new Set();
 
@@ -981,7 +993,7 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
       }
 
       console.log(`[DEBUG] AI Response: type=${parsed.type || 'bet'} is_bet=${parsed.is_bet} bets=${parsed.bets?.length || 0} ticket_status=${parsed.ticket_status || 'new'}`);
-      stageAll('PARSED', { type: parsed.type || 'bet', isBet: !!parsed.is_bet, betCount: parsed.bets?.length || 0, ticketStatus: parsed.ticket_status || 'new' });
+      stageAll('PARSED', buildParsedPayload(parsed));
 
       // Auto-grade detection
       if (parsed.type === 'result') {
@@ -1200,4 +1212,4 @@ async function reportErrorToAdmin(error, context, client) {
   }
 }
 
-module.exports = { handleMessage, processSlipImage };
+module.exports = { handleMessage, processSlipImage, buildParsedPayload };
