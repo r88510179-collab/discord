@@ -214,3 +214,18 @@ This is a structural validator. It does not catch every form of bad evidence, bu
 - validator check: `"ohtani" in evidence_quote.lower()` → False → grade invalid
 - actual outcome: Ohtani did not homer that day; bet was a parlay (Ohtani HR + Jokic TD); LOSS at 1u, -110 → `-1.0u`
 - as graded: WIN at +5.5556u (1u at +556 odds) → +6.56u P&L error from one validator failure
+
+### 4. grade_reason text and profit_units value must agree
+
+When `profit_units` is corrected at merge time (e.g. from B's win-profit-math `-0.9091` to the schema-correct `-1`), the `grade_reason` text must also be rewritten so any embedded math expression matches the final value. A 1u loss at -110 cannot end "...1u at -110 = -0.9091u." after `profit_units` is corrected to `-1`.
+
+Validator: post-merge consistency check greps `grade_reason` for any "= <number>u" pattern and verifies the number matches `profit_units`. If they disagree, fail the merge and require a reason rewrite before commit.
+
+#### Worked example — 1u loss at -110
+
+- pre-merge: `profit_units: -0.9091`, reason ends "...1u at -110 = -0.9091u."
+- post-merge per rule 1: `profit_units` corrected to `-1`
+- mismatch bug: text still reads "...1u at -110 = -0.9091u." while value is `-1` ✗
+- correct rewrite: text reads "...1u stake = -1u loss." (or equivalent) ✓
+
+Motivation: B18 emitted three bets (`45a9e7406601`, `a9f57aa4814c`, `3ca460b2c1fc`) where numeric `profit_units` was corrected at merge but `grade_reason` was not rewritten. Surfaced in the B16–B18 retrospective. Mismatched text-vs-value pairs confuse downstream readers and erode trust in the data.
