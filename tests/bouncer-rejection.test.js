@@ -1,36 +1,11 @@
 // ═══════════════════════════════════════════════════════════
-// Bouncer Rejection Tests — settled check runs BEFORE structure check
+// Bouncer Rejection Tests — settled check runs BEFORE structure check.
+// Imports the production evaluateTweet from services/ai so tests
+// catch any drift between source and tests.
 // ═══════════════════════════════════════════════════════════
 
 const assert = require('assert');
-
-const STRUCTURE = [
-  /[+-]\d{3,}/, /\b\d+\.?\d*\s*u\b/i, /\b\d+\s*units?\b/i,
-  /\b(over|under|o|u)\s*\d+\.?\d*/i, /[+-]\d+\.?\d*\s*\(/,
-  /\b\w+\s+(ml|moneyline)\b/i, /\b(parlay|sgp|same game|nrfi|yrfi)\b/i,
-  /\(\s*[+-]\d{3,}\s*\)/, /\b[A-Z][a-z]+\s+[+-]\d+\.?\d*/, /\bML\s*[+-]\d+/i, /\d+\.5\b/,
-];
-const SETTLED_MARKERS = /✅|❌|⚪|✔|✓|☑/;
-const WIN_HEADERS = [
-  /^\d+-\d+\s+(ON|on)\s+\w+/, /^STOP\s+PLAYING/i, /^BAANGG+/i,
-  /^CASH(ED)?\b/i, /^WHAT\s+A\s+(NIGHT|DAY|WIN)/i, /^EASY\s+(W|MONEY|WIN)/i,
-  /^BOOM+/i, /\d+\s+(for|of)\s+\d+\s+(today|tonight|yesterday)/i,
-];
-
-function evaluateTweet(text) {
-  const lines = text.split(/[\n]+/).map(l => l.trim()).filter(l => l.length > 0);
-  const bettingLines = lines.filter(l => STRUCTURE.some(p => p.test(l)));
-  const settledLines = bettingLines.filter(l => SETTLED_MARKERS.test(l));
-
-  if (bettingLines.length > 0 && settledLines.length === bettingLines.length) return 'reject_settled';
-
-  const firstLine = lines[0] || '';
-  const hasWinHeader = WIN_HEADERS.some(p => p.test(firstLine));
-  if (hasWinHeader && settledLines.length > 0) return 'reject_settled';
-
-  if (bettingLines.length > 0) return 'valid';
-  return 'reject_recap';
-}
+const { evaluateTweet } = require('../services/ai');
 
 // ── SETTLED BETS (must reject) ──
 console.log('Test 1: Settled bets...');
@@ -41,6 +16,19 @@ const settledCases = [
   ['CASHED IT!\n\nDodgers -1.5 (-120) 3u ✅', 'Cashed header'],
   ['What a night!\n\nCeltics ML -150 ✅\nHeat +5.5 -110 ✅', 'What a night header'],
   ['Easy W!\n\nJokic Over 28.5 Pts -115 2u ✅', 'Easy W header'],
+  // Bobby tweet with emoji preserved (per prompt example)
+  ['WAY TOO EASY.\n\nArthur Fils S1 ML (-165) 12u ✅🔨\n\n5 likes for more', 'Bobby Fils (with emoji)'],
+  ['1-0 ON UCL.\n\nDiaz Goal or Assist (-105) 4u ✅', 'Score header'],
+  ['STOP PLAYING WITH ME.\n\nHarry Kane Goal (-110) 4u ✅', 'Stop playing'],
+  ['BAANGGGG\n\nLakers ML +145 5u ✅\nNuggets +3.5 -110 3u ✅', 'Bang multi'],
+  ['TRUST ME.\n\nRuud S2 ML (-185) 5u ✅', 'Trust me header + settled'],
+  // Strong-header alone — emoji stripped by scraper but text unambiguously retrospective
+  ['WAY TOO EASY.\n\nArthur Fils S1 ML (-165) 12u \n\n5 likes for more', 'Bobby Fils (emoji stripped)'],
+  ['CASHED IT.\n\nDodgers -1.5 (-120) 3u', 'Cashed header, no marker'],
+  ['STOP PLAYING WITH ME.\n\nHarry Kane Goal (-110) 4u', 'Stop playing, no marker'],
+  // Word-form settled markers (won/lost/push/cashed)
+  ['Lakers ML -150 5u won me $750 last night', 'Word-form: won'],
+  ['Celtics -7 -110 3u lost a heartbreaker', 'Word-form: lost'],
 ];
 for (const [text, label] of settledCases) {
   const result = evaluateTweet(text);
@@ -55,7 +43,12 @@ const validCases = [
   ['Tonight: Lakers ML -150 3u, Celtics -7 -110 2u', 'Multi picks inline'],
   ['+1009 NRFI Parlay ready to go', 'NRFI parlay'],
   ['Dinger Tuesday +5097 odds parlay', 'Dinger parlay'],
-  ['BANG lets go! Ohtani over 8.5 Ks -120 2u', 'Celebration + pick (no ✅)'],
+  ['BANG lets go! Ohtani over 8.5 Ks -120 2u', 'Celebration + pick (no marker)'],
+  ['Arthur Fils S1 ML (-165) 12u', 'Plain pick'],
+  ['Tonight: Lakers ML -150 3u, Celtics -7 -110 2u', 'Inline multi'],
+  ['LFG\n\nKentucky -7 (-110) 5u', 'LFG header alone'],
+  ['HUGE W coming\n\nLakers ML -150 5u', 'Huge W header alone'],
+  ['TRUST ME\n\nRuud S2 ML (-185) 5u', 'Trust me alone (ambiguous → valid)'],
 ];
 for (const [text, label] of validCases) {
   const result = evaluateTweet(text);
@@ -82,5 +75,14 @@ for (const text of recapCases) {
   assert.strictEqual(evaluateTweet(text), 'reject_recap', `Should reject recap: "${text.slice(0, 30)}"`);
 }
 console.log(`  PASS: All ${recapCases.length} pure recaps rejected`);
+
+// ── False-positive guards on word-form SETTLED_MARKERS ──
+console.log('Test 5: Word-form false-positive guards...');
+{
+  // "won't" must NOT count as a settled marker
+  const wontCase = evaluateTweet("Lakers ML -150 5u won't be close tonight");
+  assert.strictEqual(wontCase, 'valid', `"won't" should not match \\bwon\\b: got ${wontCase}`);
+  console.log('  PASS: "won\'t" did not match settled marker');
+}
 
 console.log('\n✅ All bouncer tests passed!');

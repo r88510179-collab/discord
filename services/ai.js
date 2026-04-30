@@ -1126,18 +1126,40 @@ function evaluateTweet(text) {
     return 'reject_recap';
   }
 
-  const SETTLED_MARKERS = /✅|❌|⚪|✔|✓|☑/;
+  // Settled markers — emoji + word forms. Word forms protect against scrapers
+  // that strip emoji (mobile-ingest dropped ✅🔨 from bobby__tracker tweet 2049590413560893485).
+  // `(?!')` on `won` avoids matching "won't".
+  const SETTLED_MARKERS = /✅|❌|⚪|✔|✓|☑|🔨|\bwon\b(?!')|\blost\b|\bpush(?:ed)?\b|\bcashed\b/i;
 
   // Celebration headers that indicate this is a recap of settled bets
   const WIN_HEADERS = [
-    /^\d+-\d+\s+(ON|on)\s+\w+/,           // "1-0 ON UCL"
+    /^WAY\s+TOO\s+EASY\b/i,                // "WAY TOO EASY"
+    /^TOO\s+EASY\b/i,                      // "TOO EASY"
+    /^\d+-\d+\s+(ON|on)\s+\w+/,            // "1-0 ON UCL"
     /^STOP\s+PLAYING/i,                    // "STOP PLAYING WITH ME"
-    /^BAANGG+/i,                           // "BAANGGGG"
+    /^BAANGG+|^BANG\b/i,                   // "BAANGGGG" / "BANG"
     /^CASH(ED)?\b/i,                       // "CASHED"
     /^WHAT\s+A\s+(NIGHT|DAY|WIN)/i,        // "What a night"
     /^EASY\s+(W|MONEY|WIN)/i,              // "Easy W"
     /^BOOM+/i,                             // "BOOOM"
+    /^LET'?S\s+(GO|F+ING\s+GO)/i,          // "LET'S GO" / "LFG"
+    /^HUGE\s+(W|WIN)/i,                    // "HUGE W"
+    /^TRUST\s+ME\b/i,                      // "TRUST ME"
     /\d+\s+(for|of)\s+\d+\s+(today|tonight|yesterday)/i, // "4 for 5 today"
+  ];
+
+  // Strong recap headers — unambiguously retrospective phrases.
+  // Trigger reject_settled even WITHOUT an explicit settled marker, because
+  // the production scraper strips emoji. Conservative subset of WIN_HEADERS:
+  // pre-bet hype phrases (BANG, LET'S GO, TRUST ME, HUGE W, EASY W) are NOT here.
+  const STRONG_RECAP_HEADERS = [
+    /^WAY\s+TOO\s+EASY\b/i,
+    /^TOO\s+EASY\b/i,
+    /^STOP\s+PLAYING/i,
+    /^CASH(ED)?\b/i,
+    /^\d+-\d+\s+(ON|on)\s+\w+/,
+    /^WHAT\s+A\s+(NIGHT|DAY|WIN)/i,
+    /\d+\s+(for|of)\s+\d+\s+(today|tonight|yesterday)/i,
   ];
 
   const lines = text.split(/[\n]+/).map(l => l.trim()).filter(l => l.length > 0);
@@ -1155,6 +1177,13 @@ function evaluateTweet(text) {
   const hasWinHeader = WIN_HEADERS.some(p => p.test(firstLine));
   if (hasWinHeader && settledLines.length > 0) {
     console.log(`[evaluateTweet] REJECT SETTLED (celebration header + ✅): "${firstLine.slice(0, 40)}..." | ${settledLines.length} settled`);
+    return 'reject_settled';
+  }
+
+  // Strong retrospective header alone (covers scraper-stripped emoji) = settled recap
+  const hasStrongRecapHeader = STRONG_RECAP_HEADERS.some(p => p.test(firstLine));
+  if (hasStrongRecapHeader && bettingLines.length > 0) {
+    console.log(`[evaluateTweet] REJECT SETTLED (strong recap header alone): "${firstLine.slice(0, 40)}..." | bettingLines=${bettingLines.length}`);
     return 'reject_settled';
   }
 
