@@ -625,6 +625,8 @@ PICK: <player or team name> | <stat or market> | <line or spread> | <odds>
 
 If you cannot read a field, write UNKNOWN in its place. Do not invent values. If the image is not a betting slip, output NOT_A_SLIP.
 
+DO NOT extract player statistics, win-loss records, or percentage win rates as picks. Lines like "C. Sanchez 5-1 (83.3%)" or "L. Webb 6-0 (100.0%)" are STAT DISPLAYS (pitcher records, hit rates), not legs — skip them. A real leg has a line/spread/odds being wagered on, not a historical record.
+
 Example good output:
 PICK: Aaron Judge | HOME RUNS | Over 0.5 | +320
 PICK: Phoenix Suns | SPREAD | -3.5 | -110
@@ -709,6 +711,7 @@ Expected shape (copy exactly — NO other fields, NO other types):
 Rules:
 - bet_type: "straight" if 1 leg, "parlay" if 2+ legs.
 - If a PICK line reads UNKNOWN for all fields, drop that leg entirely.
+- DROP any PICK line that looks like a player stat display rather than a wager — specifically lines of shape "NAME N-N (NN%)" or "NAME N-N (NN.N%)" (pitcher win-loss records / hit rates). These are not betting legs.
 - If 0 usable legs remain, return {"type":"ignore","is_bet":false,"bets":[]}.
 - odds: parse American odds (+320, -110) as integer. Missing → null.
 - For player props, populate "props" with {player_name, stat_category (snake_case), line (number), direction ("over"/"under"), odds}.
@@ -850,6 +853,7 @@ STRICT RULES:
 - CRITICAL: If the text contains ANY actionable betting lines, spreads, odds, or totals (e.g., "Lakers -2", "Dodgers -140", "O229.5", "+150"), you MUST classify it as type "bet" and extract ALL the picks. Do NOT classify it as "ignore" or "result" just because the capper is also complaining about previous losses, venting, or adding commentary in the same message. The presence of betting lines ALWAYS overrides recap/complaining text.
 - ANTI-PROMO / ANTI-SPAM: If the text OR image contains marketing, promotional, or spam content — including but not limited to: "1 MONTH VIP", "RT & REPLY", "Discount", "Promo", "FREE PICK", "Join VIP", "Giveaway", "Link in bio", "Use code", "Subscribe", "Follow for picks", promoting a tool, software, VIP group, Discord server, algorithm, "AI agent", "private beta", subscription service, or discussing general betting strategy without a specific actionable pick — you MUST return {"type":"ignore"}. Do NOT hallucinate bets from promotional graphics. Words like "EV props" or "sharp lines" alone do NOT make it a bet.
 - STRICT ENTITY REQUIREMENT: Do NOT hallucinate odds or units. To classify as a bet, there MUST be a clear, specific team name, player name, or betting line being backed. If you cannot confidently identify WHO or WHAT is being bet on, you MUST return {"type":"ignore"}.
+- STAT LINES ≠ LEGS: Pitcher win-loss records (e.g., "C. Sanchez 5-1 (83.3%)", "L. Webb 6-0 (100.0%)"), team standings, season averages, hit rates, and percentage probabilities shown in graphics are CONTEXT, NOT betting legs. A leg requires an explicit prediction with line/spread/total/odds being wagered on. NRFI/YRFI free-play graphics often show pitcher records as supporting stats — the actual bet may be a single NRFI line ("NRFI -110"), NOT the pitcher records. Never extract a leg whose description matches the shape "NAME N-N (NN%)" or "NAME N-N (NN.N%)" — that is a record display.
 - If the text is a retweet (starts with "RT" or contains "Retweeted @"), a reply to a fan, or a capper celebrating someone else's win, return type "ignore".
 - If you see "[Quoted]" or "Quoted @", you MUST ignore the quoted text entirely. Only evaluate the capper's original text above it.
 - bet_type: straight, parlay, teaser, prop, future, ladder.
@@ -1160,6 +1164,14 @@ function evaluateTweet(text) {
     /^\d+-\d+\s+(ON|on)\s+\w+/,
     /^WHAT\s+A\s+(NIGHT|DAY|WIN)/i,
     /\d+\s+(for|of)\s+\d+\s+(today|tonight|yesterday)/i,
+    // P1a-ext (rbssportsplays "GOOD MORNING!!!! WAKE & CASH IT!!!!" class) —
+    // ✅ markers stripped by scraper, so we lean on celebration verbiage.
+    /\bWAKE\s*[&+]?\s*CASH\b/i,                  // "WAKE & CASH" / "WAKE CASH" / "WAKE+CASH"
+    /\bDELIVER(?:S|ED|ING)?\s+GREATNESS\b/i,      // "DELIVERS GREATNESS" / "DELIVERED GREATNESS"
+    /\bKING\s+DELIVERS\b/i,                       // "KING DELIVERS"
+    /^ATP\s+KING\b/i,                              // "ATP KING"
+    /^GOOD\s+MORNING\b.*!{2,}/i,                  // "GOOD MORNING!!" — generic alone, retrospective with multiple !s
+    /^LET'?S\s+(?:F\W*\w*\s+)?DANCE\b.*!{2,}/i,  // "LET'S DANCE!!" / "LET'S F*CKING DANCE!!"
   ];
 
   const lines = text.split(/[\n]+/).map(l => l.trim()).filter(l => l.length > 0);
@@ -1314,6 +1326,29 @@ function validateParsedBet(pick, sourceText, opts = {}) {
     return { valid: false, issues, reason: 'offseason' };
   }
 
+  // P1c: pitcher-record / stat-line legs — vision misread NAME N-N (NN%)
+  // displays as betting legs. Live repro: bet 7d96e21d1b1870f0ddb854613a417a77,
+  // @NRFIAnalytics 2026-04-30, "• C. Sanchez 5-1 (83.3%)\n• L. Webb 6-0 (100.0%)".
+  // Runs before entity_mismatch so its more-specific telemetry wins.
+  if (pick.legs && pick.legs.length > 0) {
+    for (const leg of pick.legs) {
+      const shapeCheck = validateLegShape(leg);
+      if (!shapeCheck.valid) {
+        issues.push(shapeCheck.reason);
+        maybeDrop('leg_shape_invalid', 'VALIDATOR_LEG_SHAPE_INVALID', { leg: leg?.description?.slice(0, 80) });
+        return { valid: false, issues, reason: 'leg_shape_invalid' };
+      }
+    }
+  }
+  {
+    const descCheck = validateLegShape({ description: pick.description });
+    if (!descCheck.valid) {
+      issues.push(descCheck.reason);
+      maybeDrop('leg_shape_invalid', 'VALIDATOR_LEG_SHAPE_INVALID', { description: (pick.description || '').slice(0, 120) });
+      return { valid: false, issues, reason: 'leg_shape_invalid' };
+    }
+  }
+
   // Cross-reference: check that key entities in parsed bet appear in source
   if (src.length > 10 && desc.length > 10) {
     // Extract significant words from description (4+ chars, not common betting terms)
@@ -1377,6 +1412,22 @@ function validateParsedBet(pick, sourceText, opts = {}) {
   }
 
   return { valid: true, issues };
+}
+
+// P1c: Pitcher win-loss records and stat-line displays misread as betting legs.
+// Shape: "NAME N-N (NN%)" or "NAME N-N (NN.N%)" — distinctive because real
+// betting markers (American odds, units, ML, spread, over/under) never combine
+// digit-dash-digit with a parenthesized percentage.
+const PITCHER_RECORD_PATTERN = /\b\d+-\d+\s*\(\s*\d+(?:\.\d+)?\s*%\s*\)/;
+
+function validateLegShape(leg) {
+  const desc = leg?.description || '';
+  if (!desc) return { valid: true };
+  if (PITCHER_RECORD_PATTERN.test(desc)) {
+    console.log(`[Parser] PITCHER-RECORD LEG REJECTED: "${desc.slice(0, 80)}"`);
+    return { valid: false, reason: `Leg looks like a pitcher win-loss / stat-line display ("N-N (NN%)"), not a betting leg: "${desc.slice(0, 80)}"` };
+  }
+  return { valid: true };
 }
 
 // Bug A: Validate that parlay legs don't contain teams from wrong sports.
@@ -1522,4 +1573,4 @@ function normalizeEventDate(raw) {
   return null;
 }
 
-module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, evaluateTweet, validateParsedBet, validateLegSportConsistency, isSportsbookBrand, reclassifySport, inferLegSport, isInSeason, normalizeEventDate, AMBIGUITY_THRESHOLD, tryVisionGemma, parseGemmaOutputWithCerebras, runGemmaVisionFallback, logVisionFailure, GEMMA_SLIP_PROMPT, gemmaHealth, isGemmaHealthy, recordGemmaResult };
+module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, evaluateTweet, validateParsedBet, validateLegSportConsistency, validateLegShape, isSportsbookBrand, reclassifySport, inferLegSport, isInSeason, normalizeEventDate, AMBIGUITY_THRESHOLD, tryVisionGemma, parseGemmaOutputWithCerebras, runGemmaVisionFallback, logVisionFailure, GEMMA_SLIP_PROMPT, gemmaHealth, isGemmaHealthy, recordGemmaResult };

@@ -29,6 +29,18 @@ const settledCases = [
   // Word-form settled markers (won/lost/push/cashed)
   ['Lakers ML -150 5u won me $750 last night', 'Word-form: won'],
   ['Celtics -7 -110 3u lost a heartbreaker', 'Word-form: lost'],
+  // P1a-ext (rbssportsplays "GOOD MORNING!!!! WAKE & CASH IT!!!!" class)
+  // Live repro: bet cdb6f5170e82f6af0a2657c22075f463, ATP, scraper-stripped ✅
+  ['GOOD MORNING!!!! WAKE & CASH IT!!!!\n\nAlexander Blockx +3.5 -120', 'rbssportsplays repro (full header)'],
+  ['WAKE & CASH IT!!!!\n\nLakers ML -150 5u', 'WAKE & CASH alone'],
+  ['Wake + cash baby\n\nLakers ML -150 5u', 'WAKE+CASH variant'],
+  ['LET\'S F*CKING DANCE!!!! Lakers ML -150 5u ✅', 'LET\'S F*CKING DANCE w/ marker'],
+  ["LET'S DANCE!!\n\nLakers ML -150 5u", "LET'S DANCE!! alone"],
+  ['ATP KING delivers again\n\nMurray ML -150 5u', 'ATP KING'],
+  ['KING DELIVERS once more\n\nMurray ML -150 5u', 'KING DELIVERS'],
+  ['DELIVERS GREATNESS as always\n\nLakers ML -150 5u', 'DELIVERS GREATNESS'],
+  ['DELIVERED GREATNESS yet again\n\nLakers ML -150 5u', 'DELIVERED GREATNESS'],
+  ['GOOD MORNING!!! Today\'s lock dropped\n\nLakers ML -150 3u', 'GOOD MORNING with !!!'],
 ];
 for (const [text, label] of settledCases) {
   const result = evaluateTweet(text);
@@ -49,6 +61,12 @@ const validCases = [
   ['LFG\n\nKentucky -7 (-110) 5u', 'LFG header alone'],
   ['HUGE W coming\n\nLakers ML -150 5u', 'Huge W header alone'],
   ['TRUST ME\n\nRuud S2 ML (-185) 5u', 'Trust me alone (ambiguous → valid)'],
+  // P1a-ext false-positive guards — single ! or no celebration marker → valid
+  ['Good morning! Tonight\'s lock: Lakers ML -150 3u', 'GOOD MORNING with single !'],
+  ['Good morning everyone, Lakers ML -150 3u tonight', 'GOOD MORNING no !'],
+  ["Let's dance tonight\n\nLakers ML -150 5u", "Let's dance no !!"],
+  ['King of NBA tonight\n\nLakers ML -150', 'KING without DELIVERS'],
+  ['Greatness incoming\n\nLakers ML 5u', 'GREATNESS without DELIVERS'],
 ];
 for (const [text, label] of validCases) {
   const result = evaluateTweet(text);
