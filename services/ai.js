@@ -1201,10 +1201,10 @@ const FORBIDDEN_PLACEHOLDERS = [
 
 // Sport reclassification — catch misclassified sports at intake
 const SPORT_TEAM_MAP = {
-  'MLB': ['yankees','red sox','dodgers','cubs','pirates','reds','brewers','phillies','mets','braves','astros','rangers','mariners','angels','royals','tigers','twins','white sox','guardians','blue jays','rays','orioles','rockies','padres','diamondbacks','cardinals','nationals','marlins'],
+  'MLB': ['yankees','red sox','dodgers','cubs','pirates','reds','brewers','phillies','mets','braves','astros','rangers','mariners','angels','royals','tigers','twins','white sox','guardians','blue jays','rays','orioles','rockies','padres','diamondbacks','cardinals','nationals','marlins','giants'],
   'NBA': ['lakers','celtics','warriors','heat','knicks','bulls','nets','rockets','spurs','suns','clippers','thunder','nuggets','jazz','blazers','kings','cavaliers','cavs','pistons','pacers','bucks','sixers','hawks','hornets','magic','wizards','raptors','timberwolves','grizzlies','mavs','mavericks','pelicans'],
-  'NFL': ['chiefs','rams','eagles','cowboys','giants','jets','patriots','dolphins','bills','steelers','ravens','browns','bengals','colts','titans','jaguars','texans','broncos','raiders','chargers','vikings','packers','bears','lions','seahawks','49ers','saints','falcons','panthers','buccaneers','bucs','commanders'],
-  'NHL': ['rangers','islanders','devils','bruins','canadiens','maple leafs','senators','sabres','panthers','lightning','capitals','penguins','flyers','blue jackets','red wings','blackhawks','wild','blues','predators','stars','avalanche','golden knights','kings','ducks','sharks','kraken','oilers','flames','canucks','hurricanes'],
+  'NFL': ['chiefs','rams','eagles','cowboys','giants','jets','patriots','dolphins','bills','steelers','ravens','browns','bengals','colts','titans','jaguars','texans','broncos','raiders','chargers','vikings','packers','bears','lions','seahawks','49ers','saints','falcons','panthers','buccaneers','bucs','commanders','cardinals'],
+  'NHL': ['rangers','islanders','devils','bruins','canadiens','maple leafs','senators','sabres','panthers','lightning','capitals','penguins','flyers','blue jackets','red wings','blackhawks','wild','blues','predators','stars','avalanche','golden knights','kings','ducks','sharks','kraken','oilers','flames','canucks','hurricanes','jets'],
   'SOCCER': ['manchester united','man utd','manchester city','man city','liverpool','chelsea','arsenal','tottenham','spurs','real madrid','barcelona','atletico madrid','bayern munich','dortmund','psg','paris saint-germain','juventus','inter milan','ac milan','napoli','roma','lafc','la galaxy','inter miami','nycfc','goalie saves','goal scorer','anytime scorer','both teams to score','btts','corners','yellow cards','clean sheet'],
   'TENNIS': ['australian open','french open','wimbledon','us open','atp','wta','masters 1000','total games','sets won','aces','double faults','break points','straight sets','fantasy score'],
   'GOLF': ['masters','pga championship','open championship','ryder cup','top 5 finish','top 10 finish','top 20 finish','make the cut','miss the cut','hole-in-one','tournament winner','first-round leader'],
@@ -1350,19 +1350,29 @@ function validateParsedBet(pick, sourceText, opts = {}) {
   return { valid: true, issues };
 }
 
-// Bug A: Validate that parlay legs don't contain teams from wrong sports
+// Bug A: Validate that parlay legs don't contain teams from wrong sports.
+// Multi-sport team names (Giants, Cardinals, Rangers, Panthers, Jets, Kings) live in
+// multiple sport lists — fire only when NONE of the matched sports is the declared sport.
 function validateLegSportConsistency(leg, parlaySport) {
   const desc = (leg.description || '').toLowerCase();
+  const declared = (parlaySport || '').toUpperCase();
+  const matchedSports = new Map(); // sport → first keyword that matched
   for (const [sport, keywords] of Object.entries(SPORT_TEAM_MAP)) {
-    if (sport === (parlaySport || '').toUpperCase()) continue;
     for (const keyword of keywords) {
       if (desc.includes(keyword)) {
-        console.log(`[Parser] WRONG-SPORT LEG REJECTED: parlay sport=${parlaySport}, leg="${desc.slice(0, 80)}", found ${sport} keyword "${keyword}"`);
-        return { valid: false, reason: `Leg contains ${sport} team "${keyword}" but parlay is ${parlaySport}` };
+        matchedSports.set(sport, keyword);
+        break;
       }
     }
   }
-  return { valid: true };
+  if (matchedSports.size === 0) return { valid: true };
+  if (matchedSports.has(declared)) return { valid: true };
+  const sports = [...matchedSports.keys()];
+  const teams = [...matchedSports.values()];
+  const sportsStr = sports.length === 1 ? sports[0] : `{${sports.join(',')}}`;
+  const teamsStr = teams.length === 1 ? `"${teams[0]}"` : `{${teams.map(t => `"${t}"`).join(',')}}`;
+  console.log(`[Parser] WRONG-SPORT LEG REJECTED: parlay sport=${parlaySport}, leg="${desc.slice(0, 80)}", matched=${sportsStr}`);
+  return { valid: false, reason: `Leg references team(s) ${teamsStr} which exist in ${sportsStr} but not in declared parlay sport ${parlaySport}` };
 }
 
 // Bug B: Detect sportsbook brand names that aren't bets
