@@ -1,7 +1,7 @@
 const assert = require('assert');
 const path = require('path');
 
-function loadHandlerWithMocks({ parseBetText, parseBetSlipImage, createBetWithLegs, postPickTracked }) {
+function loadHandlerWithMocks({ parseBetText, parseBetSlipImage, createBetWithLegs, sendStagingEmbed }) {
   const aiPath = path.resolve(__dirname, '../services/ai.js');
   const dbPath = path.resolve(__dirname, '../services/database.js');
   const embedsPath = path.resolve(__dirname, '../utils/embeds.js');
@@ -9,7 +9,17 @@ function loadHandlerWithMocks({ parseBetText, parseBetSlipImage, createBetWithLe
   const handlerPath = path.resolve(__dirname, '../handlers/messageHandler.js');
 
   delete require.cache[handlerPath];
-  require.cache[aiPath] = { id: aiPath, filename: aiPath, loaded: true, exports: { parseBetText, parseBetSlipImage } };
+  require.cache[aiPath] = {
+    id: aiPath,
+    filename: aiPath,
+    loaded: true,
+    exports: {
+      parseBetText,
+      parseBetSlipImage,
+      evaluateTweet: () => 'valid',
+      validateParsedBet: () => ({ valid: true, issues: [] }),
+    },
+  };
   require.cache[dbPath] = {
     id: dbPath,
     filename: dbPath,
@@ -22,10 +32,10 @@ function loadHandlerWithMocks({ parseBetText, parseBetSlipImage, createBetWithLe
     },
   };
   require.cache[embedsPath] = { id: embedsPath, filename: embedsPath, loaded: true, exports: { betEmbed: (b) => ({ title: b.description }) } };
-  require.cache[dashboardPath] = { id: dashboardPath, filename: dashboardPath, loaded: true, exports: { postPickTracked } };
+  require.cache[dashboardPath] = { id: dashboardPath, filename: dashboardPath, loaded: true, exports: { postPickTracked: async () => {} } };
 
   const warRoomPath = path.resolve(__dirname, '../services/warRoom.js');
-  require.cache[warRoomPath] = { id: warRoomPath, filename: warRoomPath, loaded: true, exports: { sendStagingEmbed: async () => {} } };
+  require.cache[warRoomPath] = { id: warRoomPath, filename: warRoomPath, loaded: true, exports: { sendStagingEmbed } };
 
   // eslint-disable-next-line global-require
   return require(handlerPath);
@@ -137,12 +147,12 @@ async function testReplayNoDuplicateSideEffects() {
   process.env.PICKS_CHANNEL_IDS = 'channel_1';
 
   const writer = dedupeWriter();
-  const tracked = [];
+  const staged = [];
   const { handleMessage } = loadHandlerWithMocks({
     parseBetText: async () => ({ bets: [{ sport: 'NBA', bet_type: 'straight', description: 'Lakers -3.5', odds: -110, units: 1, legs: [] }] }),
     parseBetSlipImage: async () => ({ bets: [] }),
     createBetWithLegs: writer,
-    postPickTracked: async (...args) => tracked.push(args),
+    sendStagingEmbed: async (...args) => staged.push(args),
   });
 
   const msg = makeMessage({ messageId: 'replay_1', withImage: false });
@@ -153,21 +163,21 @@ async function testReplayNoDuplicateSideEffects() {
   assert.strictEqual(writer.insertedCount(), 1, 'replay should not insert duplicate bet rows');
   assert.strictEqual(msg._reactCalls.length, 1, 'replay should not react twice');
   assert.strictEqual(msg._replyCalls.length, 0, 'replay should not send chat replies');
-  assert.strictEqual(tracked.length, 1, 'replay should not post tracked pick twice');
+  assert.strictEqual(staged.length, 1, 'replay should not stage War Room embed twice');
 }
 
 async function testTextAndImageSinglePersistedSet() {
   process.env.PICKS_CHANNEL_IDS = 'channel_1';
 
   const writer = dedupeWriter();
-  const tracked = [];
+  const staged = [];
   global.fetch = async () => ({ ok: true, arrayBuffer: async () => Buffer.from('fake') });
 
   const { handleMessage } = loadHandlerWithMocks({
     parseBetText: async () => ({ bets: [{ sport: 'NBA', bet_type: 'straight', description: 'Lakers -3.5', odds: -110, units: 1, legs: [] }] }),
     parseBetSlipImage: async () => ({ bets: [{ sport: 'NBA', bet_type: 'straight', description: 'Lakers -3.5', odds: -110, units: 1, legs: [] }] }),
     createBetWithLegs: writer,
-    postPickTracked: async (...args) => tracked.push(args),
+    sendStagingEmbed: async (...args) => staged.push(args),
   });
 
   const msg = makeMessage({ messageId: 'mix_1', withImage: true });
@@ -177,19 +187,19 @@ async function testTextAndImageSinglePersistedSet() {
   assert.strictEqual(writer.insertedCount(), 1, 'text+image same message should persist only one bet set');
   assert.strictEqual(msg._reactCalls.length, 1, 'single processing should react once');
   assert.strictEqual(msg._replyCalls.length, 0, 'single processing should not send chat replies');
-  assert.strictEqual(tracked.length, 1, 'single processing should post one tracked pick');
+  assert.strictEqual(staged.length, 1, 'single processing should stage one War Room embed');
 }
 
 async function testNearSimultaneousReplaySingleSideEffects() {
   process.env.PICKS_CHANNEL_IDS = 'channel_1';
 
   const writer = concurrentSafeWriter();
-  const tracked = [];
+  const staged = [];
   const { handleMessage } = loadHandlerWithMocks({
     parseBetText: async () => ({ bets: [{ sport: 'NBA', bet_type: 'straight', description: 'Lakers -3.5', odds: -110, units: 1, legs: [] }] }),
     parseBetSlipImage: async () => ({ bets: [] }),
     createBetWithLegs: writer,
-    postPickTracked: async (...args) => tracked.push(args),
+    sendStagingEmbed: async (...args) => staged.push(args),
   });
 
   const msg = makeMessage({ messageId: 'concurrent_1', withImage: false });
@@ -199,7 +209,7 @@ async function testNearSimultaneousReplaySingleSideEffects() {
   assert.strictEqual(writer.insertedCount(), 1, 'concurrent replay should persist exactly one write');
   assert.strictEqual(msg._reactCalls.length, 1, 'concurrent replay should react once');
   assert.strictEqual(msg._replyCalls.length, 0, 'concurrent replay should not send chat replies');
-  assert.strictEqual(tracked.length, 1, 'concurrent replay should post tracked pick once');
+  assert.strictEqual(staged.length, 1, 'concurrent replay should stage War Room embed once');
 }
 
 (async () => {
@@ -207,6 +217,9 @@ async function testNearSimultaneousReplaySingleSideEffects() {
   await testTextAndImageSinglePersistedSet();
   await testNearSimultaneousReplaySingleSideEffects();
   console.log('messageHandler integration validation passed.');
+  // Production handler installs a 10-minute alertCooldowns prune setInterval that
+  // keeps the event loop alive. Force-exit so the test runner advances.
+  process.exit(0);
 })().catch((err) => {
   console.error(err);
   process.exit(1);

@@ -35,7 +35,11 @@ function run() {
     assert.strictEqual(tracked[2].filename, '003_add_settings_table.sql');
     assert.strictEqual(tracked[3].filename, '004_create_props_table.sql');
     assert.strictEqual(tracked[4].filename, '005_create_user_bets_table.sql');
-    assert.strictEqual(tracked[5].filename, '006_add_season_to_bets.sql');
+    // Two 006_* migrations exist intentionally: 006_add_season_to_bets.sql (b656b11)
+    // was kept after v2 overhaul (00c2f06) added 006_add_season_column.sql. The migrator
+    // tolerates the duplicate ALTER via "column already exists" skip path.
+    assert.strictEqual(tracked[5].filename, '006_add_season_column.sql');
+    assert.strictEqual(tracked[6].filename, '006_add_season_to_bets.sql');
 
     // Verify tables exist
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map(r => r.name);
