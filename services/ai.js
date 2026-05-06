@@ -7,6 +7,7 @@ const { normalizeDescription, normalizePlayer } = require('./normalization');
 const sharp = require('sharp');
 const crypto = require('crypto');
 const { recordDrop } = require('./pipeline-events');
+const { AdapterError, FALLBACK_ELIGIBLE, ok: adapterOk, fail: adapterFail, classifyError, classifyHttpStatus } = require('./adapters/types');
 
 // ── Image dedup cache (SHA-256 hash → timestamp, 12h window) ──
 const imageHashCache = new Map();
@@ -92,6 +93,9 @@ async function waitSlot(provider) {
 
 // ── OpenAI-format call (Groq, Mistral, OpenRouter) ──────────
 // Supports multimodal for OpenRouter when imageBase64 + visionModel are available
+//
+// Returns AdapterResult: { ok: true, value: string } on success,
+// { ok: false, errorClass, error } on any failure. Never throws.
 async function callOpenAI(provider, prompt, system, imageBase64, mediaType) {
   await waitSlot(provider.name);
 
@@ -135,24 +139,33 @@ async function callOpenAI(provider, prompt, system, imageBase64, mediaType) {
   if (provider.isOllama && process.env.OLLAMA_PROXY_SECRET) {
     headers['x-ollama-secret'] = process.env.OLLAMA_PROXY_SECRET;
   }
-  const res = await fetch(provider.url, {
-    method: 'POST',
-    signal: AbortSignal.timeout(timeoutMs),
-    headers,
-    body: JSON.stringify(bodyPayload),
-  });
-  if (!res.ok) {
-    const errBody = (await res.text()).substring(0, 200);
-    console.error(`[${provider.name}] HTTP ${res.status} (model: ${model}): ${errBody}`);
-    // 429 cooldown — give APIs breathing room before next provider attempt
-    if (res.status === 429) await new Promise(r => setTimeout(r, 2000));
-    return null;
+  try {
+    const res = await fetch(provider.url, {
+      method: 'POST',
+      signal: AbortSignal.timeout(timeoutMs),
+      headers,
+      body: JSON.stringify(bodyPayload),
+    });
+    if (!res.ok) {
+      const errBody = (await res.text()).substring(0, 200);
+      console.error(`[${provider.name}] HTTP ${res.status} (model: ${model}): ${errBody}`);
+      // 429 cooldown — give APIs breathing room before next provider attempt
+      if (res.status === 429) await new Promise(r => setTimeout(r, 2000));
+      const errorClass = classifyHttpStatus(res.status);
+      return adapterFail(errorClass, new Error(`HTTP ${res.status}: ${errBody}`));
+    }
+    const data = await res.json();
+    const content = data.choices?.[0]?.message?.content || '';
+    if (!content) return adapterFail(AdapterError.NO_CONTENT, new Error(`${provider.name} empty content`));
+    return adapterOk(content);
+  } catch (err) {
+    return adapterFail(classifyError(err), err);
   }
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content || '';
 }
 
 // ── Gemini-format call (supports images) ────────────────────
+// Returns AdapterResult: { ok: true, value: string } on success,
+// { ok: false, errorClass, error } on any failure. Never throws.
 async function callGemini(provider, prompt, system, imageBase64, mediaType) {
   await waitSlot(provider.name);
   const url = `${provider.url}/${provider.model}:generateContent?key=${provider.key}`;
@@ -164,53 +177,75 @@ async function callGemini(provider, prompt, system, imageBase64, mediaType) {
     systemInstruction: system ? { parts: [{ text: system }] } : undefined,
     generationConfig: { temperature: 0.2, maxOutputTokens: 1024, responseMimeType: 'application/json' },
   };
-  const res = await fetch(url, {
-    method: 'POST',
-    signal: AbortSignal.timeout(15000),
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const errText = (await res.text()).substring(0, 200);
-    console.error(`[gemini] HTTP ${res.status} (model: ${provider.model}): ${errText}`);
-    if (res.status === 429) await new Promise(r => setTimeout(r, 2000));
-    return null;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      signal: AbortSignal.timeout(15000),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const errText = (await res.text()).substring(0, 200);
+      console.error(`[gemini] HTTP ${res.status} (model: ${provider.model}): ${errText}`);
+      if (res.status === 429) await new Promise(r => setTimeout(r, 2000));
+      const errorClass = classifyHttpStatus(res.status);
+      return adapterFail(errorClass, new Error(`HTTP ${res.status}: ${errText}`));
+    }
+    const data = await res.json();
+    const content = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    if (!content) return adapterFail(AdapterError.NO_CONTENT, new Error('gemini empty content'));
+    return adapterOk(content);
+  } catch (err) {
+    return adapterFail(classifyError(err), err);
   }
-  const data = await res.json();
-  return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
 }
 
 // ── Universal call — tries providers in order ───────────────
 // Vision-aware: tries image-capable providers first, then falls back to text-only
 /**
- * withRetry — wraps an async fn with exponential backoff for transient errors.
+ * callAdapterWithRetry — invoke an AdapterResult-returning adapter
+ * with exponential backoff on transient errorClasses (rate_limit,
+ * timeout). Returns the final AdapterResult — never throws. Replaces
+ * the old throw-based withRetry helper.
  */
-async function withRetry(fn, label, retries = 2) {
+async function callAdapterWithRetry(fn, label, retries = 2) {
+  let last = null;
   for (let i = 0; i <= retries; i++) {
-    try {
-      return await fn();
-    } catch (err) {
-      const status = err.status || err.response?.status;
-      const isTransient = err.code === 'ETIMEDOUT' || status === 408 || status === 429;
-      if (isTransient && i < retries) {
-        const delay = Math.pow(2, i) * 1000;
-        console.log(`[RETRY] ${label} attempt ${i + 1} failed (${status || err.code}). Retrying in ${delay}ms...`);
-        await new Promise(res => setTimeout(res, delay));
-        continue;
-      }
-      throw err;
-    }
+    last = await fn();
+    if (last && last.ok) return last;
+    const cls = last && last.errorClass;
+    const isTransient = cls === AdapterError.RATE_LIMIT || cls === AdapterError.TIMEOUT;
+    if (!isTransient || i >= retries) return last;
+    const delay = Math.pow(2, i) * 1000;
+    console.log(`[RETRY] ${label} attempt ${i + 1} failed (${cls}). Retrying in ${delay}ms...`);
+    await new Promise(res => setTimeout(res, delay));
   }
+  return last;
 }
 
-async function callLLM(prompt, system, imageBase64, mediaType) {
+/**
+ * callLLMResult — multi-provider dispatch returning AdapterResult.
+ *
+ * Iterates configured providers (image-capable first when an image
+ * is present). On the first ok(value), returns ok with metadata
+ * { provider, latency, model, mode }. When every provider fails,
+ * returns fail with the FIRST fallback-eligible errorClass observed
+ * (rate_limit, quota_exhausted, no_content, parse_fail, timeout,
+ * http_5xx) — that's the signal parseBetText uses to decide whether
+ * to burn Gemma cycles. If no provider produced a fallback-eligible
+ * class (everything was AUTH or 4xx misconfig), the first errorClass
+ * is returned so callers can surface the failure without falling back.
+ *
+ * Never throws.
+ */
+async function callLLMResult(prompt, system, imageBase64, mediaType) {
   const hasImage = !!imageBase64;
 
   // Get ALL providers (not just image-capable ones) so we can fall back to text-only
   const allProviders = getProviders(false);
   if (allProviders.length === 0) {
     console.error('[AI] No providers configured!');
-    return null;
+    return adapterFail(AdapterError.UNKNOWN, new Error('No providers configured'));
   }
 
   // Sort: image-capable providers first when we have an image
@@ -218,65 +253,80 @@ async function callLLM(prompt, system, imageBase64, mediaType) {
     ? [...allProviders].sort((a, b) => (b.supportsImages ? 1 : 0) - (a.supportsImages ? 1 : 0))
     : allProviders;
 
+  let firstError = null;
+  let firstFallbackEligible = null;
+
+  const recordFailure = (result) => {
+    if (!result || result.ok) return;
+    if (!firstError) firstError = result;
+    if (!firstFallbackEligible && FALLBACK_ELIGIBLE.has(result.errorClass)) {
+      firstFallbackEligible = result;
+    }
+  };
+
   for (let i = 0; i < sorted.length; i++) {
     const provider = sorted[i];
     const startTime = Date.now();
-    try {
-      // Determine if this provider can handle the image
-      const canDoImage = hasImage && provider.supportsImages;
-      const targetModel = canDoImage && provider.visionModel ? provider.visionModel : provider.model;
-      console.log(`[AI] Trying ${provider.name} (${i + 1}/${sorted.length}) model=${targetModel} hasImage=${hasImage} canDoImage=${canDoImage}`);
+    // Determine if this provider can handle the image
+    const canDoImage = hasImage && provider.supportsImages;
+    const targetModel = canDoImage && provider.visionModel ? provider.visionModel : provider.model;
+    console.log(`[AI] Trying ${provider.name} (${i + 1}/${sorted.length}) model=${targetModel} hasImage=${hasImage} canDoImage=${canDoImage}`);
 
-      const result = await withRetry(async () => {
-        if (provider.format === 'gemini') {
-          return await callGemini(provider, prompt, system, canDoImage ? imageBase64 : null, mediaType);
-        }
-        return await callOpenAI(provider, prompt, system, canDoImage ? imageBase64 : null, mediaType);
-      }, provider.name);
-
-      if (result) {
-        const latency = Date.now() - startTime;
-        const mode = canDoImage ? 'vision' : 'text-only';
-        console.log(`[AI] Winner: ${provider.name} (${mode}) in ${latency}ms`);
-        // Attach metadata to the result string for downstream tracking
-        result._provider = provider.name;
-        result._latency = latency;
-        result._model = targetModel;
-        result._mode = mode;
-        return result;
+    const result = await callAdapterWithRetry(async () => {
+      if (provider.format === 'gemini') {
+        return await callGemini(provider, prompt, system, canDoImage ? imageBase64 : null, mediaType);
       }
-    } catch (err) {
+      return await callOpenAI(provider, prompt, system, canDoImage ? imageBase64 : null, mediaType);
+    }, provider.name);
+
+    if (result && result.ok) {
       const latency = Date.now() - startTime;
-      console.error(`[${provider.name}] Error (${latency}ms): ${err.message}${err.cause ? ` (cause: ${err.cause})` : ''}`);
-      console.error(`[${provider.name}] Stack: ${err.stack?.split('\n')[1]?.trim() || 'n/a'}`);
+      const mode = canDoImage ? 'vision' : 'text-only';
+      console.log(`[AI] Winner: ${provider.name} (${mode}) in ${latency}ms`);
+      return adapterOk(result.value, { provider: provider.name, latency, model: targetModel, mode });
     }
+    const latency = Date.now() - startTime;
+    console.error(`[${provider.name}] AdapterResult fail (${latency}ms): errorClass=${result?.errorClass} error=${result?.error || 'n/a'}`);
+    recordFailure(result);
   }
+
   // ── Last resort: if we had an image but ALL vision providers failed,
   // retry text-only providers with just the prompt (drop the image).
   // This lets Cerebras handle OCR text when Gemini/Groq/OpenRouter are all down.
   if (hasImage) {
-    console.warn(`[AI] All vision providers failed — retrying text-only (dropping image)...`);
+    console.warn('[AI] All vision providers failed — retrying text-only (dropping image)...');
     for (const provider of sorted) {
       if (provider.supportsImages) continue; // already tried these with image
-      try {
-        console.log(`[AI] Text fallback: ${provider.name} model=${provider.model}`);
-        const result = await withRetry(async () => {
-          return await callOpenAI(provider, prompt, system, null, null);
-        }, provider.name);
-        if (result) {
-          console.log(`[AI] Text fallback winner: ${provider.name}`);
-          result._provider = provider.name;
-          result._mode = 'text-fallback';
-          return result;
-        }
-      } catch (err) {
-        console.error(`[AI] Text fallback ${provider.name} failed: ${err.message}`);
+      console.log(`[AI] Text fallback: ${provider.name} model=${provider.model}`);
+      const result = await callAdapterWithRetry(async () => {
+        return await callOpenAI(provider, prompt, system, null, null);
+      }, provider.name);
+      if (result && result.ok) {
+        console.log(`[AI] Text fallback winner: ${provider.name}`);
+        return adapterOk(result.value, { provider: provider.name, mode: 'text-fallback', model: provider.model });
       }
+      console.error(`[AI] Text fallback ${provider.name} failed: errorClass=${result?.errorClass}`);
+      recordFailure(result);
     }
   }
 
   console.error(`[AI] All ${sorted.length} providers failed (hasImage: ${hasImage})`);
-  return null;
+  // Prefer fallback-eligible class so parseBetText can switch on a
+  // signal that Gemma can actually help with.
+  const chosen = firstFallbackEligible || firstError;
+  return chosen || adapterFail(AdapterError.UNKNOWN, new Error('All providers failed with no recorded error'));
+}
+
+/**
+ * callLLM — backward-compatible string-or-null wrapper around
+ * callLLMResult. Existing call sites (gradeBetAI, parseTwitterPick,
+ * generateRecap, parseGemmaOutputWithCerebras, etc.) keep working
+ * unchanged. parseBetText uses callLLMResult directly so it can
+ * switch on errorClass.
+ */
+async function callLLM(prompt, system, imageBase64, mediaType) {
+  const result = await callLLMResult(prompt, system, imageBase64, mediaType);
+  return result.ok ? result.value : null;
 }
 
 /**
@@ -636,18 +686,26 @@ Output PICKs only, one per line, no commentary.`;
 
 /**
  * Call Gemma 3:4b on Surface Pro Ollama via /api/generate with an image.
- * Returns raw text output or null on failure.
+ *
+ * Returns AdapterResult: { ok: true, value: rawText } on success,
+ * { ok: false, errorClass, error } on any failure. Never throws.
+ *
+ * AUTH and HTTP_4XX errors trip the breaker too — they typically
+ * mean OLLAMA_PROXY_SECRET is wrong, and we don't want to retry that
+ * tight in a loop.
  */
 async function tryVisionGemma(imageBase64, mediaType = 'image/png') {
   const url = process.env.OLLAMA_URL;
   const secret = process.env.OLLAMA_PROXY_SECRET;
-  if (!url || !secret || !imageBase64) return null;
+  if (!url || !secret || !imageBase64) {
+    return adapterFail(AdapterError.UNKNOWN, new Error('Gemma not configured (OLLAMA_URL/SECRET missing or no image)'));
+  }
 
   // Circuit breaker — if Ollama has been hanging, skip the 90s wait.
   if (!isGemmaHealthy()) {
     const remaining = Math.round((gemmaHealth.openUntil - Date.now()) / 60000);
     console.log(`[Gemma] Circuit breaker OPEN — skipping (${remaining}m remaining, last: ${gemmaHealth.lastError || 'unknown'})`);
-    return null;
+    return adapterFail(AdapterError.UNKNOWN, new Error(`circuit_open_${remaining}m`));
   }
 
   const model = process.env.OLLAMA_VISION_MODEL || 'gemma3:4b';
@@ -672,22 +730,23 @@ async function tryVisionGemma(imageBase64, mediaType = 'image/png') {
     if (!res.ok) {
       console.log(`[Gemma] Vision call FAILED: model=${model}, status=${res.status}, duration=${duration}ms`);
       recordGemmaResult(false, `HTTP_${res.status}`);
-      return null;
+      return adapterFail(classifyHttpStatus(res.status), new Error(`HTTP ${res.status}`));
     }
     const data = await res.json();
     const output = (data.response || '').trim();
     console.log(`[Gemma] Vision call: model=${model}, url=${url}, duration=${duration}ms, output_chars=${output.length}`);
     if (output) {
       recordGemmaResult(true);
-      return output;
+      return adapterOk(output);
     }
     recordGemmaResult(false, 'EMPTY_RESPONSE');
-    return null;
+    return adapterFail(AdapterError.NO_CONTENT, new Error('Gemma empty response'));
   } catch (err) {
-    const code = /timeout/i.test(err.message) ? 'TIMEOUT' : 'ERROR';
+    const errorClass = classifyError(err);
+    const code = errorClass === AdapterError.TIMEOUT ? 'TIMEOUT' : 'ERROR';
     console.log(`[Gemma] Vision call ${code}: ${err.message} (${Date.now() - start}ms)`);
     recordGemmaResult(false, code);
-    return null;
+    return adapterFail(errorClass, err);
   }
 }
 
@@ -760,13 +819,19 @@ function logVisionFailure({ tweetId, imageUrl, geminiResponse, gemmaResponse, ce
 /**
  * Run the Gemma → Cerebras fallback. Returns a JSON string (same shape
  * callers expect from callLLM) on success, or null on failure.
+ *
+ * tryVisionGemma now returns AdapterResult — unwrap to the raw text
+ * here. Gemma's adapter-level errorClass is logged but not surfaced
+ * upward; the caller already knows it took the fallback path.
  */
 async function runGemmaVisionFallback({ imageBase64, mediaType, geminiResponse, tweetId, imageUrl }) {
-  const gemmaRaw = await tryVisionGemma(imageBase64, mediaType);
-  if (!gemmaRaw) {
+  const gemmaResult = await tryVisionGemma(imageBase64, mediaType);
+  if (!gemmaResult.ok) {
+    console.log(`[Gemma→Cerebras] Gemma adapter fail (errorClass=${gemmaResult.errorClass})`);
     logVisionFailure({ tweetId, imageUrl, geminiResponse, stage: 'gemma' });
     return null;
   }
+  const gemmaRaw = gemmaResult.value;
   console.log(`[Gemma→Cerebras] Gemma produced ${gemmaRaw.length} chars — parsing...`);
 
   const parsed = await parseGemmaOutputWithCerebras(gemmaRaw);
@@ -867,18 +932,25 @@ STRICT RULES:
 - Parse ALL bets. For player props, include a "props" array: player_name, stat_category (snake_case), line (number), direction ("over"/"under"), odds (integer or null).
 - Raw OCR text may contain typos and garbage chars. Do your best (e.g., "0ver"="over", "und3r"="under", "Lebr0n"="LeBron").
 Output strictly valid JSON. Do not include markdown formatting, do not include \`\`\`json backticks, and do not include any conversational text.`;
-  let raw = await callLLM(text, sys, imageBase64, mediaType);
+  // Use the AdapterResult variant so we can switch on errorClass for
+  // the Gemma fallback decision (P0 fix: Gemini 429 → Gemma fallback).
+  const primary = await callLLMResult(text, sys, imageBase64, mediaType);
+  let raw = primary.ok ? primary.value : null;
+  const primaryErrorClass = primary.ok ? null : primary.errorClass;
 
   // ── VISION FALLBACK: Gemma 3:4b on Surface Pro ──
-  // If the primary vision call returned nothing, placeholder text, or a
-  // parse with zero legs, try Gemma. This catches two failure modes:
-  //   (a) Gemini quota exhausted → raw is null
-  //   (b) Dense slip → Gemini returns "missing legs: capper hid..."
-  //   (c) Gemini returned valid JSON but extracted 0 legs
+  // Trigger when primary failed with a fallback-eligible errorClass
+  // (rate_limit, quota_exhausted, no_content, parse_fail, timeout,
+  // http_5xx) OR when primary "succeeded" but content is unusable
+  // (placeholder text, zero legs). Skip Gemma on AUTH/HTTP_4XX —
+  // a bad API key won't be fixed by a local model and we don't want
+  // to burn Surface Pro cycles on misconfig.
   if (imageBase64) {
     const rawText = typeof raw === 'string' ? raw : '';
-    const hasPlaceholder = FORBIDDEN_PLACEHOLDERS.some(p => rawText.toLowerCase().includes(p))
-      || /missing legs|capper hid|cannot read|cannot parse|unable to/i.test(rawText);
+    const hasPlaceholder = !!raw && (
+      FORBIDDEN_PLACEHOLDERS.some(p => rawText.toLowerCase().includes(p))
+      || /missing legs|capper hid|cannot read|cannot parse|unable to/i.test(rawText)
+    );
     let noLegsFound = false;
     if (raw && !hasPlaceholder) {
       try {
@@ -889,10 +961,13 @@ Output strictly valid JSON. Do not include markdown formatting, do not include \
         }
       } catch (_) {}
     }
-    const shouldFallback = !raw || hasPlaceholder || noLegsFound;
+    const adapterFallbackEligible = !raw && primaryErrorClass && FALLBACK_ELIGIBLE.has(primaryErrorClass);
+    const adapterNoFallback = !raw && primaryErrorClass && !FALLBACK_ELIGIBLE.has(primaryErrorClass);
+    const shouldFallback = adapterFallbackEligible || hasPlaceholder || noLegsFound;
+
     if (shouldFallback) {
-      const trigger = !raw ? 'primary_null' : hasPlaceholder ? 'placeholder' : 'no_legs';
-      console.log(`[VisionFallback] Triggering Gemma (reason=${trigger})`);
+      const reason = adapterFallbackEligible ? primaryErrorClass : (hasPlaceholder ? 'placeholder' : 'no_legs');
+      console.log(`[AI/slip] slip.fallback_to_gemma reason=${reason} primary_error=${primary.error || 'n/a'}`);
       const gemmaJson = await runGemmaVisionFallback({
         imageBase64,
         mediaType,
@@ -901,11 +976,14 @@ Output strictly valid JSON. Do not include markdown formatting, do not include \
         imageUrl: imageUrl || null,
       });
       if (gemmaJson) {
-        console.log('[VisionFallback] Gemma+Cerebras succeeded — substituting primary output');
+        console.log('[AI/slip] slip.fallback_to_gemma succeeded — substituting primary output');
         raw = gemmaJson;
       } else {
-        console.log('[VisionFallback] Gemma chain failed — falling through to original output');
+        console.log(`[AI/slip] slip.fallback_failed primary_reason=${reason}`);
       }
+    } else if (adapterNoFallback) {
+      // AUTH / HTTP_4XX / UNKNOWN — primary failed in a way Gemma can't help with.
+      console.log(`[AI/slip] slip.failed_no_fallback reason=${primaryErrorClass} error=${primary.error || 'n/a'}`);
     }
   }
 
@@ -952,7 +1030,33 @@ async function parseBetSlipImage(imageBase64, mediaType = 'image/png', opts = {}
   const sys = `Bet slip OCR expert. Recognize Hard Rock Bet, DraftKings, FanDuel, BetMGM, Caesars, Onyx.
 Return ONLY JSON: {"sportsbook":"Hard Rock Bet","bets":[{"sport":"UCL","league":"Champions League","bet_type":"straight","description":"Over 1.5 1H Goals - Corum vs Erokspor","odds":130,"units":1.0,"stake_amount":14.85,"potential_payout":34.15,"legs":[]}]}
 Use specific league names (UCL, EPL, La Liga, etc) not generic Soccer.`;
-  const raw = await callLLM('Extract all bets from this bet slip.', sys, imageBase64, mediaType);
+
+  // Switch on errorClass so a Gemini 429 falls back to Gemma instead
+  // of silently returning "AI unavailable" (P0 — 2026-05 18:20Z incident).
+  const primary = await callLLMResult('Extract all bets from this bet slip.', sys, imageBase64, mediaType);
+  let raw = primary.ok ? primary.value : null;
+  const primaryErrorClass = primary.ok ? null : primary.errorClass;
+
+  if (!raw && primaryErrorClass && FALLBACK_ELIGIBLE.has(primaryErrorClass)) {
+    console.log(`[AI/slip] slip.fallback_to_gemma reason=${primaryErrorClass} primary_error=${primary.error || 'n/a'} where=parseBetSlipImage`);
+    const gemmaJson = await runGemmaVisionFallback({
+      imageBase64,
+      mediaType,
+      geminiResponse: '',
+      tweetId: opts.tweetId || null,
+      imageUrl: opts.imageUrl || null,
+    });
+    if (gemmaJson) {
+      console.log('[AI/slip] slip.fallback_to_gemma succeeded (parseBetSlipImage)');
+      raw = gemmaJson;
+    } else {
+      console.log(`[AI/slip] slip.fallback_failed primary_reason=${primaryErrorClass} where=parseBetSlipImage`);
+    }
+  } else if (!raw && primaryErrorClass) {
+    // AUTH / HTTP_4XX / UNKNOWN — Gemma can't help with misconfig.
+    console.log(`[AI/slip] slip.failed_no_fallback reason=${primaryErrorClass} error=${primary.error || 'n/a'} where=parseBetSlipImage`);
+  }
+
   if (!raw) {
     if (opts.ingestId) {
       recordDrop({
@@ -961,7 +1065,7 @@ Use specific league names (UCL, EPL, La Liga, etc) not generic Soccer.`;
         sourceRef: opts.sourceRef || null,
         stage: 'DROPPED',
         dropReason: 'VISION_EXTRACTION_FAILED',
-        payload: { where: 'parseBetSlipImage', reason: 'AI unavailable' },
+        payload: { where: 'parseBetSlipImage', reason: 'AI unavailable', errorClass: primaryErrorClass || 'unknown' },
       });
     }
     return { bets: [], error: 'AI unavailable' };
@@ -1573,4 +1677,4 @@ function normalizeEventDate(raw) {
   return null;
 }
 
-module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, evaluateTweet, validateParsedBet, validateLegSportConsistency, validateLegShape, isSportsbookBrand, reclassifySport, inferLegSport, isInSeason, normalizeEventDate, AMBIGUITY_THRESHOLD, tryVisionGemma, parseGemmaOutputWithCerebras, runGemmaVisionFallback, logVisionFailure, GEMMA_SLIP_PROMPT, gemmaHealth, isGemmaHealthy, recordGemmaResult };
+module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, evaluateTweet, validateParsedBet, validateLegSportConsistency, validateLegShape, isSportsbookBrand, reclassifySport, inferLegSport, isInSeason, normalizeEventDate, AMBIGUITY_THRESHOLD, tryVisionGemma, parseGemmaOutputWithCerebras, runGemmaVisionFallback, logVisionFailure, GEMMA_SLIP_PROMPT, gemmaHealth, isGemmaHealthy, recordGemmaResult, callLLM, callLLMResult, callGemini, callOpenAI, AdapterError, FALLBACK_ELIGIBLE };

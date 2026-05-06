@@ -46,12 +46,13 @@ async function main() {
     const mime = f.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
     console.log(`── ${f} (${(buf.length / 1024).toFixed(0)}KB) ──`);
     const start = Date.now();
-    const raw = await tryVisionGemma(b64, mime);
+    const result = await tryVisionGemma(b64, mime);
     const dur = Date.now() - start;
-    if (!raw) {
-      console.log(`  ❌ Gemma returned null (${dur}ms)\n`);
+    if (!result.ok) {
+      console.log(`  ❌ Gemma fail (${dur}ms) errorClass=${result.errorClass} error=${result.error}\n`);
       continue;
     }
+    const raw = result.value;
     console.log(`  ✅ Gemma OK (${dur}ms, ${raw.length} chars)`);
     console.log(`  first 200 chars: ${raw.slice(0, 200).replace(/\n/g, ' | ')}`);
 
