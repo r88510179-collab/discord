@@ -1655,7 +1655,11 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
     audit.final_status = result.status;
     audit.final_evidence = result.evidence;
     audit.sport_out = bet.sport;
-    writeAudit();
+    // grading_audit is for state changes; the TOO_RECENT time gate fires every
+    // poll while a bet sits inside the 3h window, generating ~one audit row per
+    // 10s per pending bet. Skip writeAudit when callers flag suppressAudit;
+    // recordDrop above still runs so pipeline_events visibility is preserved.
+    if (!opts.suppressAudit) writeAudit();
     return result;
   }
 
@@ -1685,10 +1689,10 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
   const hoursSinceEvent = (Date.now() - eventTime) / (1000 * 60 * 60);
   console.log(`[AI Grader] Time check: ${bet.id?.slice(0, 8)} event=${eventDate} hours_since=${hoursSinceEvent.toFixed(2)}`);
   if (hoursSinceEvent < 3) {
-    console.log(`[AI Grader] SKIP too recent: ${bet.id?.slice(0, 8)} ${hoursSinceEvent.toFixed(1)}h ago`);
+    console.log(`grade.skip_too_recent betId=${bet.id} hours_since_event=${hoursSinceEvent.toFixed(2)}`);
     return earlyReturn(
       { status: 'PENDING', evidence: `Event was ${hoursSinceEvent.toFixed(1)}h ago — too soon to grade` },
-      { dropReason: 'GRADE_TOO_RECENT' }
+      { dropReason: 'GRADE_TOO_RECENT', suppressAudit: true }
     );
   }
 
