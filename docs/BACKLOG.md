@@ -703,3 +703,11 @@ Fingerprint-composition idempotency migration cannot ship until this is fixed â€
 
 **Priority:** P1 (gates Day 2 idempotency migration).
 
+
+## Worktree-deploy bug (2026-05-06)
+- Symptom: fly deploy --local-only from .claude/worktrees/hardcore-wilson-3d6dc0 produced ~7.86kB Docker build context vs expected ~1.65MB+ from main. Image was missing committed changes despite COPY . . in Dockerfile.
+- Workaround: cherry-pick worktree commit onto main, deploy from main directory with --no-cache. Confirmed working at v374 (79c8bef).
+- Impact: silent. fly status reports correct deployment ID; only file-level container inspection (sed/wc -c against local) detects mismatch.
+- Root cause unknown. Possibilities: Docker daemon path resolution, BuildKit context cache, fly CLI directory walk treating .claude/worktrees specially, or .gitignore/.dockerignore interaction with worktree HEAD.
+- Investigation TODO: minimal repro from clean worktree; test if explicit --dockerfile or --image-label changes behavior.
+- Cost so far: ~2 deploys + ~30 min debugging this session.
