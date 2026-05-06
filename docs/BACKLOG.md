@@ -683,3 +683,23 @@ The new G6 (player_not_in_evidence, v357) catches wrong-player-entirely hallucin
 
 Same parlay (bet `8ff7d273`, 2026-04-30 21:30): legs for Paul Skenes, Christopher Sanchez, Yordan Alvarez, Freddy Peralta, Bobby Witt Jr. all `[grade] resolved via StatsAPI`. Leg for Elly De La Cruz fell through to AI search ("Elly De La Cruz MLB final score..."). Same sport (MLB), same ingest path, similar prop shapes — should all hit StatsAPI. Possible causes: player-name matching against StatsAPI roster (apostrophes, accents), StatsAPI rate limit fallback, or game-not-final timing. Investigation P2; current behavior isn't broken (AI fallback works), just inefficient and less confident.
 
+
+## 🚨 P1 — Investigate 98%-empty event_date (blocks bet idempotency migration)
+
+Day 2 attempt 2 surfaced: 898 of 918 bets have empty event_date, 13 free-text (`Today`, `Game 6`, `9:10PM ET`, `4/6/26`, `May 03, 2026`), 7 ISO datetime. Slip extraction or `createBet` path isn't populating event_date reliably.
+
+Fingerprint-composition idempotency migration cannot ship until this is fixed — current state would cause the supersede step to dedupe legitimately distinct bets across days, hiding hundreds of real bets behind a `superseded_by_id` chain.
+
+**Investigation steps:**
+1. Trace event_date population path: slip extractor (Gemini Vision parse) → buffer → bouncer → `createBet` at `services/database.js:333`.
+2. Identify why 98% of rows end up empty. Likely candidates: extraction prompt not asking for event_date, default fallback overwriting parsed value, or bet insert dropping the field.
+3. Backfill the 13 free-text rows by parsing them into ISO datetime (manual or LLM-driven). Backfill the 898 empties from Discord message timestamp + sport/league schedule lookup if feasible.
+4. Standardize on ISO datetime format going forward.
+5. Re-run Day 2 idempotency migration with reliable event_date.
+
+**Sample queries for investigation:**
+- Distribution: `SELECT event_date, COUNT(*) FROM bets GROUP BY event_date ORDER BY 2 DESC LIMIT 30;`
+- Recent empties: `SELECT id, capper_id, sport, description, event_date, created_at FROM bets WHERE COALESCE(event_date, '') = '' ORDER BY created_at DESC LIMIT 20;`
+
+**Priority:** P1 (gates Day 2 idempotency migration).
+
