@@ -1402,6 +1402,13 @@ function validateParsedBet(pick, sourceText, opts = {}) {
   const src = (sourceText || '').toLowerCase();
   const hasMedia = !!opts.hasMedia;
 
+  // Slip-share exemption: image attachments OR slip-shape patterns mean the
+  // actual bet content lives outside the message text. Source-text-based
+  // entity and brand checks would false-positive in those cases. Apply
+  // consistently to both checks below.
+  const slipShape = looksLikeSlipShare(pick.description) || looksLikeSlipShare(sourceText);
+  const slipExempt = slipShape || hasMedia;
+
   // Emit a DROP when callers supply an ingestId so observability can
   // attribute the rejection without duplicating logic upstream.
   const maybeDrop = (reason, dropReason, extra = {}) => {
@@ -1453,8 +1460,12 @@ function validateParsedBet(pick, sourceText, opts = {}) {
     }
   }
 
-  // Cross-reference: check that key entities in parsed bet appear in source
-  if (src.length > 10 && desc.length > 10) {
+  // Cross-reference: check that key entities in parsed bet appear in source.
+  // Skipped under slipExempt — for image-bearing or slip-shape posts the bet
+  // content lives outside sourceText, so vision-extracted entities won't be
+  // present and this check would false-positive (VALIDATOR_ENTITY_MISMATCH
+  // was the largest "missed slips" bucket — 98 hits/7d before this fix).
+  if (!slipExempt && src.length > 10 && desc.length > 10) {
     // Extract significant words from description (4+ chars, not common betting terms)
     const betWords = desc.match(/\b[a-z]{4,}\b/g) || [];
     const NOISE = new Set(['over', 'under', 'moneyline', 'spread', 'parlay', 'straight', 'units', 'pick', 'lock', 'play', 'game', 'total', 'points', 'tonight', 'today', 'first', 'half', 'quarter', 'goal', 'assist', 'score', 'more', 'less', 'with']);
@@ -1475,15 +1486,11 @@ function validateParsedBet(pick, sourceText, opts = {}) {
   //
   // EXEMPTION: slip-share tweets ("PrizePicks 40x slip", "Betr 10x slip")
   // and image-only slip shares mention the brand but are real bets. Skip
-  // the brand rejection when either the description or the source tweet
-  // text matches a slip-shape pattern, OR when the tweet has media attached
-  // (the bet lives in the image, not the text). Brand-only promo tweets
-  // without slip indicators and without media still reject.
-  const slipShape = looksLikeSlipShare(pick.description) || looksLikeSlipShare(sourceText);
-  const brandExempt = slipShape || hasMedia;
-
+  // the brand rejection under slipExempt (slip-shape pattern OR has_media).
+  // Brand-only promo tweets without slip indicators and without media still
+  // reject.
   if (isSportsbookBrand(pick.description)) {
-    if (brandExempt) {
+    if (slipExempt) {
       const exemptSample = sourceText || pick.description || '';
       console.log(`[validateParsedBet] BRAND EXEMPT: ${slipShape ? 'slip pattern' : 'has_media'} detected — passing to extraction | "${String(exemptSample).slice(0, 60)}..."`);
     } else {
@@ -1493,7 +1500,7 @@ function validateParsedBet(pick, sourceText, opts = {}) {
     }
   }
   if ((pick.sport === 'Unknown' || !pick.sport) && /sportsbook/i.test(desc)) {
-    if (brandExempt) {
+    if (slipExempt) {
       const exemptSample = sourceText || pick.description || '';
       console.log(`[validateParsedBet] BRAND EXEMPT: ${slipShape ? 'slip pattern' : 'has_media'} detected — passing to extraction | "${String(exemptSample).slice(0, 60)}..."`);
     } else {
