@@ -516,6 +516,18 @@ client.once(Events.ClientReady, async (c) => {
   console.log('╚═══════════════════════════════════════════════╝');
   console.log('');
 
+  // ── Pipeline instrumentation gap detector ──────────────────
+  // One-shot self-check: any expected drop stage with zero
+  // events in 24h is logged as PIPELINE_INSTRUMENTATION_GAP.
+  // Failure here is non-fatal — must not block bot startup.
+  try {
+    const { db } = require('./services/database');
+    const { checkPipelineInstrumentation } = require('./services/pipelineHealth');
+    checkPipelineInstrumentation(db, console);
+  } catch (err) {
+    console.error('[PipelineHealth] check failed:', err.message);
+  }
+
   // ── Schedule auto-grading ─────────────────────────────────
   const gradeInterval = process.env.AUTO_GRADE_INTERVAL_MINUTES || 15;
   cron.schedule(`*/${gradeInterval} * * * *`, async () => {
