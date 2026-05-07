@@ -38,29 +38,6 @@
 
 ## 🚨 KNOWN BUG - Priority 1
 
-### DatDude #datdude-slips Hard Rock bet slips not staging to war-room
-
-**Symptom**: DatDudeStill posts Hard Rock Bet shares in #datdude-slips. Bot receives message, extracts image attachment, calls Vision AI. But no bet appears in war-room. Same user posting same content in #ig-dave-picks works fine.
-
-**Verified NOT the cause**:
-- MessageHandler.ENTRY fires for both channels (author=datdudestill reaches bot)
-- Both channels in HUMAN_SUBMISSION_CHANNEL_IDS
-- Both channels in CAPPER_CHANNEL_MAP (1473347391284576469:IgDave, 1355182920163262664:DatDude)
-- Neither in IGNORED_CHANNELS
-- Image extraction succeeds: "Images Extracted: 1" for both
-- Vision AI fires for both (5-sec buffer delay from 20:07:33 datdude → 20:07:38 vision call)
-- resolveCapper() returns valid capper info for both (DatDude, IgDave)
-- No channel-specific branching in processAggregatedMessage or bufferMessage
-
-**Next debug steps when resumed**:
-1. Add log line inside processAggregatedMessage right after "[DEBUG] AI Response:" showing channel name + bets.length
-2. Add log line before any return/drop in the war-room staging path
-3. Have DatDude post ONLY in #datdude-slips (no concurrent #ig-dave-picks post within 10s to rule out buffer collision)
-4. Immediately grep logs for full trace from ENTRY → AI Response → staged/dropped
-5. HRB-DIAG logging already live (commit 43b59e3) — keep it
-
-**Hypothesis**: Post-Vision-AI bet creation path has a silent drop for second channel in HUMAN_SUBMISSION_CHANNEL_IDS, OR buffer key collision drops one when both post near-simultaneously.
-
 ### Retry storm: ai_pending_legs denial bypasses attempt cap
 
 **Symptom**: Parlay bets with pending legs hit `canFinalizeBet()` P0 gate, which calls `scheduleRecheckAfterDenial(ai_pending_legs_N, 30)`. That schedule flips `grading_state` back to `'ready'`, not `'backoff'`. Grader picks it up 30s later, same pending legs, same denial, same 30s requeue. Normal bets cap at ~20 attempts via state machine escalation to backoff, but this path bypasses that cap. Observed 162-163 `grading_attempts` on 2 NBA parlays over 6-7 days.
@@ -274,10 +251,13 @@ The SPORT_TEAM_KEYWORDS list only contains team nicknames (Thunder, Lakers, Capi
 Batch script that reads bets with `grading_state='backoff'` and MLB player prop descriptions, resets `grading_state='ready'` on those that the resolver would now handle, lets the normal grader pick them up. Dry-run mode mandatory. Use `resolver_events` and the new `GRADE_*` drop counts as success metric.
 
 ### Brave Search returning HTTP 402 — free tier exhausted or API key issue
-Grader logs show 100% HTTP 402 responses from Brave backend. DDG circuit breaker is open. Only Bing fallback is returning results. Need to: (1) verify BRAVE_API_KEY is still valid, (2) check Brave dashboard for usage/billing status, (3) circuit-breaker Brave on 402 like we do for DDG timeouts, (4) add 402 detection to Brave health check so /admin snapshot reflects real state.
+Grader logs show 100% HTTP 402 responses from Brave backend. DDG circuit breaker is open. Only Bing fallback is returning results. Need to: (1) verify BRAVE_API_KEY is still valid, (2) check Brave dashboard for usage/billing status, (3) ~~circuit-breaker Brave on 402~~ — done in services/grading.js:1213 (quotaCooldownMs = 1h), (4) ~~add 402 detection to Brave health check so /admin snapshot reflects real state~~ — partially open: snapshot now reflects per-backend state via fmtBackend (v344), but explicit 402-aware messaging not yet wired; (5) chain reorder Bing-first done 2026-05-07 (commit aa7b030) — protects quota even when 402s do hit.
 
 ### Snapshot Brave health check — RESOLVED v344 (b9ca1f6)
 Fixed in `fmtBackend`: per-backend state, last success, last failure with reason now shown. `lastError` preserved across successes on `recordBackendResult`. Original diagnosis (tracker doesn't count HTTP errors) was wrong — tracker did count them, formatter ignored them.
+
+### Twitter validator drops on escape-hatch stubs (P3)
+services/twitter-handler.js line 204 fires VALIDATOR_ENTITY_MISMATCH on escape-hatch tweets where `description` is set to `text.slice(0, 200)` at line 189. Despite description being derived from text, the validator's lowercased `desc` and `src` comparison fails. Likely `text` is transformed between escape-hatch assignment and validator call. Low impact: 2-3 drops/24h, only affects tweets bound for review queue anyway. Investigate when convenient — possibly skip entity check entirely when description was set by escape hatch (add a flag).
 
 ### Action-keyword validation (P2 follow-up to sport consistency)
 Current validateLegSportConsistency() only checks team keywords. Player-only props with cross-sport action words (e.g. "Matt Turner Goalie Saves" in a LoL parlay, "Emmet Sheehan Pitching" in a Soccer parlay) can evade detection if no team names appear. Add a second validator that checks action/prop keywords per sport: soccer=goalie saves/corners/yellow card, mlb=pitching/strikeouts/RBIs, nba=rebounds/assists/PRAs, nhl=saves/shots on goal, etc. Action-keyword mismatch against declared parlay sport = reject.
@@ -361,6 +341,12 @@ No fix available from our side. Desktop works correctly. Mobile users can long-p
 Currently only accepts ingest_id (e.g. `disc_<message_id>`, `twit_<tweet_id>`). Operators have bet_ids handy from war-room embeds and /grade output but no ingest_id, forcing a SQL lookup before tracing. Fix: detect hex bet_id input and resolve to ingest_id via `SELECT ingest_id FROM pipeline_events WHERE bet_id = ? LIMIT 1`, then trace.
 
 ## Foundation
+
+### Gemini Vision quota structurally inadequate on Free tier (P0 — decision required)
+aistudio.google.com Free tier limits gemini-2.5-flash-lite to 20 RPD per project. Bot's Vision call volume regularly exceeds this within hours of midnight Pacific reset. Currently failing over to Groq Llama 4 Scout vision (waterfall handles 429 correctly). Two options: (1) link billing to project containing GEMINI_API_KEY → 1,000 RPD limit, ~$5-15/mo at current volume; (2) accept Groq as primary, Gemini as fallback. Spot-check Vision extraction quality over next 7 days to inform decision. No action blocking the bot today.
+
+### pipeline_events instrumentation gap post-BUFFERED (P2)
+For Discord-source bets, pipeline_events records RECEIVED, AUTHORIZED, BUFFERED, EXTRACTED, AI_RESPONSE_RAW, but no STAGED event for successful staging. This means we can only observe the staging path from time-bounded `fly logs`, not from queryable pipeline_events. Closing this gap turns "silent drop" diagnosis from log-grep-against-stale-buffer into a SQL query. Add `STAGED` (or equivalent) event emission in handlers/messageHandler.js wherever bets reach `createBetWithLegs` successfully.
 
 ### Grading audit table
 Full decision trail per grading attempt. Admin command to dump trail for any bet ID.
@@ -714,4 +700,5 @@ Fingerprint-composition idempotency migration cannot ship until this is fixed �
 
 ## Resolution Log
 
+- **2026-05-07 — DatDude #datdude-slips Hard Rock bet slips not staging to war-room: RESOLVED.** Original symptom was Hard Rock Bet shares from #datdude-slips never reaching war-room. Long debug entry hypothesized buffer collision or channel-specific drop. Root cause turned out to be the validator entity-mismatch bug, surfaced by the slip-share exemption fix (commit `3aadc63`). After deploy, Smokke staged a test slip in #datdude-slips end-to-end at 20:24 UTC — pipeline trace showed `RECEIVED → AUTHORIZED → BUFFERED → EXTRACTED → AI_RESPONSE_RAW → STAGED`. The "silent drops" symptom was validator kills on legitimate slip-share bets, not channel-routing.
 - **2026-05-07 — groq-llama8b dominance: STALE CLAIM.** 7-day grading_audit histogram: cerebras 80.8% (1484 calls), ESPN 10.4%, mlb.statsapi 4.5%, mistral 4.0%, groq-llama8b 1 call. Waterfall functions as designed. The original "Known open issues" entry described prior config. Real concern shifted: per-bet PENDING analysis (Layer 2 of missed-slips investigation).
