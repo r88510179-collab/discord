@@ -711,3 +711,7 @@ Fingerprint-composition idempotency migration cannot ship until this is fixed â€
 - Root cause unknown. Possibilities: Docker daemon path resolution, BuildKit context cache, fly CLI directory walk treating .claude/worktrees specially, or .gitignore/.dockerignore interaction with worktree HEAD.
 - Investigation TODO: minimal repro from clean worktree; test if explicit --dockerfile or --image-label changes behavior.
 - Cost so far: ~2 deploys + ~30 min debugging this session.
+
+## Resolution Log
+
+- **2026-05-07 â€” groq-llama8b dominance: STALE CLAIM.** 7-day grading_audit histogram: cerebras 80.8% (1484 calls), ESPN 10.4%, mlb.statsapi 4.5%, mistral 4.0%, groq-llama8b 1 call. Waterfall functions as designed. The original "Known open issues" entry described prior config. Real concern shifted: per-bet PENDING analysis (Layer 2 of missed-slips investigation).
