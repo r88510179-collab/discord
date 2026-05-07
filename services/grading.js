@@ -1420,21 +1420,21 @@ async function searchWeb(query) {
   const clean = sanitizeQuery(query);
   console.log(`[Search] Query: "${clean.slice(0, 80)}"`);
 
-  // Brave first — most reliable, has free tier
-  let results = await searchBrave(clean);
+  // Bing first — free scrape, no quota (Brave 2K/mo burned in 6 days)
+  let results = await searchBing(clean);
   if (results.length > 0) return results;
 
-  // DDG second — free but often times out
+  // Brave second — quota-limited, save for when Bing returns empty
+  await delay(1000);
+  results = await searchBrave(clean);
+  if (results.length > 0) return results;
+
+  // DDG third — free, but Fly IPs blacklisted (circuit usually open)
   await delay(1000);
   results = await searchDDG(clean);
   if (results.length > 0) return results;
 
-  // Bing third — free scrape
-  await delay(1000);
-  results = await searchBing(clean);
-  if (results.length > 0) return results;
-
-  // Serper last resort (exhausted free tier)
+  // Serper last resort (paid, free tier exhausted)
   results = await searchSerper(clean);
   return results;
 }
@@ -2157,7 +2157,7 @@ module.exports = {
   SUPPORTED_SPORTS,
   isSupportedSport,
   // Exported for unit tests only — do not rely on these from bot code:
-  _internal: { looksLikePlayerProp, parsePlayerPropDescription },
+  _internal: { looksLikePlayerProp, parsePlayerPropDescription, searchWeb },
   // Exported for tests + observability — these are called from
   // gradePropWithAI internally; importers MUST NOT mutate.
   evaluatePlayerPropEvidence,
