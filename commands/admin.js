@@ -75,7 +75,16 @@ module.exports = {
         .setDescription('Aggregated DROP counts by reason from the last 24h'))
     .addSubcommand(sub =>
       sub.setName('resolver-health')
-        .setDescription('Check MLB StatsAPI resolver health + circuit-breaker state')),
+        .setDescription('Check MLB StatsAPI resolver health + circuit-breaker state'))
+    .addSubcommand(sub =>
+      sub.setName('search-backends')
+        .setDescription('Search backend call distribution + success rates from search_backend_calls')
+        .addIntegerOption(opt =>
+          opt.setName('hours')
+            .setDescription('Lookback window in hours (default 24, max 168)')
+            .setRequired(false)
+            .setMinValue(1)
+            .setMaxValue(168))),
 
   async execute(interaction) {
     const sub = interaction.options.getSubcommand();
@@ -878,6 +887,74 @@ module.exports = {
       ].join('\n');
 
       return interaction.editReply(body.slice(0, 1990));
+    }
+
+    // ── Search backends: per-call distribution + success rates ──
+    if (sub === 'search-backends') {
+      if (process.env.OWNER_ID && interaction.user.id !== process.env.OWNER_ID) return interaction.reply({ content: '🚫', ephemeral: true });
+      await interaction.deferReply({ ephemeral: true });
+
+      const { db } = require('../services/database');
+      const hours = Math.max(1, Math.min(168, interaction.options.getInteger('hours') ?? 24));
+      const cutoff = Date.now() - (hours * 3600 * 1000);
+
+      let perBackend = [];
+      let perFailure = [];
+      try {
+        perBackend = db.prepare(`
+          SELECT backend,
+                 COUNT(*) as total,
+                 SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END) as ok_count,
+                 AVG(CASE WHEN status = 'ok' THEN latency_ms END) as ok_latency
+          FROM search_backend_calls
+          WHERE ts > ?
+          GROUP BY backend
+        `).all(cutoff);
+
+        perFailure = db.prepare(`
+          SELECT backend, status, COUNT(*) as n
+          FROM search_backend_calls
+          WHERE ts > ? AND status != 'ok'
+          GROUP BY backend, status
+          ORDER BY backend, n DESC
+        `).all(cutoff);
+      } catch (err) {
+        return interaction.editReply(`❌ Error querying search_backend_calls: \`${err.message}\``);
+      }
+
+      const allBackends = ['bing', 'brave', 'ddg', 'serper'];
+      const topFailByBackend = {};
+      for (const r of perFailure) {
+        if (!topFailByBackend[r.backend]) topFailByBackend[r.backend] = r;
+      }
+
+      const fmtNum = n => Number(n || 0).toLocaleString('en-US');
+      const tblLines = ['Backend │   Calls │  OK%  │ Top Failure'];
+      for (const name of allBackends) {
+        const row = perBackend.find(r => r.backend === name);
+        const total = row?.total || 0;
+        const ok = row?.ok_count || 0;
+        const okPct = total > 0 ? `${Math.round((ok / total) * 100)}%` : '—';
+        const top = topFailByBackend[name];
+        const topStr = top ? `${top.status} (${fmtNum(top.n)})` : (total > 0 ? '—' : 'no calls');
+        tblLines.push(`${name.padEnd(7)} │ ${fmtNum(total).padStart(7)} │ ${okPct.padStart(4)}  │ ${topStr}`);
+      }
+
+      const latencyParts = allBackends.map(name => {
+        const row = perBackend.find(r => r.backend === name);
+        const lat = (row && row.ok_latency != null) ? `${Math.round(row.ok_latency)}ms` : '—ms';
+        return `${name} ${lat}`;
+      });
+
+      const body = [
+        `Search Backend Distribution (last ${hours}h)`,
+        '─────────────────────────────────────────────',
+        ...tblLines,
+        '─────────────────────────────────────────────',
+        `Avg latency (ok only): ${latencyParts.join(' | ')}`,
+      ].join('\n');
+
+      return interaction.editReply('```\n' + body.slice(0, 1900) + '\n```');
     }
   },
 };

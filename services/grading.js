@@ -1255,6 +1255,26 @@ function recordBackendResult(name, ok, errorCode = null) {
   }
 }
 
+// Persistent per-call tracking for /admin search-backends.
+// Distinct from recordBackendResult (in-memory health) — this writes one
+// row per attempt to search_backend_calls so we can answer "what % of
+// calls succeed on Brave right now" instead of just "is it open?".
+function bucketHttpStatus(httpStatus) {
+  if (httpStatus === 402) return 'http_402';
+  if (httpStatus >= 500) return 'http_5xx';
+  return 'http_4xx';
+}
+
+function recordBackendCall({ backend, status, httpCode, betId, latencyMs, hits }) {
+  try {
+    db.prepare(`INSERT INTO search_backend_calls (ts, backend, status, http_code, bet_id, latency_ms, hits)
+                VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(Date.now(), backend, status, httpCode ?? null, betId ?? null, latencyMs ?? null, hits ?? null);
+  } catch (e) {
+    console.error('[recordBackendCall] failed:', e.message);
+  }
+}
+
 // DDG Lite with retry
 async function searchDDG(query) {
   // Circuit breaker via backendHealth. Cooldown is driven by BACKEND_CONFIG.ddg
@@ -1263,6 +1283,7 @@ async function searchDDG(query) {
   if (!isBackendHealthy('ddg')) {
     const remaining = Math.round((backendHealth.ddg.openUntil - Date.now()) / 60000);
     console.log(`[DDG] Circuit breaker OPEN — skipping (${remaining}m remaining, last error: ${backendHealth.ddg.lastError || 'unknown'})`);
+    recordBackendCall({ backend: 'ddg', status: 'circuit_open' });
     return [];
   }
 
@@ -1280,6 +1301,7 @@ async function searchDDG(query) {
       if (!res.ok) {
         console.log(`[Search] Backend=DDG | Result=HTTP_${res.status} | Duration=${duration}ms`);
         recordBackendResult('ddg', false, `HTTP_${res.status}`);
+        recordBackendCall({ backend: 'ddg', status: bucketHttpStatus(res.status), httpCode: res.status, latencyMs: duration });
         return [];
       }
 
@@ -1304,10 +1326,12 @@ async function searchDDG(query) {
 
       console.log(`[Search] Backend=DDG | Result=SUCCESS | Duration=${duration}ms | Hits=${results.length}`);
       recordBackendResult('ddg', true);
+      recordBackendCall({ backend: 'ddg', status: 'ok', latencyMs: duration, hits: results.length });
       return results;
     } catch (err) {
       const duration = Date.now() - start;
       console.log(`[Search] Backend=DDG | Result=TIMEOUT | Duration=${duration}ms | Attempt=${attempt}/2`);
+      recordBackendCall({ backend: 'ddg', status: 'timeout', latencyMs: duration });
       if (attempt < 2) await delay(3000); // Retry after 3s
     }
   }
@@ -1331,6 +1355,7 @@ async function searchBing(query) {
     if (!res.ok) {
       console.log(`[Search] Backend=Bing | Result=HTTP_${res.status} | Duration=${duration}ms`);
       recordBackendResult('bing', false, `HTTP_${res.status}`);
+      recordBackendCall({ backend: 'bing', status: bucketHttpStatus(res.status), httpCode: res.status, latencyMs: duration });
       return [];
     }
 
@@ -1346,10 +1371,13 @@ async function searchBing(query) {
     }
     console.log(`[Search] Backend=Bing | Result=SUCCESS | Duration=${duration}ms | Hits=${results.length}`);
     recordBackendResult('bing', true);
+    recordBackendCall({ backend: 'bing', status: 'ok', latencyMs: duration, hits: results.length });
     return results;
   } catch (err) {
-    console.log(`[Search] Backend=Bing | Result=TIMEOUT | Duration=${Date.now() - start}ms`);
+    const duration = Date.now() - start;
+    console.log(`[Search] Backend=Bing | Result=TIMEOUT | Duration=${duration}ms`);
     recordBackendResult('bing', false, 'TIMEOUT');
+    recordBackendCall({ backend: 'bing', status: 'timeout', latencyMs: duration });
     return [];
   }
 }
@@ -1362,6 +1390,7 @@ async function searchBrave(query) {
   if (!isBackendHealthy('brave')) {
     const remaining = Math.round((backendHealth.brave.openUntil - Date.now()) / 60000);
     console.log(`[Brave] Circuit breaker OPEN — skipping (${remaining}m remaining, last error: ${backendHealth.brave.lastError || 'unknown'})`);
+    recordBackendCall({ backend: 'brave', status: 'circuit_open' });
     return [];
   }
   const start = Date.now();
@@ -1374,16 +1403,20 @@ async function searchBrave(query) {
     if (!res.ok) {
       console.log(`[Search] Backend=Brave | Result=HTTP_${res.status} | Duration=${duration}ms`);
       recordBackendResult('brave', false, `HTTP_${res.status}`);
+      recordBackendCall({ backend: 'brave', status: bucketHttpStatus(res.status), httpCode: res.status, latencyMs: duration });
       return [];
     }
     const data = await res.json();
     const results = (data.web?.results || []).slice(0, 5).map(r => ({ title: r.title || '', snippet: r.description || '' }));
     console.log(`[Search] Backend=Brave | Result=SUCCESS | Duration=${duration}ms | Hits=${results.length}`);
     recordBackendResult('brave', true);
+    recordBackendCall({ backend: 'brave', status: 'ok', latencyMs: duration, hits: results.length });
     return results;
   } catch (err) {
-    console.log(`[Search] Backend=Brave | Result=ERROR | Duration=${Date.now() - start}ms | ${err.message}`);
+    const duration = Date.now() - start;
+    console.log(`[Search] Backend=Brave | Result=ERROR | Duration=${duration}ms | ${err.message}`);
     recordBackendResult('brave', false, 'ERROR');
+    recordBackendCall({ backend: 'brave', status: 'error', latencyMs: duration });
     return [];
   }
 }
@@ -1393,14 +1426,17 @@ async function searchBrave(query) {
 // only as last resort and a broken Serper is still cheap to attempt.
 async function searchSerper(query) {
   if (!process.env.SERPER_API_KEY) return [];
+  const start = Date.now();
   try {
     const res = await fetch('https://google.serper.dev/search', {
       method: 'POST',
       headers: { 'X-API-KEY': process.env.SERPER_API_KEY, 'Content-Type': 'application/json' },
       body: JSON.stringify({ q: query, num: 5 }),
     });
+    const duration = Date.now() - start;
     if (!res.ok) {
       recordBackendResult('serper', false, `HTTP_${res.status}`);
+      recordBackendCall({ backend: 'serper', status: bucketHttpStatus(res.status), httpCode: res.status, latencyMs: duration });
       return [];
     }
     const data = await res.json();
@@ -1408,9 +1444,11 @@ async function searchSerper(query) {
     if (data.answerBox?.answer) results.push({ title: 'Answer', snippet: data.answerBox.answer });
     for (const r of (data.organic || []).slice(0, 5)) results.push({ title: r.title || '', snippet: r.snippet || '' });
     recordBackendResult('serper', true);
+    recordBackendCall({ backend: 'serper', status: 'ok', latencyMs: duration, hits: results.length });
     return results;
   } catch (err) {
     recordBackendResult('serper', false, 'ERROR');
+    recordBackendCall({ backend: 'serper', status: 'error', latencyMs: Date.now() - start });
     return [];
   }
 }
