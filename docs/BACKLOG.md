@@ -267,8 +267,8 @@ Parse @capperledger recap tweets to grade pending bets without AI calls. Add `gr
 ### City-name ambiguity in reclassifier
 The SPORT_TEAM_KEYWORDS list only contains team nicknames (Thunder, Lakers, Capitals), not city names (Oklahoma City, Los Angeles, Washington). When a bet uses the city name alone ("Oklahoma City to win"), the reclassifier fails to match it against the correct sport. This is especially problematic for cities with multiple teams across sports (LA has 8+ pro teams). Fix: add city aliases to each sport's keyword list, OR implement a disambiguation step that checks all sports and flags truly ambiguous cities as "requires-context" rather than forcing a reclassification.
 
-### Capper ROI display bug
-`/admin snapshot` shows Top 3 cappers all at "+500%" ROI (rbssportsplays, dangambleai, Dan). Suspiciously uniform cap or calculation error. Investigate ROI formula in snapshot handler and `/health quick` — likely capping at 500% or dividing by wrong denominator. Should show actual ROI per capper.
+### ~~Capper ROI display bug~~ — RESOLVED 2026-04-13 (faa88208)
+Cap removed by commit faa88208 ("remove ROI cap, harden bouncer"). The "+500%" pattern observed in the 2026-04-13 09:34 slip-receipts export was the cap behavior; export was taken ~4h before the fix landed at 13:36 EDT. `getCapperStats` and `getLeaderboard` now return real values; `services/database.js:515` retains a >500% log warning for monitoring but does not clamp the displayed value. Confirmed via git blame 2026-05-08.
 
 ### MLB backfill script using resolver
 Batch script that reads bets with `grading_state='backoff'` and MLB player prop descriptions, resets `grading_state='ready'` on those that the resolver would now handle, lets the normal grader pick them up. Dry-run mode mandatory. Use `resolver_events` and the new `GRADE_*` drop counts as success metric.
@@ -368,8 +368,8 @@ Currently only accepts ingest_id (e.g. `disc_<message_id>`, `twit_<tweet_id>`). 
 ### Gemini Vision quota structurally inadequate on Free tier (P0 — decision required)
 aistudio.google.com Free tier limits gemini-2.5-flash-lite to 20 RPD per project. Bot's Vision call volume regularly exceeds this within hours of midnight Pacific reset. Currently failing over to Groq Llama 4 Scout vision (waterfall handles 429 correctly). Two options: (1) link billing to project containing GEMINI_API_KEY → 1,000 RPD limit, ~$5-15/mo at current volume; (2) accept Groq as primary, Gemini as fallback. Spot-check Vision extraction quality over next 7 days to inform decision. No action blocking the bot today.
 
-### pipeline_events instrumentation gap post-BUFFERED (P2)
-For Discord-source bets, pipeline_events records RECEIVED, AUTHORIZED, BUFFERED, EXTRACTED, AI_RESPONSE_RAW, but no STAGED event for successful staging. This means we can only observe the staging path from time-bounded `fly logs`, not from queryable pipeline_events. Closing this gap turns "silent drop" diagnosis from log-grep-against-stale-buffer into a SQL query. Add `STAGED` (or equivalent) event emission in handlers/messageHandler.js wherever bets reach `createBetWithLegs` successfully.
+### ~~pipeline_events instrumentation gap post-BUFFERED~~ — RESOLVED (predates 2026-04-30)
+STAGED emission already shipped: `recordStage` calls in `handlers/messageHandler.js:539` (Twitter path) and `:1147` (Discord path) both emit `stage: 'STAGED', eventType: 'STAGE_EXIT'` immediately after `createBetWithLegs` returns. Production verification 2026-05-08: 690 STAGED events recorded in `pipeline_events`. The wonderful-dirac branch entry that prompted this BACKLOG item was already obsolete when written.
 
 ### Grading audit table
 Full decision trail per grading attempt. Admin command to dump trail for any bet ID.
