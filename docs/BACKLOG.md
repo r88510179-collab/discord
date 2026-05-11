@@ -273,8 +273,11 @@ Cap removed by commit faa88208 ("remove ROI cap, harden bouncer"). The "+500%" p
 ### MLB backfill script using resolver
 Batch script that reads bets with `grading_state='backoff'` and MLB player prop descriptions, resets `grading_state='ready'` on those that the resolver would now handle, lets the normal grader pick them up. Dry-run mode mandatory. Use `resolver_events` and the new `GRADE_*` drop counts as success metric.
 
-### Brave Search returning HTTP 402 — free tier exhausted or API key issue
-Grader logs show 100% HTTP 402 responses from Brave backend. DDG circuit breaker is open. Only Bing fallback is returning results. Need to: (1) verify BRAVE_API_KEY is still valid, (2) check Brave dashboard for usage/billing status, (3) ~~circuit-breaker Brave on 402~~ — done in services/grading.js:1213 (quotaCooldownMs = 1h), (4) ~~add 402 detection to Brave health check so /admin snapshot reflects real state~~ — partially open: snapshot now reflects per-backend state via fmtBackend (v344), but explicit 402-aware messaging not yet wired; (5) chain reorder Bing-first done 2026-05-07 (commit aa7b030) — protects quota even when 402s do hit.
+### ~~Brave Search returning HTTP 402~~ — RESOLVED 2026-05-11 (2faaabd)
+Brave free tier was burned in 6 days. Resolved through three landed changes: (1) circuit breaker on 402 (services/grading.js:1213, quotaCooldownMs=1h); (2) waterfall reorder to Bing → Brave → DDG → Serper (commit aa7b030, comment fix 2faaabd); (3) /admin search-backends counter (search_backend_calls table, shipped 5/8). Last 24h: Bing 173/173 calls, 100% OK. Brave/DDG/Serper at 0 calls because Bing never returned empty. Remaining open thread: explicit 402-aware messaging in fmtBackend (cosmetic, deferred). See "Brave quota probe" below for optional follow-up.
+
+### Brave quota probe (optional, deferred)
+Brave only gets called when Bing returns zero results, which over 173 calls happened zero times. Result: we never observe Brave quota resets. Add daily cron firing one fixed query at searchBrave() directly, logs to search_backend_calls. ~15 LOC. Low priority — Brave is a fallback, not load-bearing.
 
 ### Snapshot Brave health check — RESOLVED v344 (b9ca1f6)
 Fixed in `fmtBackend`: per-backend state, last success, last failure with reason now shown. `lastError` preserved across successes on `recordBackendResult`. Original diagnosis (tracker doesn't count HTTP errors) was wrong — tracker did count them, formatter ignored them.
@@ -507,91 +510,6 @@ Replace external AI dependencies with Surface Pro Ollama:
 ### Known drifts
 - Grader can still hallucinate WINs on promo/commentary text (e.g. "🏀 Mathurin is the man!")
 - Workaround: ship unscoped-bet auto-void (Task 2 in Apr 16 session)
-
-## April 16 session learnings
-
-### Gemini + Brave quota dependencies are single points of failure
-Both APIs on free tier, both exhausted. When either dies the pipeline degrades sharply. Options:
-- Pay for Gemini (Paid tier ~$19/mo for useful scale) and/or Brave ($5/mo Pro)
-- Build local AI fallbacks on Surface Pro (Gemma for Vision, llama3.2 or larger for grading — see Option 3 below)
-- Accept degraded capacity on free tier and tune state machine to handle it
-
-### Option 3: Full local AI fallback chain (weekend project)
-Replace external AI dependencies with Surface Pro Ollama:
-
-1. **Gemma 3:4b for Vision intake** (already proven Apr 15)
-   - Trigger: Gemini returns 429/quota error OR placeholder text
-   - Route: Tailscale Funnel + OLLAMA_PROXY_SECRET
-   - Output: two-stage (Gemma extract → Cerebras parse)
-   - Fixtures: 8 saved slip images in test-fixtures/vision/
-
-2. **Larger local model for grading** (e.g. llama3.1:8b or qwen2.5:7b)
-   - Current grading waterfall: groq-llama8b → groq-kimi → ollama-llama3.2-3b
-   - Issue: 3b is too small for grading quality
-   - Upgrade: 7-8b on Surface Pro for grader fallback tier
-   - Requires: verify Surface Pro RAM can handle concurrent Gemma 4b + llama 8b (5+8=13GB, Surface has ~16GB)
-
-3. **State machine tuning**
-   - Currently treats all PENDING as retryable failures
-   - Need: if AI verdict is PENDING due to "no data found", don't retry endlessly
-   - Better: ship auto-void-after-N-PENDINGs guard (previously drafted)
-
-### ESPN integration observations (v282 today)
-- Works perfectly for ML/spread/total on MLB/NBA/NHL for completed games
-- Date fallback (UTC date + previous ET day) handles late-night bets correctly
-- Covers ~30-40% of bet volume
-- Doesn't help with: player props, parlays with props, tennis, golf, SGPs
-- Remaining 60-70% still depends on AI + search
-
-### Today's emergency actions
-- Auto-voided 9 bets with >5 attempts + >48h age (some later identified as having real slips that Vision failed to extract — see Gemma fixtures)
-- Force-readied 100+ bets across 2 cycles to recover from backoff lock
-- Deployed v280 → v281 (stale worktree, broken) → v282 (fixed)
-- Bot stabilized at ~7 grades/hour via ESPN only
-
-### Known drifts
-- Grader can still hallucinate WINs on promo/commentary text (e.g. "🏀 Mathurin is the man!")
-- Workaround: ship unscoped-bet auto-void (Task 2 in Apr 16 session)
-
-## April 16 session learnings
-
-### Gemini + Brave quota dependencies are single points of failure
-Both APIs on free tier, both exhausted. When either dies the pipeline degrades sharply. Options:
-- Pay for Gemini (Paid tier ~$19/mo for useful scale) and/or Brave ($5/mo Pro)
-- Build local AI fallbacks on Surface Pro (Gemma for Vision, llama3.2 or larger for grading - see Option 3 below)
-- Accept degraded capacity on free tier and tune state machine to handle it
-
-### Option 3: Full local AI fallback chain (weekend project)
-Replace external AI dependencies with Surface Pro Ollama:
-
-1. Gemma 3:4b for Vision intake (already proven Apr 15) - trigger on Gemini 429/quota or placeholder text, route via Tailscale Funnel + OLLAMA_PROXY_SECRET, output two-stage (Gemma extract then Cerebras parse). Fixtures: 8 saved slip images in test-fixtures/vision/.
-
-2. Larger local model for grading (e.g. llama3.1:8b or qwen2.5:7b) - current grading waterfall is groq-llama8b to groq-kimi to ollama-llama3.2-3b. Issue: 3b too small for grading quality. Upgrade: 7-8b on Surface Pro. Requires verifying Surface Pro RAM can handle concurrent Gemma 4b + llama 8b (5+8=13GB, Surface has ~16GB).
-
-3. State machine tuning - currently treats all PENDING as retryable failures. Need: if AI verdict is PENDING due to "no data found", don't retry endlessly. Better: ship auto-void-after-N-PENDINGs guard.
-
-### ESPN integration observations (v282 today)
-- Works for ML/spread/total on MLB/NBA/NHL completed games
-- Date fallback (UTC date + previous ET day) handles late-night bets correctly
-- Covers ~30-40% of bet volume
-- Doesn't help with: player props, parlays with props, tennis, golf, SGPs
-- Remaining 60-70% still depends on AI + search
-
-### Unscoped-bet auto-void guard (v283)
-- Added SUPPORTED_SPORTS whitelist + isSupportedSport() helper
-- Fires before AI and ESPN, voids bets with sport=Unknown/N/A/null/unsupported
-- 35 pending bets flagged on first run (promo captions, whatnot spam, injury tweets)
-- Prevents AI hallucinations like "MLB Wednesday picks -> WIN"
-
-### Today's emergency actions
-- Auto-voided 9 bets with >5 attempts + >48h age (some had real slips Vision failed to extract - see Gemma fixtures)
-- Force-readied 100+ bets across 2 cycles to recover from backoff lock
-- Deployed v280 (ESPN), v281 (broken from stale worktree), v282 (date fallback), v283 (unscoped-bet guard)
-- Bot stabilized at ~7 grades/hour via ESPN only
-
-### Known drifts
-- Bouncer still lets promo/junk through (whatnot.com, BOOKIT BREAKS, etc.) - v283 catches at grader, but real fix is bouncer
-- Some bets have malformed sport values like "NCAAB/College Baseball" - parser issue upstream
 
 ## Pipeline Observability
 
