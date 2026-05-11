@@ -1275,6 +1275,20 @@ function recordBackendCall({ backend, status, httpCode, betId, latencyMs, hits }
   }
 }
 
+// Daily probe — fires searchBrave() with a fixed cheap query so the existing
+// recordBackendCall() instrumentation logs a Brave row even when Bing is
+// satisfying 100% of real traffic. Lets us detect Brave's monthly quota
+// reset without waiting for a Bing failure.
+async function probeBrave() {
+  const start = Date.now();
+  try {
+    await searchBrave('Lakers score');
+  } catch (e) {
+    console.error('[probeBrave] error:', e.message);
+  }
+  return Date.now() - start;
+}
+
 // DDG Lite with retry
 async function searchDDG(query) {
   // Circuit breaker via backendHealth. Cooldown is driven by BACKEND_CONFIG.ddg
@@ -2192,6 +2206,8 @@ module.exports = {
   backendHealth,
   isBackendHealthy,
   recordBackendResult,
+  searchBrave,
+  probeBrave,
   SUPPORTED_SPORTS,
   isSupportedSport,
   // Exported for unit tests only — do not rely on these from bot code:

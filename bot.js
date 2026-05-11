@@ -26,7 +26,7 @@ app.listen(port, '0.0.0.0', () => console.log(`[SYSTEM] Health check server list
 const { handleMessage } = require('./handlers/messageHandler');
 const { handleWarRoomInteraction } = require('./services/warRoom');
 const { handleGradeInteraction } = require('./handlers/gradeButtons');
-const { runAutoGrade } = require('./services/grading');
+const { runAutoGrade, probeBrave } = require('./services/grading');
 // Twitter poller loaded dynamically in ClientReady handler
 const { postGradeSummary, postDailyLeaderboard, updateScoreboard } = require('./services/dashboard');
 const { postReport, checkCriticalAlerts, logCronRun } = require('./services/healthReport');
@@ -551,6 +551,28 @@ client.once(Events.ClientReady, async (c) => {
       console.error(err.stack?.split('\n').slice(0, 3).join('\n'));
     }
   });
+
+  // ── Brave search backend daily probe ──────────────────────
+  // Fires searchBrave() once daily so search_backend_calls has a Brave row
+  // even when Bing satisfies 100% of real traffic. Reveals quota resets.
+  cron.schedule('0 12 * * *', async () => {
+    try {
+      const duration = await probeBrave();
+      logCronRun('brave-probe', duration);
+      console.log(`[Brave Probe] Completed in ${duration}ms`);
+    } catch (err) {
+      console.error('[Brave Probe] CRASHED:', err.message);
+    }
+  });
+  console.log('🔍 Brave probe scheduled (daily at 12:00 UTC)');
+
+  // Fire one probe ~60s after boot so first row lands fast
+  setTimeout(() => {
+    probeBrave().then(d => {
+      logCronRun('brave-probe', d);
+      console.log(`[Brave Probe] Boot-time probe completed in ${d}ms`);
+    }).catch(e => console.error('[Brave Probe Init]', e.message));
+  }, 60000);
 
   // ── Twitter/X Poller (every 2h, twitterapi.io, credit-conserving) ──
   if (process.env.TWITTERAPI_KEY || process.env.APITWITTER_KEY) {
