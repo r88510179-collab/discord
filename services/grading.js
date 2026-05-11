@@ -1453,7 +1453,7 @@ async function searchSerper(query) {
   }
 }
 
-// Master search: Brave (reliable API) → DDG (free, may timeout) → Bing → Serper
+// Master search: Bing (free scrape, primary) → Brave (quota fallback) → DDG (Fly IPs blocked) → Serper (paid, exhausted)
 async function searchWeb(query) {
   const clean = sanitizeQuery(query);
   console.log(`[Search] Query: "${clean.slice(0, 80)}"`);
