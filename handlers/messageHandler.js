@@ -1092,10 +1092,36 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
         return;
       }
 
-      // Not a bet — silently ignore
+      // AI explicitly said not-a-bet → existing PRE_FILTER_NO_BET_CONTENT bucket.
       if (parsed.is_bet === false) {
         console.log(`[Filter] AI rejected as non-bet: ${cleanText.substring(0, 60)}...`);
         dropAll('DROPPED', 'PRE_FILTER_NO_BET_CONTENT', { filter: 'ai_is_bet_false', sample: cleanText.slice(0, 80) });
+        return;
+      }
+
+      // AI didn't commit to is_bet=true AND returned no usable bets.
+      // Closes the silent-exit hole at this branch: when parseBetText's Type 1 path
+      // returns { type:'bet', bets:[] } with undefined is_bet (because normalizeBet
+      // filtered every bet out), the strict-equality check above misses, the
+      // `bets.length > 0` check below also misses, and the function previously
+      // exited with PARSED as the last pipeline event.
+      //
+      // CRITICAL: this guard checks BOTH conditions. A populated-bets return
+      // (is_bet=undefined, bets=[{...}]) must NOT be dropped here — it falls
+      // through to the bets.length > 0 block below. The combined condition
+      // is structurally incapable of dropping populated-bet returns.
+      //
+      // See ERRATA-3 in skills/zonetracker-regrade/retrospectives/2026-04-datdude-silent-drop.md
+      // for why the single-condition variant (is_bet !== true alone) was reverted as v335.
+      if (parsed.is_bet !== true && (!parsed.bets || parsed.bets.length === 0)) {
+        console.log(`[Filter] AI returned indeterminate result (is_bet=${parsed.is_bet}, bets=${parsed.bets?.length || 0}): ${cleanText.substring(0, 60)}...`);
+        dropAll('DROPPED', 'PRE_FILTER_AI_EMPTY_RESULT', {
+          filter: 'ai_indeterminate_no_bets',
+          is_bet_value: parsed.is_bet === undefined ? 'undefined' : String(parsed.is_bet),
+          parsedType: parsed.type || null,
+          betCount: parsed.bets?.length || 0,
+          sample: cleanText.slice(0, 80),
+        });
         return;
       }
 
