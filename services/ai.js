@@ -987,9 +987,42 @@ Output strictly valid JSON. Do not include markdown formatting, do not include \
     }
   }
 
-  if (!raw) return { bets: [], error: 'AI unavailable' };
+  if (!raw) {
+    if (options.ingestId) {
+      recordDrop({
+        ingestId: options.ingestId,
+        sourceType: options.sourceType || 'discord',
+        sourceRef: options.sourceRef || null,
+        stage: 'DROPPED',
+        dropReason: 'TEXT_EXTRACTION_FAILED',
+        payload: {
+          where: 'parseBetText',
+          reason: 'AI unavailable',
+          errorClass: primaryErrorClass || 'unknown',
+          hasImage: !!imageBase64,
+        },
+      });
+    }
+    return { bets: [], error: 'AI unavailable' };
+  }
   const parsed = parseJSON(raw);
-  if (!parsed) return { bets: [], error: 'Parse failed' };
+  if (!parsed) {
+    if (options.ingestId) {
+      recordDrop({
+        ingestId: options.ingestId,
+        sourceType: options.sourceType || 'discord',
+        sourceRef: options.sourceRef || null,
+        stage: 'DROPPED',
+        dropReason: 'TEXT_EXTRACTION_FAILED',
+        payload: {
+          where: 'parseBetText',
+          reason: 'Parse failed',
+          hasImage: !!imageBase64,
+        },
+      });
+    }
+    return { bets: [], error: 'Parse failed' };
+  }
 
   // Type 2: Result/grading event
   if (parsed.type === 'result' && parsed.outcome) {
