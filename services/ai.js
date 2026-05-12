@@ -238,8 +238,9 @@ async function callAdapterWithRetry(fn, label, retries = 2) {
  *
  * Never throws.
  */
-async function callLLMResult(prompt, system, imageBase64, mediaType) {
+async function callLLMResult(prompt, system, imageBase64, mediaType, opts = {}) {
   const hasImage = !!imageBase64;
+  const requireImage = !!opts.requireImage;
 
   // Get ALL providers (not just image-capable ones) so we can fall back to text-only
   const allProviders = getProviders(false);
@@ -293,7 +294,12 @@ async function callLLMResult(prompt, system, imageBase64, mediaType) {
   // ── Last resort: if we had an image but ALL vision providers failed,
   // retry text-only providers with just the prompt (drop the image).
   // This lets Cerebras handle OCR text when Gemini/Groq/OpenRouter are all down.
-  if (hasImage) {
+  // Skipped when opts.requireImage is set — image-only callers (parseBetSlipImage)
+  // can't use text-only output, which would return valid-looking empty-bets JSON
+  // and mask the failure.
+  if (hasImage && requireImage) {
+    console.warn('[AI] requireImage=true; skipping text-only fallback after image providers failed');
+  } else if (hasImage) {
     console.warn('[AI] All vision providers failed — retrying text-only (dropping image)...');
     for (const provider of sorted) {
       if (provider.supportsImages) continue; // already tried these with image
@@ -847,6 +853,35 @@ async function runGemmaVisionFallback({ imageBase64, mediaType, geminiResponse, 
   return parsed.json;
 }
 
+/**
+ * Decide whether to invoke the Gemma vision fallback after a primary
+ * (multi-provider) LLM call. Byte-equivalent to parseBetText's prior
+ * inline gate; lifted out so parseBetSlipImage can share it.
+ *
+ *   - raw: response string from callLLMResult (may be null/undefined)
+ *   - primaryErrorClass: errorClass from the first failed provider
+ *     (null when raw is non-null)
+ *   - parsedLegs: flat array of legs extracted from raw, OR undefined
+ *     when the caller didn't compute it (e.g. response wasn't a bet
+ *     shape) — undefined disables the no-legs signal, matching
+ *     parseBetText's prior behavior on type:"ignore"/"result".
+ *
+ * Returns boolean.
+ */
+function shouldFallbackToGemma(raw, primaryErrorClass, parsedLegs) {
+  const rawText = typeof raw === 'string' ? raw : '';
+  const hasPlaceholder = !!raw && (
+    FORBIDDEN_PLACEHOLDERS.some(p => rawText.toLowerCase().includes(p))
+    || /missing legs|capper hid|cannot read|cannot parse|unable to/i.test(rawText)
+  );
+  const noLegsFound = !!raw
+    && !hasPlaceholder
+    && parsedLegs !== undefined
+    && (!Array.isArray(parsedLegs) || parsedLegs.length === 0);
+  const adapterFallbackEligible = !raw && !!primaryErrorClass && FALLBACK_ELIGIBLE.has(primaryErrorClass);
+  return Boolean(adapterFallbackEligible || hasPlaceholder || noLegsFound);
+}
+
 async function parseBetText(text, imageUrl, options = {}) {
   // If no image, try regex fast-path first
   if (!imageUrl) {
@@ -951,19 +986,26 @@ Output strictly valid JSON. Do not include markdown formatting, do not include \
       FORBIDDEN_PLACEHOLDERS.some(p => rawText.toLowerCase().includes(p))
       || /missing legs|capper hid|cannot read|cannot parse|unable to/i.test(rawText)
     );
-    let noLegsFound = false;
+    // Pre-parse legs only when the response is a bet shape; leave
+    // undefined for type:"ignore"/"result" so the no-legs signal is
+    // suppressed (matches prior behavior — those types intentionally
+    // returned empty bets and must NOT trigger Gemma).
+    let parsedLegs = undefined;
     if (raw && !hasPlaceholder) {
       try {
         const quick = parseJSON(raw);
         if (quick && (quick.type === 'bet' || quick.is_bet === true)) {
           const bets = Array.isArray(quick.bets) ? quick.bets : [];
-          noLegsFound = bets.length === 0 || !bets.some(b => Array.isArray(b.legs) && b.legs.length > 0);
+          parsedLegs = [];
+          for (const b of bets) {
+            if (Array.isArray(b.legs)) parsedLegs.push(...b.legs);
+          }
         }
       } catch (_) {}
     }
     const adapterFallbackEligible = !raw && primaryErrorClass && FALLBACK_ELIGIBLE.has(primaryErrorClass);
     const adapterNoFallback = !raw && primaryErrorClass && !FALLBACK_ELIGIBLE.has(primaryErrorClass);
-    const shouldFallback = adapterFallbackEligible || hasPlaceholder || noLegsFound;
+    const shouldFallback = shouldFallbackToGemma(raw, primaryErrorClass, parsedLegs);
 
     if (shouldFallback) {
       const reason = adapterFallbackEligible ? primaryErrorClass : (hasPlaceholder ? 'placeholder' : 'no_legs');
@@ -1064,18 +1106,48 @@ async function parseBetSlipImage(imageBase64, mediaType = 'image/png', opts = {}
 Return ONLY JSON: {"sportsbook":"Hard Rock Bet","bets":[{"sport":"UCL","league":"Champions League","bet_type":"straight","description":"Over 1.5 1H Goals - Corum vs Erokspor","odds":130,"units":1.0,"stake_amount":14.85,"potential_payout":34.15,"legs":[]}]}
 Use specific league names (UCL, EPL, La Liga, etc) not generic Soccer.`;
 
-  // Switch on errorClass so a Gemini 429 falls back to Gemma instead
-  // of silently returning "AI unavailable" (P0 — 2026-05 18:20Z incident).
-  const primary = await callLLMResult('Extract all bets from this bet slip.', sys, imageBase64, mediaType);
+  // Image-only call: require image-capable providers. Text-only fallback
+  // returns valid-looking empty-bets JSON ({"sportsbook":null,"bets":[]})
+  // that makes `raw` truthy and masks the failure (P0 — 2026-05 silent-drop
+  // incident). With requireImage=true, callLLMResult returns the image-tier
+  // failure directly so the shared gate can route to Gemma.
+  const primary = await callLLMResult('Extract all bets from this bet slip.', sys, imageBase64, mediaType, { requireImage: true });
   let raw = primary.ok ? primary.value : null;
   const primaryErrorClass = primary.ok ? null : primary.errorClass;
 
-  if (!raw && primaryErrorClass && FALLBACK_ELIGIBLE.has(primaryErrorClass)) {
-    console.log(`[AI/slip] slip.fallback_to_gemma reason=${primaryErrorClass} primary_error=${primary.error || 'n/a'} where=parseBetSlipImage`);
+  // Best-effort pre-parse so the gate can detect empty-bets shapes when
+  // raw is non-null (e.g. a vision provider returned {bets:[]}).
+  const rawText = typeof raw === 'string' ? raw : '';
+  const hasPlaceholder = !!raw && (
+    FORBIDDEN_PLACEHOLDERS.some(p => rawText.toLowerCase().includes(p))
+    || /missing legs|capper hid|cannot read|cannot parse|unable to/i.test(rawText)
+  );
+  let parsedLegs = undefined;
+  if (raw && !hasPlaceholder) {
+    try {
+      const quick = parseJSON(raw);
+      // parseBetSlipImage's sys prompt returns {sportsbook, bets:[...]} —
+      // no type/is_bet field. Any shape with a bets array counts.
+      if (quick && Array.isArray(quick.bets)) {
+        parsedLegs = [];
+        for (const b of quick.bets) {
+          if (Array.isArray(b.legs)) parsedLegs.push(...b.legs);
+        }
+      }
+    } catch (_) {}
+  }
+
+  const adapterFallbackEligible = !raw && primaryErrorClass && FALLBACK_ELIGIBLE.has(primaryErrorClass);
+  const adapterNoFallback = !raw && primaryErrorClass && !FALLBACK_ELIGIBLE.has(primaryErrorClass);
+  const shouldFallback = shouldFallbackToGemma(raw, primaryErrorClass, parsedLegs);
+
+  if (shouldFallback) {
+    const reason = adapterFallbackEligible ? primaryErrorClass : (hasPlaceholder ? 'placeholder' : 'no_legs');
+    console.log(`[AI/slip] slip.fallback_to_gemma reason=${reason} primary_error=${primary.error || 'n/a'} where=parseBetSlipImage`);
     const gemmaJson = await runGemmaVisionFallback({
       imageBase64,
       mediaType,
-      geminiResponse: '',
+      geminiResponse: rawText,
       tweetId: opts.tweetId || null,
       imageUrl: opts.imageUrl || null,
     });
@@ -1083,9 +1155,9 @@ Use specific league names (UCL, EPL, La Liga, etc) not generic Soccer.`;
       console.log('[AI/slip] slip.fallback_to_gemma succeeded (parseBetSlipImage)');
       raw = gemmaJson;
     } else {
-      console.log(`[AI/slip] slip.fallback_failed primary_reason=${primaryErrorClass} where=parseBetSlipImage`);
+      console.log(`[AI/slip] slip.fallback_failed primary_reason=${reason} where=parseBetSlipImage`);
     }
-  } else if (!raw && primaryErrorClass) {
+  } else if (adapterNoFallback) {
     // AUTH / HTTP_4XX / UNKNOWN — Gemma can't help with misconfig.
     console.log(`[AI/slip] slip.failed_no_fallback reason=${primaryErrorClass} error=${primary.error || 'n/a'} where=parseBetSlipImage`);
   }
