@@ -380,22 +380,30 @@ function scheduleRecheckAfterDenial(betId, reason, minutes = 30) {
   const attempts = bet?.grading_attempts || 0;
 
   if (attempts >= RETRY_CAP) {
-    db.prepare(`UPDATE bets
-      SET grading_state = 'backoff',
-          grading_next_attempt_at = datetime('now', '+24 hours'),
-          grading_last_failure_reason = ?,
-          grading_lock_until = NULL
-      WHERE id = ?`).run(`${String(reason).slice(0, 180)}_capped`, betId);
+    const voidTx = db.transaction(() => {
+      db.prepare(`UPDATE bets
+        SET grading_state = 'backoff',
+            grading_next_attempt_at = datetime('now', '+24 hours'),
+            grading_last_failure_reason = ?,
+            grading_lock_until = NULL,
+            result = 'void',
+            grade = 'VOID',
+            grade_reason = 'Auto-voided after retry cap exhausted (no evidence found after 15+ attempts).',
+            graded_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+          AND result = 'pending'`).run(`${String(reason).slice(0, 180)}_capped`, betId);
 
-    bets.recordDrop({
-      betId,
-      stage: 'GRADING_DROPPED',
-      dropReason: 'GRADE_BACKOFF_EXHAUSTED',
-      payload: { denial_reason: reason, attempts },
-      ingestId: null,
+      bets.recordDrop({
+        betId,
+        stage: 'GRADING_DROPPED',
+        dropReason: 'GRADE_BACKOFF_EXHAUSTED',
+        payload: { denial_reason: reason, attempts },
+        ingestId: null,
+      });
     });
+    voidTx();
 
-    console.log(`[canFinalizeBet] retry cap reached (attempts=${attempts}) for bet=${String(betId).slice(0,8)} reason=${reason} — stamped GRADE_BACKOFF_EXHAUSTED`);
+    console.log(`[canFinalizeBet] retry cap reached (attempts=${attempts}) for bet=${String(betId).slice(0,8)} reason=${reason} — voided with GRADE_BACKOFF_EXHAUSTED`);
     return;
   }
 
