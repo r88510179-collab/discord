@@ -1482,6 +1482,63 @@ const SPORT_TEAM_MAP = {
   'MMA': ['wins by ko','wins by tko','wins by submission','wins by decision','fight goes the distance','round over','round under','ufc'],
 };
 
+// Action / prop keywords that uniquely identify a sport when no team name
+// is present in the leg description. Lowercase, substring-matched. Keep
+// this list conservative: keywords here must NOT appear in other sports.
+// Multi-sport ambiguous terms (e.g. "saves" — NHL goalies AND soccer
+// goalkeepers) are intentionally excluded. If a leg description would
+// match multiple sports here, the iteration order picks the first sport
+// listed in the map, so order entries by specificity.
+//
+// Added 2026-05-13 in response to cross-sport contamination in slip-
+// receipts: Karl-Anthony Towns / Jaylen Brown / Bam Adebayo / Evan Mobley
+// legs in an MLB parlay (Dan, 2026-04-10). Each leg was a "Double Double"
+// or "PRA" prop that inferLegSport could not classify because the strings
+// contain no team names. With this map, those legs route to NBA evidence
+// search instead of falling back to the parlay's declared sport.
+const SPORT_ACTION_MAP = {
+  'NBA': [
+    'double double',
+    'triple double',
+    'pra',
+    'pras',
+    'pts + reb + ast',
+    'pts+reb+ast',
+    'points + rebounds + assists',
+    'rebounds + assists',
+    'reb + ast',
+    'three-pointers',
+    'three pointers',
+    '3-pointers',
+    '3pt made',
+    '3ptm',
+  ],
+  'MLB': [
+    'hits+runs+rbis',
+    'hits + runs + rbis',
+    'hits+runs+rbi',
+    'hits + runs + rbi',
+    'h+r+rbi',
+    'h + r + rbi',
+    'total bases',
+    'pitching outs',
+    'pitches thrown',
+    'strikeouts thrown',
+    'hitter fs',
+    'pitcher fs',
+    'rbis',
+    'home runs',
+    'hit a home run',
+  ],
+  'NHL': [
+    'shots on goal',
+    'sog',
+    'any time goal scorer',
+    'anytime goal scorer',
+    'shots on net',
+  ],
+};
+
 function reclassifySport(parsedSport, description) {
   console.log(`[Guard:Reclassify] Checking sport=${parsedSport} desc="${(description || '').slice(0, 60)}"`);
   const desc = (description || '').toLowerCase();
@@ -1514,7 +1571,18 @@ function reclassifySport(parsedSport, description) {
 // Infer sport from a single leg description
 function inferLegSport(legDescription) {
   const desc = (legDescription || '').toLowerCase();
+  // Team-name keywords first — these are the strongest signal (whole
+  // franchise names rarely false-match).
   for (const [sport, keywords] of Object.entries(SPORT_TEAM_MAP)) {
+    for (const kw of keywords) {
+      if (desc.includes(kw)) return sport;
+    }
+  }
+  // Action / prop keywords as a secondary signal for player-only legs
+  // that have no team name in the description (e.g. "Karl-Anthony Towns
+  // To Record A Double Double"). Iteration order in SPORT_ACTION_MAP
+  // determines tie-breaking.
+  for (const [sport, keywords] of Object.entries(SPORT_ACTION_MAP)) {
     for (const kw of keywords) {
       if (desc.includes(kw)) return sport;
     }
