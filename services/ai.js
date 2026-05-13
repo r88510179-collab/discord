@@ -858,17 +858,29 @@ async function runGemmaVisionFallback({ imageBase64, mediaType, geminiResponse, 
  * (multi-provider) LLM call. Byte-equivalent to parseBetText's prior
  * inline gate; lifted out so parseBetSlipImage can share it.
  *
- *   - raw: response string from callLLMResult (may be null/undefined)
- *   - primaryErrorClass: errorClass from the first failed provider
- *     (null when raw is non-null)
- *   - parsedLegs: flat array of legs extracted from raw, OR undefined
- *     when the caller didn't compute it (e.g. response wasn't a bet
- *     shape) — undefined disables the no-legs signal, matching
- *     parseBetText's prior behavior on type:"ignore"/"result".
- *
- * Returns boolean.
+ * @param {string|null|undefined} raw response string from callLLMResult
+ *   (may be null/undefined)
+ * @param {string|null} primaryErrorClass errorClass from the first failed
+ *   provider (null when raw is non-null)
+ * @param {Array|undefined} parsedLegs flat array of legs extracted from
+ *   raw, OR undefined when the caller didn't compute it (e.g. response
+ *   wasn't a bet shape) — undefined disables the no-legs signal,
+ *   matching parseBetText's prior behavior on type:"ignore"/"result".
+ * @param {string|undefined} verdictType `verdictType === 'ignore'` from a
+ *   Gemini Vision response on an image-bearing message forces fallback to
+ *   Gemma. This intentionally reverses the prior "ignore = no fallback"
+ *   stance documented above. Empirical: Hard Rock Bet slips with promo
+ *   text overlay cause Gemini to return `type:'ignore'` with a reason
+ *   ("Check out this bet I placed on Hard Rock Bet!") that does not match
+ *   the placeholder regex, so neither hasPlaceholder nor noLegsFound
+ *   fires and a real slip silently drops at PRE_FILTER_NO_BET_CONTENT.
+ *   Gemma 3:4b parses these correctly (validated 2026-04-15). Only
+ *   `parseBetText` passes this param; `parseBetSlipImage` does not (its
+ *   sys prompt has no `type` field, and its `bets:[]` path already
+ *   triggers `noLegsFound` correctly).
+ * @returns {boolean}
  */
-function shouldFallbackToGemma(raw, primaryErrorClass, parsedLegs) {
+function shouldFallbackToGemma(raw, primaryErrorClass, parsedLegs, verdictType) {
   const rawText = typeof raw === 'string' ? raw : '';
   const hasPlaceholder = !!raw && (
     FORBIDDEN_PLACEHOLDERS.some(p => rawText.toLowerCase().includes(p))
@@ -879,7 +891,8 @@ function shouldFallbackToGemma(raw, primaryErrorClass, parsedLegs) {
     && parsedLegs !== undefined
     && (!Array.isArray(parsedLegs) || parsedLegs.length === 0);
   const adapterFallbackEligible = !raw && !!primaryErrorClass && FALLBACK_ELIGIBLE.has(primaryErrorClass);
-  return Boolean(adapterFallbackEligible || hasPlaceholder || noLegsFound);
+  const ignoreVerdictWithImage = verdictType === 'ignore';
+  return Boolean(adapterFallbackEligible || hasPlaceholder || noLegsFound || ignoreVerdictWithImage);
 }
 
 async function parseBetText(text, imageUrl, options = {}) {
@@ -990,10 +1003,14 @@ Output strictly valid JSON. Do not include markdown formatting, do not include \
     // undefined for type:"ignore"/"result" so the no-legs signal is
     // suppressed (matches prior behavior — those types intentionally
     // returned empty bets and must NOT trigger Gemma).
+    // verdictType is captured separately so the gate can force fallback
+    // on type:"ignore" with an image (HRB slip case — see gate JSDoc).
+    let verdictType = undefined;
     let parsedLegs = undefined;
     if (raw && !hasPlaceholder) {
       try {
         const quick = parseJSON(raw);
+        verdictType = quick?.type;
         if (quick && (quick.type === 'bet' || quick.is_bet === true)) {
           const bets = Array.isArray(quick.bets) ? quick.bets : [];
           parsedLegs = [];
@@ -1005,10 +1022,12 @@ Output strictly valid JSON. Do not include markdown formatting, do not include \
     }
     const adapterFallbackEligible = !raw && primaryErrorClass && FALLBACK_ELIGIBLE.has(primaryErrorClass);
     const adapterNoFallback = !raw && primaryErrorClass && !FALLBACK_ELIGIBLE.has(primaryErrorClass);
-    const shouldFallback = shouldFallbackToGemma(raw, primaryErrorClass, parsedLegs);
+    const shouldFallback = shouldFallbackToGemma(raw, primaryErrorClass, parsedLegs, verdictType);
 
     if (shouldFallback) {
-      const reason = adapterFallbackEligible ? primaryErrorClass : (hasPlaceholder ? 'placeholder' : 'no_legs');
+      const reason = adapterFallbackEligible
+        ? primaryErrorClass
+        : (hasPlaceholder ? 'placeholder' : (verdictType === 'ignore' ? 'ignore_verdict' : 'no_legs'));
       console.log(`[AI/slip] slip.fallback_to_gemma reason=${reason} primary_error=${primary.error || 'n/a'}`);
       const gemmaJson = await runGemmaVisionFallback({
         imageBase64,
@@ -1139,7 +1158,9 @@ Use specific league names (UCL, EPL, La Liga, etc) not generic Soccer.`;
 
   const adapterFallbackEligible = !raw && primaryErrorClass && FALLBACK_ELIGIBLE.has(primaryErrorClass);
   const adapterNoFallback = !raw && primaryErrorClass && !FALLBACK_ELIGIBLE.has(primaryErrorClass);
-  const shouldFallback = shouldFallbackToGemma(raw, primaryErrorClass, parsedLegs);
+  // 4th arg explicitly undefined: parseBetSlipImage's sys prompt has no
+  // `type` field, so ignore_verdict is unreachable here. See gate JSDoc.
+  const shouldFallback = shouldFallbackToGemma(raw, primaryErrorClass, parsedLegs, undefined);
 
   if (shouldFallback) {
     const reason = adapterFallbackEligible ? primaryErrorClass : (hasPlaceholder ? 'placeholder' : 'no_legs');
