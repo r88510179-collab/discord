@@ -26,6 +26,7 @@ app.listen(port, '0.0.0.0', () => console.log(`[SYSTEM] Health check server list
 const { handleMessage } = require('./handlers/messageHandler');
 const { handleWarRoomInteraction } = require('./services/warRoom');
 const { handleGradeInteraction } = require('./handlers/gradeButtons');
+const { handleAdminButtonInteraction } = require('./handlers/adminButtons');
 const { runAutoGrade, probeBrave } = require('./services/grading');
 // Twitter poller loaded dynamically in ClientReady handler
 const { postGradeSummary, postDailyLeaderboard, updateScoreboard } = require('./services/dashboard');
@@ -146,6 +147,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await handleGradeInteraction(interaction);
       } catch (err) {
         console.error('[GradeBtn] Interaction error:', err.message);
+      }
+      return;
+    }
+    if (interaction.customId.startsWith('admin_')) {
+      try {
+        await handleAdminButtonInteraction(interaction);
+      } catch (err) {
+        console.error('[AdminBtn] Interaction error:', err.message);
       }
       return;
     }

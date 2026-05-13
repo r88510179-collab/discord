@@ -1,6 +1,50 @@
-const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
+const { SlashCommandBuilder, PermissionFlagsBits, ActionRowBuilder, ButtonBuilder, ButtonStyle, AttachmentBuilder } = require('discord.js');
 const { getSetting, setSetting, purgeTable, revertBetToPending } = require('../services/database');
 const { recordStage } = require('../services/pipeline-events');
+const { renderTraceByIngestId, renderTraceByBet, renderPipelineDrops } = require('../services/pipelineRender');
+
+// ── Shared helpers for pipeline-trace + pipeline-drops admin replies ──
+// CustomId encodings (all under Discord's 100-char cap):
+//   admin_trace_file:i:<ingest_id>   — ingest-anchored .txt download
+//   admin_trace_raw:i:<ingest_id>    — ingest-anchored code-block repost
+//   admin_trace_file:b:<full_bet_id> — bet-anchored .txt (UNION on re-render)
+//   admin_trace_raw:b:<full_bet_id>  — bet-anchored code-block repost
+//   admin_drops_file:<hours>         — drops aggregation .txt
+//   admin_drops_raw:<hours>          — drops aggregation code-block repost
+//
+// `b:` prefix is a deviation from the spec's literal `:<ingest_id>` to preserve
+// UX parity: clicking the button on a bet_id-branched trace should re-render
+// the same UNION view, not just the ingest-side subset.
+function buildTraceButtons({ kind, key }) {
+  const kindChar = kind === 'bet' ? 'b' : 'i';
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`admin_trace_file:${kindChar}:${key}`)
+      .setLabel('Download as .txt')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`admin_trace_raw:${kindChar}:${key}`)
+      .setLabel('Show raw')
+      .setStyle(ButtonStyle.Secondary),
+  );
+}
+
+function buildDropsButtons(hours) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`admin_drops_file:${hours}`)
+      .setLabel('Download as .txt')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`admin_drops_raw:${hours}`)
+      .setLabel('Show raw')
+      .setStyle(ButtonStyle.Secondary),
+  );
+}
+
+function safeShortId(s) {
+  return String(s || 'trace').slice(0, 16).replace(/[^a-zA-Z0-9_-]/g, '');
+}
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -68,11 +112,19 @@ module.exports = {
         .addStringOption(opt => opt.setName('force_ready_bet_id').setDescription('Optional: bet id (prefix ok) to reset to ready').setRequired(false)))
     .addSubcommand(sub =>
       sub.setName('pipeline-trace')
-        .setDescription('Show every pipeline_events row for an ingest_id in chronological order')
-        .addStringOption(opt => opt.setName('ingest_id').setDescription('Ingest id (e.g. disc_12345, twit_67890)').setRequired(true)))
+        .setDescription('Show every pipeline_events row for an ingest_id, bet_id, or message_id')
+        .addStringOption(opt => opt.setName('ingest_id').setDescription('Ingest id (e.g. disc_12345, twit_67890)').setRequired(false))
+        .addStringOption(opt => opt.setName('bet_id').setDescription('Bet id (8-char prefix ok); UNION ingest + grading events').setRequired(false))
+        .addStringOption(opt => opt.setName('message_id').setDescription('Discord/Twitter message snowflake (auto-prefixed disc_)').setRequired(false)))
     .addSubcommand(sub =>
       sub.setName('pipeline-drops-24h')
-        .setDescription('Aggregated DROP counts by reason from the last 24h'))
+        .setDescription('Aggregated DROP counts by reason (default 24h, max 168h; shows 7d reference)')
+        .addIntegerOption(opt =>
+          opt.setName('hours')
+            .setDescription('Lookback window in hours (default 24, max 168)')
+            .setRequired(false)
+            .setMinValue(1)
+            .setMaxValue(168)))
     .addSubcommand(sub =>
       sub.setName('resolver-health')
         .setDescription('Check MLB StatsAPI resolver health + circuit-breaker state'))
@@ -746,113 +798,118 @@ module.exports = {
       return interaction.editReply({ embeds: [embed1, embed2] });
     }
 
-    // ── Pipeline trace: show every event for one ingest_id ──
+    // ── Pipeline trace: show every event for one ingest_id / bet_id / message_id ──
     if (sub === 'pipeline-trace') {
       if (process.env.OWNER_ID && interaction.user.id !== process.env.OWNER_ID) return interaction.reply({ content: '🚫', ephemeral: true });
       await interaction.deferReply({ ephemeral: true });
 
       const { db } = require('../services/database');
-      const ingestId = interaction.options.getString('ingest_id').trim();
+      const ingestArg = interaction.options.getString('ingest_id');
+      const betArg = interaction.options.getString('bet_id');
+      const msgArg = interaction.options.getString('message_id');
 
-      let rows = [];
+      const providedCount = [ingestArg, betArg, msgArg].filter(v => v != null && String(v).trim() !== '').length;
+      if (providedCount !== 1) {
+        return interaction.editReply('❌ Provide exactly one of: `ingest_id`, `bet_id`, `message_id`.');
+      }
+
+      let rendered;
+      let buttonInput;
+      let noteLine = '';
+
       try {
-        rows = db.prepare(`
-          SELECT ingest_id, bet_id, source_type, source_ref, stage, event_type, drop_reason, payload, created_at
-          FROM pipeline_events
-          WHERE ingest_id = ?
-          ORDER BY created_at ASC, id ASC
-        `).all(ingestId);
+        if (ingestArg) {
+          const ingestId = ingestArg.trim();
+          rendered = renderTraceByIngestId(ingestId);
+          buttonInput = { kind: 'ingest', key: ingestId };
+        } else if (msgArg) {
+          const m = msgArg.trim();
+          const ingestId = (m.startsWith('disc_') || m.startsWith('twit_')) ? m : `disc_${m}`;
+          rendered = renderTraceByIngestId(ingestId);
+          buttonInput = { kind: 'ingest', key: ingestId };
+        } else {
+          // bet_id branch
+          const prefix = betArg.trim();
+          if (prefix.length < 4) {
+            return interaction.editReply('❌ Bet id prefix must be at least 4 characters.');
+          }
+          const peek = db.prepare('SELECT id, source_message_id FROM bets WHERE id LIKE ? LIMIT 2').all(`${prefix}%`);
+          if (peek.length === 0) return interaction.editReply(`❌ Bet not found matching \`${prefix}\`.`);
+          if (peek.length > 1) {
+            const all = db.prepare('SELECT id FROM bets WHERE id LIKE ?').all(`${prefix}%`);
+            return interaction.editReply(`❌ Ambiguous prefix — ${all.length} matches, narrow it down.`);
+          }
+          const fullBetId = peek[0].id;
+          rendered = renderTraceByBet(fullBetId);
+          buttonInput = { kind: 'bet', key: fullBetId };
+          if (rendered.note) noteLine = rendered.note + '\n';
+        }
       } catch (err) {
         return interaction.editReply(`❌ Error querying pipeline_events: \`${err.message}\``);
       }
 
-      if (rows.length === 0) {
-        return interaction.editReply(`No pipeline events found for ingest_id \`${ingestId}\`.`);
+      if (rendered.eventCount === 0) {
+        const hint = buttonInput.kind === 'bet'
+          ? ` (bet=${buttonInput.key.slice(0, 8)})`
+          : ` (ingest=${buttonInput.key})`;
+        return interaction.editReply(`No pipeline events found${hint}.`);
       }
 
-      const head = rows[0];
-      const fmtTime = (ts) => {
-        const d = new Date(Number(ts) * 1000);
-        if (isNaN(d.getTime())) return '????-??-?? ??:??:??';
-        return d.toISOString().replace('T', ' ').slice(0, 19);
-      };
-      const fmtHms = (ts) => fmtTime(ts).slice(11);
+      const innerText = rendered.headerLine + '\n' + rendered.lines.join('\n');
+      const codeBlock = '```\n' + innerText + '\n```';
+      const buttons = buildTraceButtons(buttonInput);
 
-      const sourceDesc = head.source_type === 'twitter' && head.source_ref
-        ? `twitter / tweet=${head.source_ref}`
-        : head.source_type === 'discord' && head.source_ref
-          ? `discord / msg=${head.source_ref}`
-          : `${head.source_type} / ${head.source_ref || '-'}`;
-
-      const header = `${ingestId} (${sourceDesc} / ${fmtTime(head.created_at)})`;
-      const lines = [];
-      for (let i = 0; i < rows.length; i++) {
-        const r = rows[i];
-        const isLast = i === rows.length - 1;
-        const prefix = isLast ? '└─' : '├─';
-        let label = r.stage;
-        if (r.event_type === 'DROP' || r.stage === 'DROPPED') {
-          label = `DROPPED (reason=${r.drop_reason || 'UNKNOWN'})`;
-        } else if (r.event_type === 'ERROR') {
-          label = `ERROR`;
-        }
-        let payloadStr = '';
-        if (r.payload) {
-          try {
-            const p = JSON.parse(r.payload);
-            payloadStr = ` payload=${JSON.stringify(p).slice(0, 180)}`;
-          } catch (_) {
-            payloadStr = ` payload=${String(r.payload).slice(0, 180)}`;
-          }
-        }
-        const betStr = r.bet_id ? ` bet=${r.bet_id.slice(0, 8)}` : '';
-        lines.push(`${prefix} ${fmtHms(r.created_at)} ${label}${betStr}${payloadStr}`);
+      const payload = noteLine + codeBlock;
+      if (payload.length <= 1990) {
+        return interaction.editReply({ content: payload, components: [buttons] });
       }
 
-      const body = '```\n' + header + '\n' + lines.join('\n') + '\n```';
-      return interaction.editReply(body.slice(0, 1990));
+      // Too long — attach .txt + short summary
+      const shortId = safeShortId(buttonInput.key);
+      const iso = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const fileName = `pipeline-trace-${shortId}-${iso}.txt`;
+      const file = new AttachmentBuilder(Buffer.from(innerText, 'utf8'), { name: fileName });
+      const summary = `Full trace too long for Discord — see attachment. ${rendered.eventCount} events, terminal drop: ${rendered.terminalDrop || 'none'}.`;
+      return interaction.editReply({
+        content: noteLine + summary,
+        files: [file],
+        components: [buttons],
+      });
     }
 
-    // ── Pipeline drops 24h: aggregated drop counts ──
+    // ── Pipeline drops: aggregated drop counts (configurable window + 7d reference) ──
     if (sub === 'pipeline-drops-24h') {
       if (process.env.OWNER_ID && interaction.user.id !== process.env.OWNER_ID) return interaction.reply({ content: '🚫', ephemeral: true });
       await interaction.deferReply({ ephemeral: true });
 
-      const { db } = require('../services/database');
-      const cutoff = Math.floor(Date.now() / 1000) - 86400;
+      const hours = interaction.options.getInteger('hours') ?? 24;
 
-      let aggRows = [];
-      let totalEvents = 0;
+      let rendered;
       try {
-        aggRows = db.prepare(`
-          SELECT drop_reason, COUNT(*) AS n
-          FROM pipeline_events
-          WHERE event_type = 'DROP'
-            AND drop_reason IS NOT NULL
-            AND created_at >= ?
-          GROUP BY drop_reason
-          ORDER BY n DESC
-        `).all(cutoff);
-        totalEvents = db.prepare('SELECT COUNT(*) AS n FROM pipeline_events WHERE created_at >= ?').get(cutoff)?.n || 0;
+        rendered = renderPipelineDrops(hours);
       } catch (err) {
         return interaction.editReply(`❌ Error querying pipeline_events: \`${err.message}\``);
       }
 
-      if (aggRows.length === 0) {
-        return interaction.editReply(`No drops in the last 24h. (Total events in window: ${totalEvents})`);
+      const headerBlock = rendered.headerLines.join('\n');
+      const tableBlock = '```\n' + rendered.tblLines.join('\n') + '\n```';
+      const fullText = headerBlock + '\n' + tableBlock;
+      const buttons = buildDropsButtons(rendered.hours);
+
+      if (fullText.length <= 1990) {
+        return interaction.editReply({ content: fullText, components: [buttons] });
       }
 
-      const lines = aggRows.map(r => `DROPPED_${r.drop_reason}: ${r.n}`);
-      const totalDrops = aggRows.reduce((s, r) => s + r.n, 0);
-      const body = [
-        `**Pipeline drops — last 24h**`,
-        `Total drop events: ${totalDrops} / ${totalEvents} events`,
-        '```',
-        ...lines,
-        '```',
-      ].join('\n');
-
-      return interaction.editReply(body.slice(0, 1990));
+      const iso = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const fileName = `pipeline-drops-${rendered.hours}h-${iso}.txt`;
+      const filePlain = rendered.headerLines.join('\n').replace(/\*\*/g, '') + '\n\n' + rendered.tblLines.join('\n');
+      const file = new AttachmentBuilder(Buffer.from(filePlain, 'utf8'), { name: fileName });
+      const summary = `Drops table too long for Discord — see attachment. ${rendered.dropCountH}/${rendered.eventCountH} drop events in window.`;
+      return interaction.editReply({
+        content: headerBlock + '\n' + summary,
+        files: [file],
+        components: [buttons],
+      });
     }
 
     // ── Resolver health: MLB StatsAPI sidecar status ──
