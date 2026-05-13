@@ -1606,8 +1606,13 @@ async function gradeParlay(parlayBet, legs) {
     `Leg ${i + 1}: ${lr.status} — ${lr.leg.description?.slice(0, 50)} (${lr.evidence?.slice(0, 60)})`
   ).join('\n');
 
-  if (losses > 0) return { status: 'LOSS', evidence: `Parlay LOSS — ${losses} leg(s) lost.\n${summary}` };
+  // PENDING blocks LOSS: a parlay with any unresolved leg is not yet
+  // settleable, even if another leg has already lost. The losing leg
+  // is sufficient to determine the parlay's eventual outcome only when
+  // all other legs are known. Until then, hold for re-grade. (Fix
+  // 2026-05-13 — see retrospectives if added.)
   if (pendings > 0) return { status: 'PENDING', evidence: `Parlay PENDING — ${pendings} leg(s) unresolved.\n${summary}` };
+  if (losses > 0) return { status: 'LOSS', evidence: `Parlay LOSS — ${losses} leg(s) lost.\n${summary}` };
   if (wins === legResults.length) return { status: 'WIN', evidence: `Parlay WIN — all ${wins} legs hit.\n${summary}` };
   if (voids === legResults.length) return { status: 'VOID', evidence: `Parlay VOID — all legs voided.\n${summary}` };
   return { status: 'WIN', evidence: `Parlay WIN (reduced) — ${wins} won, ${voids} voided.\n${summary}` };
