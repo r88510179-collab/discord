@@ -1094,15 +1094,6 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
 
       // AI explicitly said not-a-bet → existing PRE_FILTER_NO_BET_CONTENT bucket.
       if (parsed.is_bet === false) {
-        if (isHumanSubmitChannel) {
-          try {
-            const adminLogId = process.env.ADMIN_LOG_CHANNEL_ID;
-            const adminLog = adminLogId ? await message.client.channels.fetch(adminLogId).catch(() => null) : null;
-            if (adminLog) {
-              await adminLog.send(`⚠️ Slip dropped: **${capperInfo.name}** in <#${message.channel.id}> — AI verdict: \`ignore\`. [View Original](${message.url})`);
-            }
-          } catch (e) { console.log(`[ManualReviewNotice] Failed: ${e.message}`); }
-        }
         console.log(`[Filter] AI rejected as non-bet: ${cleanText.substring(0, 60)}...`);
         dropAll('DROPPED', 'PRE_FILTER_NO_BET_CONTENT', { filter: 'ai_is_bet_false', sample: cleanText.slice(0, 80) });
         return;
@@ -1123,15 +1114,6 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
       // See ERRATA-3 in skills/zonetracker-regrade/retrospectives/2026-04-datdude-silent-drop.md
       // for why the single-condition variant (is_bet !== true alone) was reverted as v335.
       if (parsed.is_bet !== true && (!parsed.bets || parsed.bets.length === 0)) {
-        if (isHumanSubmitChannel) {
-          try {
-            const adminLogId = process.env.ADMIN_LOG_CHANNEL_ID;
-            const adminLog = adminLogId ? await message.client.channels.fetch(adminLogId).catch(() => null) : null;
-            if (adminLog) {
-              await adminLog.send(`⚠️ Slip dropped: **${capperInfo.name}** in <#${message.channel.id}> — AI verdict: \`indeterminate\` (is_bet=${parsed.is_bet}, bets=${parsed.bets?.length || 0}). [View Original](${message.url})`);
-            }
-          } catch (e) { console.log(`[ManualReviewNotice] Failed: ${e.message}`); }
-        }
         console.log(`[Filter] AI returned indeterminate result (is_bet=${parsed.is_bet}, bets=${parsed.bets?.length || 0}): ${cleanText.substring(0, 60)}...`);
         dropAll('DROPPED', 'PRE_FILTER_AI_EMPTY_RESULT', {
           filter: 'ai_indeterminate_no_bets',
