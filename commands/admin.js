@@ -129,6 +129,9 @@ module.exports = {
       sub.setName('resolver-health')
         .setDescription('Check MLB StatsAPI resolver health + circuit-breaker state'))
     .addSubcommand(sub =>
+      sub.setName('gemma-health')
+        .setDescription('Check Gemma vision fallback health (Ollama proxy + model availability)'))
+    .addSubcommand(sub =>
       sub.setName('search-backends')
         .setDescription('Search backend call distribution + success rates from search_backend_calls')
         .addIntegerOption(opt =>
@@ -944,6 +947,107 @@ module.exports = {
       ].join('\n');
 
       return interaction.editReply(body.slice(0, 1990));
+    }
+
+    // ── Gemma vision fallback health ──
+    // services/ai.js exports gemmaHealth as a circuit-breaker STATE object, not a
+    // health-check function — so the live /api/tags reachability probe runs here
+    // (never the /api/generate inference path). ai.js is read, not modified.
+    if (sub === 'gemma-health') {
+      if (process.env.OWNER_ID && interaction.user.id !== process.env.OWNER_ID) return interaction.reply({ content: '🚫', ephemeral: true });
+      await interaction.deferReply({ ephemeral: true });
+
+      const { EmbedBuilder } = require('discord.js');
+      const checkedAt = new Date().toISOString();
+
+      try {
+        const { gemmaHealth } = require('../services/ai');
+        const url = process.env.OLLAMA_URL;
+        const secret = process.env.OLLAMA_PROXY_SECRET;
+        const targetModel = process.env.OLLAMA_VISION_MODEL || 'gemma3:4b';
+
+        let proxyReachable = false;
+        let latencyMs = null;
+        let httpStatus = null;
+        let modelLoaded = null;
+        let probeError = null;
+
+        if (!url || !secret) {
+          probeError = (!url && !secret) ? 'OLLAMA_URL + OLLAMA_PROXY_SECRET unset'
+            : !url ? 'OLLAMA_URL unset' : 'OLLAMA_PROXY_SECRET unset';
+        } else {
+          const start = Date.now();
+          try {
+            const res = await fetch(`${url.replace(/\/+$/, '')}/api/tags`, {
+              headers: { 'x-ollama-secret': secret },
+              signal: AbortSignal.timeout(10_000),
+            });
+            latencyMs = Date.now() - start;
+            httpStatus = res.status;
+            proxyReachable = res.ok;
+            if (res.ok) {
+              const data = await res.json().catch(() => null);
+              const names = Array.isArray(data?.models) ? data.models.map(m => m?.name).filter(Boolean) : [];
+              modelLoaded = names.find(n => n === targetModel || n.startsWith(targetModel)) || null;
+              if (!modelLoaded) probeError = names.length ? `${targetModel} not in [${names.join(', ')}]` : 'proxy returned no models';
+            } else {
+              probeError = `HTTP ${res.status}`;
+            }
+          } catch (e) {
+            latencyMs = Date.now() - start;
+            probeError = e.name === 'TimeoutError' ? 'timed out after 10s' : (e.message || String(e));
+          }
+        }
+
+        const breakerOpen = !!(gemmaHealth?.openUntil && Date.now() < gemmaHealth.openUntil);
+        const lastError = probeError || gemmaHealth?.lastError || null;
+
+        let status, color, statusNote = '';
+        if (!url || !secret) {
+          status = '❌ down'; color = 0xED4245; statusNote = ` (${probeError})`;
+        } else if (!proxyReachable) {
+          status = '❌ down'; color = 0xED4245; statusNote = ` (proxy unreachable — ${probeError})`;
+        } else if (breakerOpen) {
+          const m = Math.ceil((gemmaHealth.openUntil - Date.now()) / 60000);
+          status = '❌ down'; color = 0xED4245; statusNote = ` (circuit breaker OPEN — resets in ${m}m)`;
+        } else if (!modelLoaded) {
+          status = '⚠️ degraded'; color = 0xFEE75C; statusNote = ` (${targetModel} not loaded on proxy)`;
+        } else if ((gemmaHealth?.failCount ?? 0) > 0) {
+          status = '⚠️ degraded'; color = 0xFEE75C; statusNote = ` (${gemmaHealth.failCount} recent failure(s), breaker not yet open)`;
+        } else {
+          status = '✅ healthy'; color = 0x57F287;
+        }
+
+        const reachLine = (!url || !secret)
+          ? `no — ${probeError}`
+          : proxyReachable
+            ? `yes — ${latencyMs}ms (HTTP ${httpStatus})`
+            : `no — ${probeError}${latencyMs != null ? ` (${latencyMs}ms)` : ''}`;
+
+        const lastOk = gemmaHealth?.lastSuccess ? new Date(gemmaHealth.lastSuccess).toISOString() : null;
+        const embed = new EmbedBuilder()
+          .setTitle('🩺 Gemma Vision Fallback Health')
+          .setColor(color)
+          .addFields(
+            { name: 'Status', value: `${status}${statusNote}`.slice(0, 1024) },
+            { name: 'Proxy reachable', value: reachLine.slice(0, 1024) },
+            { name: 'Model loaded', value: modelLoaded ? `\`${modelLoaded}\`` : `not loaded (target: \`${targetModel}\`)` },
+            { name: 'Last error', value: lastError ? `\`${String(lastError).slice(0, 300)}\`` : 'none' },
+            { name: 'Checked at', value: checkedAt },
+          )
+          .setFooter({ text: `Circuit breaker — fails: ${gemmaHealth?.failCount ?? 0}${lastOk ? ` | last ok ${lastOk}` : ' | no success recorded this process'}` })
+          .setTimestamp();
+
+        return interaction.editReply({ embeds: [embed] });
+      } catch (err) {
+        const embed = new EmbedBuilder()
+          .setTitle('🩺 Gemma Vision Fallback Health')
+          .setColor(0xED4245)
+          .setDescription(`❌ Health check threw an error:\n\`${String(err?.message || err).slice(0, 600)}\``)
+          .addFields({ name: 'Checked at', value: checkedAt })
+          .setTimestamp();
+        return interaction.editReply({ embeds: [embed] }).catch(() => {});
+      }
     }
 
     // ── Search backends: per-call distribution + success rates ──
