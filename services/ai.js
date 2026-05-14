@@ -701,7 +701,6 @@ Output PICKs only, one per line, no commentary.`;
  * tight in a loop.
  */
 async function tryVisionGemma(imageBase64, mediaType = 'image/png') {
-  console.log(`[Gemma DEBUG] ENTRY url=${process.env.OLLAMA_URL ? 'set' : 'MISSING'} secret=${process.env.OLLAMA_PROXY_SECRET ? 'set('+process.env.OLLAMA_PROXY_SECRET.length+')' : 'MISSING'} hasImage=${!!imageBase64} breaker=${isGemmaHealthy() ? 'closed' : 'OPEN'} failCount=${gemmaHealth.failCount}`);
   const url = process.env.OLLAMA_URL;
   const secret = process.env.OLLAMA_PROXY_SECRET;
   if (!url || !secret || !imageBase64) {
