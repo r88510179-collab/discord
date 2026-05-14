@@ -41,7 +41,7 @@ const PROVIDERS = {
   },
   cerebras: {
     url: 'https://api.cerebras.ai/v1/chat/completions',
-    get model() { return process.env.CEREBRAS_MODEL || 'llama3.1-8b'; },
+    get model() { return process.env.CEREBRAS_MODEL || 'gpt-oss-120b'; },
     keyEnv: 'CEREBRAS_API_KEY',
     format: 'openai',
     supportsImages: false,
