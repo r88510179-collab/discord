@@ -1561,6 +1561,125 @@ async function gradePropWithAI(bet) {
   return await gradeSingleBet(bet);
 }
 
+// ── LOSS-leg trust check ────────────────────────────────────
+// A LOSS leg's evidence is trusted only when:
+// 1. The player-prop / wrong-match guard did not trip
+// 2. The evidence sport matches the leg sport (no cross-sport contamination)
+// 3. The evidence is real (not a placeholder "no final score found")
+function isTrustedLossLeg(leg, evidence, parentSport) {
+  if (!evidence || typeof evidence !== 'string') return false;
+  const ev = evidence.toLowerCase();
+
+  // Check 1: prop-guard tripped → untrusted
+  const guardTrippedPhrases = [
+    'not in evidence',
+    'likely wrong match',
+    'player-prop guard',
+    'wrong player',
+    'cross-sport',
+  ];
+  if (guardTrippedPhrases.some(p => ev.includes(p))) return false;
+
+  // Check 2: placeholder / no real evidence → untrusted
+  const placeholderPhrases = [
+    'no final score',
+    'no result',
+    'insufficient data',
+    'pending with no explanation',
+    'json parse error',
+  ];
+  if (placeholderPhrases.some(p => ev.includes(p))) return false;
+
+  // Check 3: cross-sport contamination. Infer sport from the leg and
+  // check the evidence doesn't reference a different sport's teams/stats.
+  // Crude but effective: look for telltale tokens from OTHER sports.
+  const { inferLegSport } = require('./ai');
+  const legSport = (inferLegSport(leg.description) || parentSport || '').toUpperCase();
+
+  const sportTokens = {
+    NBA: ['nba', 'rebounds', 'assists', 'three-pointer', 'triple-double', 'lakers', 'celtics', 'warriors', 'thunder', 'jazz', 'nuggets', 'timberwolves'],
+    MLB: ['mlb', 'innings', 'strikeouts', 'home run', 'rbi', 'pitching', 'braves', 'yankees', 'dodgers', 'astros', 'mets', 'cubs'],
+    NHL: ['nhl', 'goals', 'shots on goal', 'saves', 'period', 'bruins', 'capitals', 'sharks', 'avalanche', 'golden knights'],
+    NFL: ['nfl', 'touchdown', 'yards', 'quarter', 'cowboys', 'patriots', 'chiefs', 'eagles'],
+  };
+
+  // If we know the leg's sport, the evidence must not contain dominant
+  // tokens from a DIFFERENT sport. (A single shared word like "score"
+  // isn't enough — require 2+ matches from another sport's bucket.)
+  if (sportTokens[legSport]) {
+    for (const [otherSport, tokens] of Object.entries(sportTokens)) {
+      if (otherSport === legSport) continue;
+      const matches = tokens.filter(t => ev.includes(t)).length;
+      if (matches >= 2) return false; // strong cross-sport signal → untrusted
+    }
+  }
+
+  return true;
+}
+
+// ── Parlay leg-result aggregation ───────────────────────────
+// Pure: computes the parlay's status from already-graded per-leg results.
+// Extracted from gradeParlay so the trusted-LOSS short-circuit and the
+// leg-explosion guard are unit-testable without live leg grading.
+function aggregateParlayLegResults(legResults, legs, parlayBet) {
+  // Compute parlay result
+  const statuses = legResults.map(lr => lr.status);
+  const losses = statuses.filter(s => s === 'LOSS').length;
+  const pendings = statuses.filter(s => s === 'PENDING').length;
+  const wins = statuses.filter(s => s === 'WIN').length;
+  const voids = statuses.filter(s => s === 'VOID' || s === 'PUSH').length;
+
+  const summary = legResults.map((lr, i) =>
+    `Leg ${i + 1}: ${lr.status} — ${lr.leg.description?.slice(0, 50)} (${lr.evidence?.slice(0, 60)})`
+  ).join('\n');
+
+  // Trusted-LOSS short-circuit (added 2026-05-14).
+  // A LOSS leg ends the parlay regardless of other legs — IF the evidence is
+  // trustworthy. Untrusted LOSS evidence (cross-sport contamination, prop
+  // guard tripped, placeholder text) falls through to PENDING-blocks-LOSS
+  // (commit 42a2296, 2026-05-13).
+  //
+  // Leg-explosion guard: if legs.length > bullet_count + 1, the parser has
+  // over-split this bet. Don't short-circuit on any LOSS — these bets need
+  // manual review.
+
+  const bulletCount = (parlayBet.description?.match(/•/g) || []).length;
+  const legCountSane = bulletCount === 0
+    ? legs.length <= 20
+    : legs.length <= bulletCount + 1;
+
+  if (legCountSane && losses > 0) {
+    // Find the first trusted LOSS leg
+    const trustedLoss = legResults.find(lr =>
+      lr.status === 'LOSS' && isTrustedLossLeg(lr.leg, lr.evidence, parlayBet.sport)
+    );
+
+    if (trustedLoss) {
+      const legIdx = legResults.indexOf(trustedLoss) + 1;
+      const shortDesc = (trustedLoss.leg.description || '').slice(0, 50);
+      const shortEvidence = (trustedLoss.evidence || '').slice(0, 80);
+      return {
+        status: 'LOSS',
+        evidence: `Parlay LOSS — leg ${legIdx} (${shortDesc}) lost. ${shortEvidence}\n${summary}`,
+      };
+    }
+  }
+
+  if (pendings > 0) {
+    if (!legCountSane) {
+      return {
+        status: 'PENDING',
+        evidence: `Parlay PENDING [LEG_EXPLOSION_GUARD]: legs.length=${legs.length} exceeds bullet_count=${bulletCount}+1. Manual review required.\n${summary}`,
+      };
+    }
+    return { status: 'PENDING', evidence: `Parlay PENDING — ${pendings} leg(s) unresolved.\n${summary}` };
+  }
+  if (losses > 0) return { status: 'LOSS', evidence: `Parlay LOSS — ${losses} leg(s) lost.\n${summary}` };
+  if (wins === legResults.length) return { status: 'WIN', evidence: `Parlay WIN — all ${wins} legs hit.\n${summary}` };
+  if (voids === legResults.length) return { status: 'VOID', evidence: `Parlay VOID — all legs voided.\n${summary}` };
+  return { status: 'WIN', evidence: `Parlay WIN (reduced) — ${wins} won, ${voids} voided.\n${summary}` };
+}
+
 // ── Parlay grader — grades each leg independently then computes result ──
 async function gradeParlay(parlayBet, legs) {
   const { inferLegSport } = require('./ai');
@@ -1595,27 +1714,7 @@ async function gradeParlay(parlayBet, legs) {
     if (i < legs.length - 1) await delay(5000);
   }
 
-  // Compute parlay result
-  const statuses = legResults.map(lr => lr.status);
-  const losses = statuses.filter(s => s === 'LOSS').length;
-  const pendings = statuses.filter(s => s === 'PENDING').length;
-  const wins = statuses.filter(s => s === 'WIN').length;
-  const voids = statuses.filter(s => s === 'VOID' || s === 'PUSH').length;
-
-  const summary = legResults.map((lr, i) =>
-    `Leg ${i + 1}: ${lr.status} — ${lr.leg.description?.slice(0, 50)} (${lr.evidence?.slice(0, 60)})`
-  ).join('\n');
-
-  // PENDING blocks LOSS: a parlay with any unresolved leg is not yet
-  // settleable, even if another leg has already lost. The losing leg
-  // is sufficient to determine the parlay's eventual outcome only when
-  // all other legs are known. Until then, hold for re-grade. (Fix
-  // 2026-05-13 — see retrospectives if added.)
-  if (pendings > 0) return { status: 'PENDING', evidence: `Parlay PENDING — ${pendings} leg(s) unresolved.\n${summary}` };
-  if (losses > 0) return { status: 'LOSS', evidence: `Parlay LOSS — ${losses} leg(s) lost.\n${summary}` };
-  if (wins === legResults.length) return { status: 'WIN', evidence: `Parlay WIN — all ${wins} legs hit.\n${summary}` };
-  if (voids === legResults.length) return { status: 'VOID', evidence: `Parlay VOID — all legs voided.\n${summary}` };
-  return { status: 'WIN', evidence: `Parlay WIN (reduced) — ${wins} won, ${voids} voided.\n${summary}` };
+  return aggregateParlayLegResults(legResults, legs, parlayBet);
 }
 
 // ── Single-bet grader — ANTI-HALLUCINATION HARDENED ────────────
@@ -2224,7 +2323,7 @@ module.exports = {
   SUPPORTED_SPORTS,
   isSupportedSport,
   // Exported for unit tests only — do not rely on these from bot code:
-  _internal: { looksLikePlayerProp, parsePlayerPropDescription, searchWeb },
+  _internal: { looksLikePlayerProp, parsePlayerPropDescription, searchWeb, isTrustedLossLeg, aggregateParlayLegResults },
   // Exported for tests + observability — these are called from
   // gradePropWithAI internally; importers MUST NOT mutate.
   evaluatePlayerPropEvidence,
