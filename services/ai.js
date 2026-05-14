@@ -1148,10 +1148,7 @@ Use specific league names (UCL, EPL, La Liga, etc) not generic Soccer.`;
       // parseBetSlipImage's sys prompt returns {sportsbook, bets:[...]} —
       // no type/is_bet field. Any shape with a bets array counts.
       if (quick && Array.isArray(quick.bets)) {
-        parsedLegs = [];
-        for (const b of quick.bets) {
-          if (Array.isArray(b.legs)) parsedLegs.push(...b.legs);
-        }
+        parsedLegs = quick.bets;
       }
     } catch (_) {}
   }
