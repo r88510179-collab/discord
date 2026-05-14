@@ -637,3 +637,9 @@ Fingerprint-composition idempotency migration cannot ship until this is fixed �
 
 ### /admin retest-slip command
 Admin command to delete dedupe + pipeline state for a given Discord message ID so the same slip can be reposted for testing without manually clearing tables. Should clear: dedupe table row (TBD name), pipeline_events rows, vision_failures rows, bets rows. Useful for debugging gate changes without needing fresh slip content.
+
+### Odds API: 401 Unauthorized on both primary and backup keys
+Live as of 2026-05-14 15:21 UTC. Every per-bet odds lookup fails 401 for baseball_mlb, icehockey_nhl (and likely all sports). War-room embeds still post but without live odds enrichment. Surfaced during v423 MAG7 verification. Fix: rotate Odds API keys, check billing/quota status on theoddsapi.com or whichever provider.
+
+### v423 VERIFIED — DubClub MAG7 sheets ingest as per-sport straights
+Smokke-posted test slip in #lockedin-slips at 15:20:49 UTC produced 7 separate war-room embeds, each tagged with correct per-leg sport (NHL, MLB, etc). SHEET vs PARLAY rule fires correctly. No HALLUCINATION BLOCKED. Vision AI also resolved OCR ambiguity (Bills+Sabres → Sabres NHL; Dolphins+Marlins → Marlins MLB). Closes the "LockedIn multi-section sheets skip NBA" issue class for sheet-shape inputs.
