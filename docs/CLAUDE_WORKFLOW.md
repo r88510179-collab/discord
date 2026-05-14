@@ -42,3 +42,22 @@ This session drifted hard: stated problems were "Gemma fallback, Odds API, OLLAM
 
 ### 7. Verify hypotheses with data BEFORE writing code
 I claimed OLLAMA_URL was "the bug" — it was set correctly. I claimed Kimi was the bottleneck — Cerebras CSV showed it never carried meaningful load. Both fixes were arguably correct anyway, but the reasoning was wrong. Check env vars, check usage data, then propose a cause.
+
+### 2026-05-14 — Cross-function scope assumption (ReferenceError in production)
+Shipped v432 stopgap referencing `isHumanSubmitChannel` from inside `processAggregatedMessage`. Grep showed both definition (line 848) and references (lines 1097/1126) in the same file. Assumed same-function scope. Wrong — variable was defined in `handleMessage` (line 680-ish), drop sites were in `processAggregatedMessage` (line 888-ish). Variable not passed as parameter. ReferenceError on first ignore-verdict slip in production, bot's pipeline error monitor caught it but slip was lost. Reverted as v433, re-shipped fix B as v434 with inline `humanChannelIds` computation.
+
+**Rule 8: When referencing an existing variable from a new code location, verify same-function scope, not just same-file scope.**
+
+Verification recipe (use before shipping):
+```bash
+grep -n "^async function\|^function " handlers/messageHandler.js | head -40
+```
+Cross-reference the line numbers of variable definition and variable usage against the function-boundary list. If the two lines fall in different function blocks (and the variable isn't a parameter or module-level const), the reference WILL ReferenceError at runtime. `npm run check` does syntactic parsing only — it does NOT catch this.
+
+When in doubt, compute the variable inline at the new call site. The cost is 1-2 extra lines; the benefit is zero scope dependency on upstream code that might be refactored later.
+
+### 2026-05-14 — SHIPPED: Gemma fallback disabled (v431, cf58b4c)
+Surface Pro 5 hardware ceiling. gemma3:4b on CPU-only with 2 threads and 7.7GB RAM cannot complete inference within Fly's 90s timeout. journalctl evidence: real /api/generate took 7-17 minutes. 23 vision_failures rows over 7 days all had empty gemma_response. Disabled via GEMMA_FALLBACK_DISABLED=true env gate at services/ai.js:883 `shouldFallbackToGemma()`. Tradeoff: AI-ignore-verdict slips now drop without a second swing instead of hanging 90s then dropping anyway. Net latency improvement; net visibility decrease — closed by v434 admin-log notice.
+
+### 2026-05-14 — SHIPPED: admin-log notice for human-channel drops (v434, 8d1668a)
+Stopgap visibility for slips that drop at PRE_FILTER_NO_BET_CONTENT or PRE_FILTER_AI_EMPTY_RESULT in human submission channels. Posts `⚠️ Slip dropped: **<capper>** in <#channel> — AI verdict: <ignore|indeterminate>. [View Original]` to ADMIN_LOG_CHANNEL_ID. Behavior otherwise unchanged. Full review-queue routing (option 3) deferred. See BACKLOG "Human-channel slip review routing" entry for full design.
