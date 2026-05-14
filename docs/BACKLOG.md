@@ -669,3 +669,38 @@ Smokke posted a slip in #gnp-slips around the time of LockedIn debugging. fly lo
 
 ### Cerebras waterfall consolidation candidate
 Both Cerebras and Groq now offer openai/gpt-oss-120b. Current waterfall has 4 tiers; could simplify to 2-3 if we drop Cerebras for Groq (since Groq also has llama-3.1-8b-instant for backup). Worth evaluating after Cerebras migration ships.
+
+### Odds API caching (free tier, deferred from May 2026 session)
+
+**Context**: Free Odds API tier renews June 1, 2026. Usage is data-purposes only (analytics / CLV / line history), not live decision-making. Staleness is tolerable. No upgrade needed if caching is in place before reset.
+
+**Design sketch**:
+- New table `odds_snapshots`:
+  - `event_id TEXT` (Odds API event id)
+  - `sport TEXT`
+  - `sportsbook TEXT` (DraftKings, FanDuel, etc.)
+  - `market TEXT` (h2h, spreads, totals, player_props)
+  - `outcome TEXT` (team/player name or line description)
+  - `point REAL NULLABLE` (spread/total number, null for ML)
+  - `price INTEGER` (American odds)
+  - `captured_at TIMESTAMP`
+  - `commence_time TIMESTAMP` (game start)
+  - Composite index on (event_id, sportsbook, market, captured_at)
+
+- Polling cron on Surface Pro (free residential IP, no Fly egress concern):
+  - Pull pre-game odds at fixed interval — start with hourly for next-24h games, every 15 min for next-2h games
+  - Tune frequency against free-tier monthly call budget once we know the actual cap
+  - Write snapshots to Surface Pro local DB, push deltas to Fly nightly OR expose read endpoint via Tailscale Funnel
+
+- Optional later: snapshot capture at bet-creation time so each bet record points at the closest pre-game snapshot for CLV calculation.
+
+**What this does NOT do**:
+- Live in-game odds (caching is wrong for that — different problem if/when needed)
+- Replace any current grading path (grading is independent)
+
+**Open questions before build**:
+1. What's the actual free-tier call cap and how does it map to polling interval × sport count?
+2. Surface Pro local DB or push to Fly? Local keeps Fly storage clean; Fly push simplifies queries from the bot.
+3. Do we backfill historical odds before June 1 reset, or accept the cold-start gap?
+
+**Priority**: P3 (after P1 silent-drop cleanup, P2 DatDude/grader work). Build before June 1 reset to avoid any service interruption when the new month's quota lands.
