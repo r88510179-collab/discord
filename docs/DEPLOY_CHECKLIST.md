@@ -46,6 +46,26 @@ Each new function must show at least 2 results:
 
 If a function is defined but never called, it is not wired in.
 
+### 2a. Variables referenced from new code are in the same function scope
+
+If your new code references an existing variable (not a parameter, not a module-level const), verify that variable is declared in the same function as the new code. `npm run check` performs syntactic parsing only — it does NOT catch cross-function scope errors. The bug surfaces only at runtime, on the first input that exercises the new path.
+
+Same-file is not the same as same-function. A grep that shows variable definition at line X and your new reference at line Y proves only co-existence in the file. The lines may be in different functions, in which case the variable is out of scope and the reference will throw `ReferenceError` at runtime.
+
+Verification recipe:
+
+```bash
+grep -n "^async function\|^function " handlers/messageHandler.js | head -40
+```
+
+Cross-reference your variable's definition line and your new code's line against this function-boundary list. If they fall in different function blocks, do one of:
+
+- Pass the variable as a parameter to the inner function
+- Recompute the variable inline at the new call site
+- Promote the variable to a module-level const
+
+This rule was added 2026-05-14 after v432 (commit 01fe811) shipped with `isHumanSubmitChannel` referenced from `processAggregatedMessage` while defined in `handleMessage`. Bot crashed on first ignore-verdict slip with `ReferenceError: isHumanSubmitChannel is not defined`. Reverted as v433, reshipped as v434 (commit 8d1668a) with inline computation.
+
 ### 3. Migrations actually applied
 
 If the change includes a migration, verify the schema after deploy:
