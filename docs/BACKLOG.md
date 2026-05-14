@@ -48,6 +48,8 @@
 
 **Anchor data point**: 1 of 6 historical HRB shares with identical boilerplate text DID produce a bet (2026-04-06). Same wrapper, same author, same channel — Vision AI is non-deterministic on this exact-shape input. Gemma fallback would give a second swing.
 
+**SUPERSEDED 2026-05-14**: Fix A's Gemma fallback target permanently disabled via GEMMA_FALLBACK_DISABLED=true (v431, cf58b4c) — Surface Pro 5 hardware ceiling makes inference within Fly's 90s timeout infeasible (7-17min real inference times). Visibility for these drops now provided by v434 admin-log notice (`⚠️ Slip dropped` posted to ADMIN_LOG_CHANNEL_ID with View Original link). Full review-queue routing pending — see "Human-channel slip review routing" below. Original Fix A note preserved for audit:
+
 **Fix A (shipped v405, commit `b1c2b19`, 2026-05-13)**: Extended `shouldFallbackToGemma()` with 4th param `verdictType`; fires on `quick.type === 'ignore'` when an image was supplied. Gate firing per `vision_failures` rows. Gemma fallback target was broken Apr 30 → May 14 due to proxy secret drift (rotated v413, 2026-05-14). End-to-end verification on a real DatDude HRB ingest staging a bet via Gemma is still pending — waiting on next HRB post in `#ig-dave-picks`. Open code concern: `ignoreVerdictWithImage` var lacks image-presence check in its own definition; safe only because `parseBetText` is the sole caller passing `verdictType`.
 
 **Hard rule for any subsequent fix**: do NOT loosen `parsed.is_bet === false` check in `messageHandler.js:1098`. v335 (commit 289ce3b) tried `is_bet !== true` and dropped every Type 1 bet because `parseBetText` leaves `is_bet` undefined on successful returns. Rolled back as v337. See `skills/zonetracker-regrade/retrospectives/2026-04-datdude-silent-drop.md` ERRATA-3.
@@ -704,3 +706,81 @@ Both Cerebras and Groq now offer openai/gpt-oss-120b. Current waterfall has 4 ti
 3. Do we backfill historical odds before June 1 reset, or accept the cold-start gap?
 
 **Priority**: P3 (after P1 silent-drop cleanup, P2 DatDude/grader work). Build before June 1 reset to avoid any service interruption when the new month's quota lands.
+
+---
+
+## ✅ SHIPPED — 2026-05-14
+
+Seven deploys this session, one revert, all clean exits. Bot ended healthier than it started.
+
+- **v418 (9aea703)** — `fix(ai): use bets[] not flattened legs[] as parseBetSlipImage fallback gate`. Stopped Gemma fallback misfiring on already-valid slips.
+
+- **v420–v422** — `HUMAN_SUBMISSION_CHANNEL_IDS` expanded from 2 to 17 channels. Restored LockedIn ingestion after 5 days silent drops at the image-only bouncer. Channels added: LockedIn, GameScript, Boogieman, GNP, Gallery, Trent, Degens, Mez, Zootied, T, Harry, Cody, Gavin, Dan, Smokke.
+
+- **v423 (c6ca820)** — `fix(ai): SHEET vs PARLAY detection`. AI now emits per-sport straights for MAG7/board-style multi-sport sheets BEFORE PARLAY/DFS detection. Triggers on header words (MAG7, MAGNIFICENT 7, BOARD, TOP PLAYS, DAILY PICKS, SHEET, TODAY'S LOCKS, PICKS OF THE DAY) OR legs spanning 2+ sports. Verified end-to-end on a 7-leg DubClub MAG7 ingestion — 7 separate war-room embeds with correct per-sport tags, no `HALLUCINATION BLOCKED: leg_sport_mismatch`.
+
+- **v425 (2cbd855)** — `fix(grading): swap deprecated groq-kimi → openai/gpt-oss-120b`. Kimi tier (`moonshotai/kimi-k2-instruct`) deprecated 2025-09-10 and had been silently 404'ing for months. `services/grading.js:1905`. Provider renamed `groq-kimi` → `groq-gpt-oss`.
+
+- **v426** — `fly secrets set CEREBRAS_MODEL=gpt-oss-120b`. Pre-emptive migration before Cerebras llama3.1-8b May 27 retirement.
+
+- **v428 (9daf38a)** — `fix(ai): default CEREBRAS_MODEL to gpt-oss-120b`. Code default at `services/ai.js:44` aligned with env var.
+
+- **v431 (cf58b4c)** — `fix(ai): disable Gemma fallback via GEMMA_FALLBACK_DISABLED env var`. Gate added to `shouldFallbackToGemma()` at `services/ai.js:883`. Hardware ceiling — see CLAUDE_WORKFLOW for rationale.
+
+- **v432 → REVERTED as v433** — Admin-log notice first attempt failed with `ReferenceError: isHumanSubmitChannel is not defined`. Variable defined in `handleMessage` scope, referenced from `processAggregatedMessage` scope. Different functions. Lesson documented as Rule 8 in `docs/CLAUDE_WORKFLOW.md`.
+
+- **v434 (8d1668a)** — `fix(handler): post admin-log notice when human-channel slip drops at AI verdict (fix B)`. Reshipped with inline `humanChannelIds` computation at each call site, optional chaining on `capperInfo?.name`. Verified end-to-end: AI returned `type=ignore` on test image, `[Filter] AI rejected as non-bet` fired, ⚠️ notice appeared in #admin-log with [View Original] link. No production errors.
+
+---
+
+## P1 — Roadmap (next session)
+
+### Human-channel slip review routing (option 3)
+
+**Background**: v434 closes the visibility gap (admin-log notice on every human-channel ignore-verdict drop) but slips themselves still drop — user has to manually re-enter the bet from the View Original link. Goal of option 3 is to route human-channel ignored slips to the review queue as skeleton bets that the user can Edit to populate, eliminating manual re-entry.
+
+**Design (no schema change required — verified via `PRAGMA table_info(bets)` on 2026-05-14 production DB)**:
+
+- Reuse existing `review_status` column. New value: keep `'needs_review'` (same as audit-mode bets), differentiate via `drop_reason`.
+- Reuse existing `drop_reason` column. New values: `'AI_VERDICT_IGNORE'` (PRE_FILTER_NO_BET_CONTENT path), `'AI_INDETERMINATE'` (PRE_FILTER_AI_EMPTY_RESULT path).
+- Reuse existing `grading_state` column. New value: `'manual_pending'` — grader skips this state (must update `getPendingBets()` query at `services/database.js:447`).
+
+**Implementation outline (~4 commits)**:
+
+1. **messageHandler.js routing**: at line 1097 (`is_bet === false`) and line 1126 (`is_bet !== true && bets===0`), branch on `isHumanSubmitChannel` (computed inline per Rule 8). If human, call `createManualReviewBet()` helper. Else, `dropAll()` as today.
+
+2. **`createManualReviewBet()` helper** (new file `services/manualReview.js` or extend `services/database.js`): calls existing `createBetWithLegs()` with `capper_id` resolved from `capperInfo`, `source='manual_entry_required'`, `source_channel_id`/`source_message_id`/`raw_text` preserved, `review_status='needs_review'`, all bet-specific fields null. **Then** runs an UPDATE to set `drop_reason='AI_VERDICT_IGNORE'` and `grading_state='manual_pending'` — `drop_reason` is not in the `insertBet` prepared statement (only 21 placeholders, see `services/database.js:183`). Finally, calls `sendStagingEmbed(client, saved, capperInfo.name, message.url)` to post to war-room.
+
+3. **warRoom.js embed differentiation**: at line 35-90 embed builder, branch on `bet.drop_reason IN ('AI_VERDICT_IGNORE', 'AI_INDETERMINATE')`:
+   - Title: `⚠️ Manual Entry Required — Slip Could Not Be Parsed`
+   - Color: red instead of warning yellow
+   - Body fields: raw_text snippet (200 chars), AI verdict, View Original link
+   - Buttons: hide Approve (nothing to approve), keep Edit + Reject
+   - Edit modal already handles null fields gracefully — pre-fills empty, user fills in
+
+4. **Grader suppression + auto-confirm guard**:
+   - `getPendingBets()` query at `services/database.js:447`: add `AND b.grading_state != 'manual_pending'` clause
+   - `gradeBetRecord()` auto-confirm at line 437: already gated on `allowAutoConfirm` param. Verify no caller passes `allowAutoConfirm=true` for manual-entry bets. If risk exists, add `AND drop_reason IS NULL` to the auto-confirm UPDATE.
+
+**Open concerns (mapped 2026-05-14, not yet addressed)**:
+- Fingerprint uniqueness: `buildFingerprint()` at `services/database.js:286` keys off `source_message_id` — different Discord messages produce different fingerprints. Two manual-review bets won't collide. ✅
+- Edit modal at `services/warRoom.js:290-345` pre-fills from bet data. Null fields render as empty inputs. ✅ (untested — verify on first manual-entry bet)
+- Auto-confirm at `gradeBetRecord:437` could wrongly confirm a manual-entry bet if grader somehow ran. Belt-and-suspenders: grading_state='manual_pending' suppresses grader; auto-confirm gated on `allowAutoConfirm` flag from caller.
+
+**Tests to add**:
+- `tests/bouncer-rejection.test.js` — extend: human-channel + `is_bet=false` produces a bet row with `review_status='needs_review'`, `drop_reason='AI_VERDICT_IGNORE'`, `grading_state='manual_pending'`. Non-human-channel + `is_bet=false` still drops via `dropAll()`.
+- New `tests/manual-review-grader-skip.test.js` — verify `getPendingBets()` excludes `grading_state='manual_pending'` rows.
+
+**Estimate**: 4 commits, 2-3 hours when fresh. Each commit ships per DEPLOY_CHECKLIST.
+
+### GNP-slips silent drop recheck
+
+User reported a slip post in `#gnp-slips` earlier 2026-05-14 produced no logs. Channel IS in `HUMAN_SUBMISSION_CHANNEL_IDS` (added in v420-v422 expansion). After v434, any future drop at PRE_FILTER_NO_BET_CONTENT / PRE_FILTER_AI_EMPTY_RESULT will produce a ⚠️ admin-log notice. Recheck by posting a fresh slip in `#gnp-slips` and watching admin-log + `fly logs --no-tail | grep gnp`.
+
+### Cerebras waterfall consolidation
+
+Both Cerebras and Groq now serve `gpt-oss-120b`. Current waterfall (cerebras → groq-llama8b → groq-gpt-oss → ollama text) has three of four tiers running the same model class on different providers. Worth simplifying to a 2-tier waterfall (provider primary → provider failover) once usage telemetry confirms which provider has better latency/reliability. Deferred pending architecture session.
+
+### Odds API quota — June 1 reset decision
+
+The-odds-api.com free tier exhausted 2026-05-14 (498/500 credits used, returning 401 since). Quota resets June 1 00:00 UTC. Decision before then: (a) wait and stay on free, (b) upgrade to $30/mo for 20K credits, (c) aggressive caching to extend free tier coverage. Business decision — pending Smokke's read on signal-to-cost ratio.
