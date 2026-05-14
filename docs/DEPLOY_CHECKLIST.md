@@ -12,6 +12,7 @@ Use for:
 - Adding new API routes
 - Adding new validators, guards, or middleware
 - Refactoring existing code paths
+- Rotating shared secrets between Fly and external services (Surface Pro proxy, etc.)
 - Bug fixes that touch more than one file
 
 Skip for:
@@ -115,12 +116,37 @@ Confirm they still work.
 
 Confirm bot is still running, memory has not spiked, no new errors in the alerts section.
 
+### 9. External auth round-trip (if applicable)
+
+Required when the change touches: Fly secrets, Surface Pro env vars, the ollama-proxy, Tailscale Funnel, or anything where Fly and an external service share a rotated credential.
+
+After deploying, prove that Fly can authenticate to the external service end-to-end with a real request through the live network path. The output must show a successful service response (e.g. a JSON model list for Ollama), not `unauthorized`, `403`, or a timeout.
+
+Example for the ollama-proxy:
+
+```bash
+fly ssh console -a bettracker-discord-bot -C 'node -e "
+const url = process.env.OLLAMA_URL;
+const secret = process.env.OLLAMA_PROXY_SECRET;
+fetch(url + \"/api/tags\", { headers: { \"x-ollama-secret\": secret }, signal: AbortSignal.timeout(10000) })
+  .then(r => r.text()).then(t => console.log(t.slice(0, 200)))
+  .catch(e => console.log(\"FAIL:\", e.message));
+"'
+```
+
+Adapt the command for whatever credential rotated.
+
+**If this step fails:** the credential is mismatched between Fly and the external service. Symptoms have been silent in the past — fallback paths return empty without raising errors, and the bug only surfaces when downstream features need that credential. The 2026-04-30 → 2026-05-14 silent Gemma outage is the canonical example: every `vision_failures` row had an empty `gemma_response` for 14 days, but no log line said "auth failed" because the adapter swallowed 401s as generic failures.
+
+**For PM2-backed services (Surface Pro ollama-proxy)**, remember secrets live in THREE places: `ecosystem.config.js`, `~/.pm2/dump.pm2`, and the PM2 runtime env. All three must match. `pm2 restart` reads from dump, NOT the file. Rotation order: edit file → `pm2 delete && pm2 start ecosystem.config.js` → `pm2 save` to overwrite dump. Verify with `curl localhost:11435/api/tags` BEFORE updating Fly.
+
 ## What "deployed ✅" means
 
 A code change is "deployed ✅" when ALL of the following are true:
 
 - [ ] Steps 1, 2, 4, 5 outputs pasted
 - [ ] Steps 3 and 6 outputs pasted (if applicable)
+- [ ] Step 9 output pasted (if shared secret rotated)
 - [ ] Step 7 confirms no regression
 - [ ] Step 8 confirms bot is healthy
 
@@ -170,7 +196,27 @@ Step 7 (no regression):
 
 Step 8 (health):
 [paste /health quick output]
+
+Step 9 (external auth round-trip, if applicable):
+[paste round-trip output]
 ```
+
+## --no-cache discipline for Docker rebuilds
+
+Pass `--no-cache` to `fly deploy --local-only` when the change includes:
+
+- New files added to the repo (the Dockerfile `COPY . .` layer may be cached stale)
+- Migration files (`migrations/NNN_*.sql`)
+- New env var references in code
+- Anything where a previous deploy of the same code path mysteriously did not pick up the new behavior
+
+Standard command:
+
+```bash
+fly deploy --local-only --no-cache --yes -a bettracker-discord-bot
+```
+
+This has been the silent killer twice (v281, v289) — code is in the repo, push succeeded, Fly release recorded, but the running container has the previous version because the COPY layer was reused from cache. Step 2 (grep for the new function in production paths) and Step 6 (server-side grep proves the bot picked up new code) of this checklist catch it; `--no-cache` prevents it. The deploy is ~30s slower; the rework from a bad deploy is hours.
 
 ## Examples of past failures this prevents
 
