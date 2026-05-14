@@ -963,12 +963,13 @@ module.exports = {
         const { gemmaHealth } = require('../services/ai');
         const url = process.env.OLLAMA_URL;
         const secret = process.env.OLLAMA_PROXY_SECRET;
-        const model = process.env.OLLAMA_VISION_MODEL;
+        // Mirror services/ai.js — OLLAMA_VISION_MODEL is not set in prod; the real
+        // vision path falls back to gemma3:4b, so probe the same model the bot uses.
+        const model = process.env.OLLAMA_VISION_MODEL || 'gemma3:4b';
 
         const missing = [];
         if (!url) missing.push('OLLAMA_URL');
         if (!secret) missing.push('OLLAMA_PROXY_SECRET');
-        if (!model) missing.push('OLLAMA_VISION_MODEL');
         if (missing.length) {
           const embed = new EmbedBuilder()
             .setTitle('Gemma Health — Config Error')
