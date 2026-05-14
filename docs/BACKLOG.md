@@ -643,3 +643,29 @@ Live as of 2026-05-14 15:21 UTC. Every per-bet odds lookup fails 401 for basebal
 
 ### v423 VERIFIED — DubClub MAG7 sheets ingest as per-sport straights
 Smokke-posted test slip in #lockedin-slips at 15:20:49 UTC produced 7 separate war-room embeds, each tagged with correct per-leg sport (NHL, MLB, etc). SHEET vs PARLAY rule fires correctly. No HALLUCINATION BLOCKED. Vision AI also resolved OCR ambiguity (Bills+Sabres → Sabres NHL; Dolphins+Marlins → Marlins MLB). Closes the "LockedIn multi-section sheets skip NBA" issue class for sheet-shape inputs.
+
+## 🚨 KNOWN ISSUES — Surfaced 2026-05-14, Deferred
+
+### Cerebras llama3.1-8b retires 2026-05-27 (13 days)
+Cerebras docs banner: "llama3.1-8b and qwen-3-235b-a22b-instruct-2507 will be deprecated on May 27, 2026." services/ai.js:44 defaults CEREBRAS_MODEL to llama3.1-8b. This is the PRIMARY tier in grader waterfall (940 successful calls / week per Cerebras CSV). MUST migrate before May 27 or grader primary dies.
+
+Fix options: (a) set CEREBRAS_MODEL=gpt-oss-120b in Fly secrets (one-liner, easiest), or (b) consolidate waterfall — drop cerebras tier since it now offers same model as Groq, simplify to gpt-oss-120b on Groq → llama-3.1-8b-instant on Groq → ollama. Option (a) ships in 1 command. Option (b) is cleaner architecturally but requires a session to decide tier order and verify under load.
+
+Recommended: ship (a) immediately as a fresh Fly secret set + restart, plan (b) for next architecture session.
+
+### Gemma fallback returns empty responses (NOT a config bug)
+Verified 2026-05-14: OLLAMA_URL IS set on Fly (https://tracker-surface-pro.tail65f8f0.ts.net), OLLAMA_PROXY_SECRET set (len=64), proxy returns 200 + gemma3:4b loaded via direct curl test. So function does NOT bail at services/ai.js:707. The empty `gemma_response` rows (23 in 7 days, all gemma_len=0) come from somewhere later in the call path. Hypotheses to investigate next session:
+- /api/generate returning empty data.response on real images
+- Circuit breaker tripping after first failure and silently skipping
+- Image base64 too large for the request
+- gemma3:4b actually returning NOT_A_SLIP boilerplate that gets normalized to empty
+Add temporary debug logging around services/ai.js:741 (the data.response read) to see what Ollama actually returns on a real production slip.
+
+### Odds API exhausted (the-odds-api.com)
+Free tier: 498/500 credits used, resets June 1 at 12AM UTC. Both keys (primary + backup) on same usage pattern. Bot logs 401 because the-odds-api returns 401 when over quota (not 429). War-room embeds still post; just no live odds enrichment. Fix options: (a) upgrade to $30/mo for 20K credits, (b) cache aggressively + only enrich on stage-to-war-room, (c) wait until June 1. Business decision, not code.
+
+### GNP-slips silent drop on 2026-05-14
+Smokke posted a slip in #gnp-slips around the time of LockedIn debugging. fly logs grep returned nothing for "gnp" — message didn't produce ANY log output. Channel IS in HUMAN_SUBMISSION_CHANNEL_IDS (added in today's secret rotation), IS in CAPPER_CHANNEL_MAP (1473343838587457626:GNP). Possible causes: bot didn't see the message (Discord permission?), or grep window missed it (post happened before log retention). Recheck next session by posting a fresh slip in #gnp-slips and immediately grep.
+
+### Cerebras waterfall consolidation candidate
+Both Cerebras and Groq now offer openai/gpt-oss-120b. Current waterfall has 4 tiers; could simplify to 2-3 if we drop Cerebras for Groq (since Groq also has llama-3.1-8b-instant for backup). Worth evaluating after Cerebras migration ships.

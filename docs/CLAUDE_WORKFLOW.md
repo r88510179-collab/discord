@@ -33,3 +33,12 @@ DubClub MAG7 ingestion fixed. AI now splits multi-sport sheets into per-sport st
 
 ### 5. Trust the user's "it's working" before re-interrogating
 When Smokke says "it's working" he has actual eyes on Discord war-room. Logs are an imperfect proxy. Don't push back on confirmation by demanding a log line that may or may not exist in the grep window. Ask once for screenshot if genuinely unsure, then trust the answer.
+
+### 2026-05-14 — SHIPPED: groq-kimi → openai/gpt-oss-120b (v425, 2cbd855)
+Provider deprecation chain: moonshotai/kimi-k2-instruct deprecated 2025-09-10 → kimi-k2-instruct-0905 deprecated 2026-03-23 → openai/gpt-oss-120b. Code had been pointing at the original (deprecated 8 months) since waterfall construction. Verified via Cerebras CSV: 940 cerebras llama3.1-8b requests in last 7 days (876 success, 64 rate-limited) — Kimi tier was silently failing the whole time, traffic falling through to the next tier. Provider name renamed groq-kimi → groq-gpt-oss for snapshot clarity.
+
+### 6. Stay on the user's stated problem (Rule 1 restated, with example)
+This session drifted hard: stated problems were "Gemma fallback, Odds API, OLLAMA_PROXY_URL" — instead I chased a Cerebras email about an unused model, expanded into waterfall consolidation, theorized about Kimi being the bottleneck (it wasn't), and only after the Kimi commit was already pushed realized none of the three stated problems were resolved. Rule already exists; restating because I violated it within an hour of writing it down.
+
+### 7. Verify hypotheses with data BEFORE writing code
+I claimed OLLAMA_URL was "the bug" — it was set correctly. I claimed Kimi was the bottleneck — Cerebras CSV showed it never carried meaningful load. Both fixes were arguably correct anyway, but the reasoning was wrong. Check env vars, check usage data, then propose a cause.
