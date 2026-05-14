@@ -881,6 +881,7 @@ async function runGemmaVisionFallback({ imageBase64, mediaType, geminiResponse, 
  * @returns {boolean}
  */
 function shouldFallbackToGemma(raw, primaryErrorClass, parsedLegs, verdictType) {
+  if (process.env.GEMMA_FALLBACK_DISABLED === 'true') return false;
   const rawText = typeof raw === 'string' ? raw : '';
   const hasPlaceholder = !!raw && (
     FORBIDDEN_PLACEHOLDERS.some(p => rawText.toLowerCase().includes(p))
