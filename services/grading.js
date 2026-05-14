@@ -1902,7 +1902,7 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
     providers.push({ name: 'openrouter', url: 'https://openrouter.ai/api/v1/chat/completions', key: process.env.OPENROUTER_API_KEY, model: 'meta-llama/llama-3.3-70b-instruct:free' });
   }
   if (process.env.GROQ_API_KEY) {
-    providers.push({ name: 'groq-kimi', url: 'https://api.groq.com/openai/v1/chat/completions', key: process.env.GROQ_API_KEY, model: 'moonshotai/kimi-k2-instruct' });
+    providers.push({ name: 'groq-gpt-oss', url: 'https://api.groq.com/openai/v1/chat/completions', key: process.env.GROQ_API_KEY, model: 'openai/gpt-oss-120b' });
   }
   if (process.env.MISTRAL_API_KEY) {
     providers.push({ name: 'mistral', url: 'https://api.mistral.ai/v1/chat/completions', key: process.env.MISTRAL_API_KEY, model: 'mistral-small-latest' });
