@@ -1992,7 +1992,7 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
   // mistral unknown → ollama local → groq-llama8b 39% (last resort)
   const providers = [];
   if (process.env.CEREBRAS_API_KEY) {
-    providers.push({ name: 'cerebras', url: 'https://api.cerebras.ai/v1/chat/completions', key: process.env.CEREBRAS_API_KEY, model: 'llama3.1-8b' });
+    providers.push({ name: 'cerebras', url: 'https://api.cerebras.ai/v1/chat/completions', key: process.env.CEREBRAS_API_KEY, model: 'qwen-3-235b-a22b-instruct-2507' });
   }
   if (process.env.GROQ_API_KEY) {
     providers.push({ name: 'groq-qwen', url: 'https://api.groq.com/openai/v1/chat/completions', key: process.env.GROQ_API_KEY, model: 'qwen/qwen3-32b' });
