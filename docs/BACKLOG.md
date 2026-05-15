@@ -818,3 +818,6 @@ Both Cerebras and Groq now serve `gpt-oss-120b`. Current waterfall (cerebras →
 ### Odds API quota — June 1 reset decision
 
 The-odds-api.com free tier exhausted 2026-05-14 (498/500 credits used, returning 401 since). Quota resets June 1 00:00 UTC. Decision before then: (a) wait and stay on free, (b) upgrade to $30/mo for 20K credits, (c) aggressive caching to extend free tier coverage. Business decision — pending Smokke's read on signal-to-cost ratio.
+
+### Wire Cerebras grader model to env var
+`services/grading.js:1995` hardcodes the Cerebras model literal (`qwen-3-235b-a22b-instruct-2507` as of v445). The `CEREBRAS_MODEL` Fly secret exists but is unused at this call site, so model swaps require a code deploy. Either change the literal to `process.env.CEREBRAS_MODEL || 'qwen-3-235b-a22b-instruct-2507'` so swaps are `fly secrets set` + restart, or drop the unused secret to avoid confusion. Same pattern likely applies at `services/ai.js:44` — verify before touching. Low priority — current model works.
