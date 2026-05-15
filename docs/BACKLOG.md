@@ -265,6 +265,20 @@ Parse @capperledger recap tweets to grade pending bets without AI calls. Add `gr
 ### City-name ambiguity in reclassifier
 The SPORT_TEAM_KEYWORDS list only contains team nicknames (Thunder, Lakers, Capitals), not city names (Oklahoma City, Los Angeles, Washington). When a bet uses the city name alone ("Oklahoma City to win"), the reclassifier fails to match it against the correct sport. This is especially problematic for cities with multiple teams across sports (LA has 8+ pro teams). Fix: add city aliases to each sport's keyword list, OR implement a disambiguation step that checks all sports and flags truly ambiguous cities as "requires-context" rather than forcing a reclassification.
 
+### Unknown-sport straight voids (~46% of monthly voids)
+
+May 2026 audit found 150 straight bets with sport=Unknown voided — single largest void bucket (46% of monthly voids vs 22 NBA parlay, 18 MLB parlay).
+
+These bets reach the grader with no sport classification, so search backends have nothing to anchor on. Reclassifier never matched them. Likely root causes:
+
+- City-name ambiguity (see existing BACKLOG item)
+- Cross-sport keywords that the reclassifier punts to Unknown rather than infer
+- Bet text genuinely too sparse to classify (e.g., "Smith ML")
+
+Diagnostic: pull description for May Unknown/straight voids, classify manually, see what % are recoverable. If >50% are recoverable, build a v2 reclassifier with the city-name table + cross-sport disambiguation rules. If <20% recoverable, accept the void floor and route Unknown-sport straights to manual review queue instead of grading them.
+
+Investigation query: `SELECT id, capper_id, description, raw_text, created_at FROM bets WHERE result = 'void' AND sport = 'Unknown' AND bet_type = 'straight' AND strftime('%Y-%m', created_at) = '2026-05' ORDER BY created_at DESC LIMIT 30;`
+
 ### ~~Capper ROI display bug~~ — RESOLVED 2026-04-13 (faa88208)
 Cap removed by commit faa88208 ("remove ROI cap, harden bouncer"). The "+500%" pattern observed in the 2026-04-13 09:34 slip-receipts export was the cap behavior; export was taken ~4h before the fix landed at 13:36 EDT. `getCapperStats` and `getLeaderboard` now return real values; `services/database.js:515` retains a >500% log warning for monitoring but does not clamp the displayed value. Confirmed via git blame 2026-05-08.
 
