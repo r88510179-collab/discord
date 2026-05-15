@@ -17,6 +17,7 @@ const { db } = require('./database');
 const SOURCE_TYPES = ['discord', 'twitter', 'webhook', 'manual', 'grading'];
 const STAGES = [
   'RECEIVED', 'AUTHORIZED', 'BUFFERED', 'EXTRACTED', 'PARSED', 'VALIDATED', 'STAGED', 'DROPPED',
+  'MANUAL_REVIEW_HOLD',  // human-channel slip held for admin review instead of silent drop
   // Grading-side stages (added alongside BetService skeleton — migration 020)
   'GRADING_ENTER',
   'GRADING_SEARCH',
