@@ -259,6 +259,26 @@ Current `<parent>-leg<N>` ids don't stamp `drop_reason` on the parent bet row �
 
 ## Grading Enhancements
 
+### Cerebras grader: upgrade `llama3.1-8b` → `gpt-oss-120b` — ATTEMPTED v441, REVERTED v442 (2026-05-15)
+
+**Outcome**: single-token model swap at `services/grading.js:1995` shipped as v441 (commit `1b70f4d`), failed on first real cron grader tick at 16:15Z, reverted as v442 (commit `fca6b9a`). Net duration in production: ~14 min.
+
+**Failure mode**: `gpt-oss-120b` is a reasoning model. The shared `max_tokens: 200` at `services/grading.js:2056` is fine for `llama3.1-8b` (non-reasoning) but starves the reasoning model — internal reasoning consumes the budget, leaving either empty `content` (silent fall-through to next provider) or a 46-char truncated JSON prefix that fails to parse. Observed across 5 consecutive grader calls; Cerebras was the winner on 0. Post-change, Cerebras handled 0% of successful dispatches — exact inversion of the audit's "85-95%" premise.
+
+**Evidence (v441, 2026-05-15 16:15Z cron)**:
+- bet `4d5dce8e` (soccer): `Winner: cerebras | Raw (46 chars): {"status":"PENDING","evidence":"Search results` → JSON parse error → degraded PENDING
+- bet `47d1e607` legs 1-5 (NBA parlay): each leg `Trying cerebras` → instant fall-through (empty content) → mistral or groq-qwen won the chain
+
+**Why `services/ai.js` already works on the same model**: `services/ai.js:127` uses `max_tokens: 1024`. Only the inline grader waterfall uses the cramped 200.
+
+**Required for next attempt** (2-line change, not 1):
+1. Swap model: `'llama3.1-8b'` → `'gpt-oss-120b'` at `services/grading.js:1995`
+2. Bump `max_tokens` at `services/grading.js:2056` (or split per-provider). Cerebras needs ≥ ~600 to leave room for reasoning + the ~200-token JSON output. `1024` matches `services/ai.js` and is the safe value.
+
+Confirm via one organic cron tick (or `/grade test`) before declaring shipped. Step 6 of DEPLOY_CHECKLIST must see `Winner: cerebras | Raw (>100 chars)` followed by clean JSON parse, not the 46-char truncation pattern.
+
+**Deadline driver**: Cerebras retires `llama3.1-8b` 2026-05-27. ~12 days of runway before the next attempt becomes mandatory rather than optional.
+
 ### Oracle: CapperLedger as grading source
 Parse @capperledger recap tweets to grade pending bets without AI calls. Add `grading_source` column. Fuzzy-match bet descriptions. Threshold >85% confidence. Fallback to AI after 24h.
 
