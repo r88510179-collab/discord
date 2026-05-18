@@ -259,6 +259,59 @@ Current `<parent>-leg<N>` ids don't stamp `drop_reason` on the parent bet row �
 
 ## Grading Enhancements
 
+### ✅ SHIPPED 2026-05-18 — Leg-explosion truncation root cause
+
+**v451 (a2de399).** services/ai.js:423 description cap was 250 for all bet types; parlays legitimately run longer because they embed N leg bullets. Truncation clipped descriptions mid-bullet, causing services/grading.js:1647 legCountSane guard to trip (parlay had N legs but description showed N-1 bullets). Affected ~6 historical parlays at exactly 250-255 chars. Fix: bet_type-aware cap (parlay=2000, others=250) + warn log on truncation. Note: the memory note "11 parlays with leg > bullet" was undercount; full audit found 102 explosion-class rows, of which only ~6 were truncation. Other classes (C/D/E below) are deferred investigations.
+
+### Leg-explosion Category C — compound-prop over-split (LLM artifact, single case)
+
+**Status:** Deferred. 1 case in 435 historical parlays. Not worth a parser change for false-positive risk.
+
+**Evidence:** Bet `a133eed16d44` (Dan, NBA, 2026-04-25). Description bullet: "Jayson Tatum Over 29.5 - Alt Pts + Reb" (one prop, one bullet). Parser split on `-` into two legs: "Jayson Tatum Over 29.5" + "Jayson Tatum - Alt Pts + Reb". System prompt at services/ai.js:947 does NOT instruct the LLM to split on `-`; this was a free-form LLM artifact.
+
+**Why deferred:** Adding a "do not split alt-line props on `-`" rule to the system prompt could regress legitimate compound stats (NBA props like "Doncic - Triple Double Yes/No" sometimes use `-` legitimately). Single case across 435 parlays does not justify the regression risk. Park until pattern recurs.
+
+### Leg-explosion Category D — duplicate legs in verbose + shorthand form (recurring, Harry/Cody/Bookie pattern)
+
+**Status:** Deferred. ~5 cases in audit, primarily Harry and Cody parlays.
+
+**Evidence pattern:** Bullets show 3 props in verbose form, but parlay_legs has 6 rows: 3 verbose + 3 shorthand. dedupeParlayLegs (services/database.js:381) normalizes case and strips punctuation but cannot recognize synonyms like "30+ Pts + Ast" vs "30+ PTS + AST" (case-only, deduped correctly) vs "Points + Rebounds + Assists" vs "PRAs" (different tokens, NOT deduped).
+
+**Examples:**
+- `b83ed2eb4c61` (Cody, NBA): 3 bullets, 6 legs — each prop appears once as "To Score N+ X" and once as "N+ X"
+- `e96a60e31f79` (Harry, NBA): 4 bullets, 8 legs — verbose ("De'Aaron Fox 5+ Ast") + shorthand ("De'Aaron Fox 5+ Assists")
+- `c59b47675295`, `519b84d7e77c`, `7822a83bb9a4`: same pattern across Harry and Cody
+
+**Hypothesis:** These cappers post slips where the image contains both a structured legs list AND a separate "research / summary" section that restates the same legs differently. The parser is extracting both forms. Need to inspect actual source images to confirm — not log evidence alone.
+
+**Fix paths (none chosen):**
+1. Extend dedupeParlayLegs with a sport-aware token-equivalence map (Pts ↔ Points, Reb ↔ Rebounds, Ast ↔ Assists, PRA ↔ Pts+Reb+Ast)
+2. System-prompt rule: "If you see the same player named twice with different prop wording, emit ONE leg using the verbose form"
+3. Post-parse: if N legs share the same player name and >50% token overlap, keep the longest one
+
+Option 1 is safest; option 3 risks killing legitimate same-player multi-prop parlays.
+
+### Leg-explosion Category E — buffer collision (rare, but cross-bet contamination)
+
+**Status:** Deferred. ~4 cases, all Harry.
+
+**Evidence:**
+- `7e5fbcaac2d8` (Bane, NBA): description has 2 NBA legs, parlay_legs has 4 including unrelated tennis (Potapova) and NHL (Tom Wilson) legs from a different slip
+- `0a02cfbd48c8` (Harry, NBA): first leg in DB is "Philadelphia 76ers @ New York Knicks" (a matchup, not a prop) — likely the SGP header line absorbed as a leg
+- `2accc82adac6` (Harry, NBA): 4 bullets, 6 legs — last 2 are "Boston Celtics @ Philadelphia 76ers SGP" and "Research on all four props attached" (caption/header text, not bets)
+- `4f731b9ba298` (Harry, NBA): 3 bullets, 9 legs — bullets are bets, legs 7-9 are "T'Minnesota Timberwolves" / "San Antonio Spurs" / "SGP" (matchup header tokens)
+
+**Hypothesis:** Harry's slip image format includes header text ("Matchup: Team @ Team", "SGP", "Research:") that the parser is treating as legs. Different cause from buffer collision in the Bane case where two unrelated bets actually merged.
+
+**Fix paths (none chosen):**
+1. Add header-pattern rejection to validateLegShape: legs matching "X @ Y", standalone "SGP", "Research", "Props attached", single-word team names should be filtered
+2. System-prompt rule: distinguish header/context lines from actual betting legs
+
+Related to the DatDude HRB silent-drop investigation already in P1 backlog. Likely shares root cause (parser failing to distinguish slip metadata from slip bets).
+
+---
+
+
 ### Cerebras grader: upgrade `llama3.1-8b` → `gpt-oss-120b` — ATTEMPTED v441, REVERTED v442 (2026-05-15)
 
 **Outcome**: single-token model swap at `services/grading.js:1995` shipped as v441 (commit `1b70f4d`), failed on first real cron grader tick at 16:15Z, reverted as v442 (commit `fca6b9a`). Net duration in production: ~14 min.
