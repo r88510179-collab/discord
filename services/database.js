@@ -377,21 +377,202 @@ function createBet(betData) {
   return { ...stmts.getBet.get(id), _deduped: false };
 }
 
-// Bug C: Deduplicate parlay legs before inserting
-function dedupeParlayLegs(legs) {
-  const seen = new Set();
+// ── Cat D dedup normalization (Phase 1.5 validated) ──
+// Source-of-truth: scripts/test-dedup-normalization.js.
+// Required pass rates: KNOWN_BAD 15/16, SHOULD_STAY_SEPARATE 10/10.
+const STAT_KEYWORDS_FOR_REORDER = new Set([
+  'point', 'points',
+  'reb', 'rebound', 'rebounds',
+  'assist', 'assists',
+  'hit', 'hits',
+  'run', 'runs',
+  'rbi', 'rbis',
+  'three', 'threes', 'pointer', 'pointers', 'made',
+  'goal', 'goals',
+  'shot', 'shots',
+  'save', 'saves',
+  'strikeout', 'strikeouts',
+  'total', 'base', 'bases',
+  'home', 'hr', 'hrs',
+  'score', 'scored', 'recorded',
+  'points+rebounds+assists',
+  'hits+runs+rbis',
+]);
+
+function reorderLeadingToken(x) {
+  const patterns = [
+    /^(\d+\+)\s+/,
+    /^(o|over|u|under)\s+(\d+(?:\.\d+)?)\s+/i,
+    /^(\d+(?:\.\d+)?)\s+/,
+  ];
+  let match = null;
+  for (const re of patterns) {
+    const m = x.match(re);
+    if (m) { match = m; break; }
+  }
+  if (!match) return x;
+
+  const token = match[0].trim();
+  const rest = x.slice(match[0].length);
+  const words = rest.split(/\s+/).filter(Boolean);
+
+  const playerRun = [];
+  for (let i = 0; i < Math.min(words.length, 4); i++) {
+    const w = words[i];
+    if (!/^[a-z]/i.test(w)) break;
+    if (STAT_KEYWORDS_FOR_REORDER.has(w)) break;
+    playerRun.push(w);
+  }
+  if (playerRun.length === 0) return x;
+
+  const tail = words.slice(playerRun.length).join(' ');
+  return `${playerRun.join(' ')} ${token}${tail ? ' ' + tail : ''}`;
+}
+
+function normalizeLeg(description) {
+  if (!description) return '';
+  let x = String(description).toLowerCase();
+
+  const prefixes = [
+    /\bplayer to record\b\s*/g,
+    /\bplayer to score\b\s*/g,
+    /\bplayer to make\b\s*/g,
+    /\bplayer to hit\b\s*/g,
+    /\bto score\b\s*/g,
+    /\bto record\b\s*/g,
+    /\bto make\b\s*/g,
+    /\bto hit\b\s*/g,
+    /\bto get\b\s*/g,
+  ];
+  let prev;
+  do {
+    prev = x;
+    for (const re of prefixes) x = x.replace(re, '');
+  } while (x !== prev);
+
+  const statMap = [
+    [/\bpts\b/g, 'points'],
+    [/\brebs\b/g, 'rebounds'],
+    [/\breb\b/g, 'rebounds'],
+    [/\basts\b/g, 'assists'],
+    [/\bast\b/g, 'assists'],
+    [/\bpras\b/g, 'points+rebounds+assists'],
+    [/\bpra\b/g, 'points+rebounds+assists'],
+    [/\b3ptm\b/g, 'three pointers made'],
+    [/\b3pm\b/g, 'three pointers made'],
+    [/\bthrees made\b/g, 'three pointers made'],
+    [/\bsog\b/g, 'shots on goal'],
+    [/\bh\+r\+rbi\b/g, 'hits+runs+rbis'],
+    [/\bhits\s*\+\s*runs\s*\+\s*rbis\b/g, 'hits+runs+rbis'],
+  ];
+  for (const [re, repl] of statMap) x = x.replace(re, repl);
+
+  x = reorderLeadingToken(x);
+  x = x.replace(/\s*\+\s*/g, '+');
+
+  x = x.replace(/(\d)\s+o\s+([a-z])/g, '$1 over $2');
+  x = x.replace(/(\d)\s+u\s+([a-z])/g, '$1 under $2');
+  x = x.replace(/\bo\s+(\d)/g, 'over $1');
+  x = x.replace(/\bu\s+(\d)/g, 'under $1');
+
+  return x.toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+// Lazy-prepared because parlay_legs_dedup_events is created by migration 024.
+let _dedupEventStmt = null;
+function getDedupEventStmt() {
+  if (!_dedupEventStmt) {
+    _dedupEventStmt = db.prepare(`
+      INSERT INTO parlay_legs_dedup_events
+        (bet_id, ingest_id, decision, original_text, canonical_key, matched_against_text, matched_against_key, reason)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+  }
+  return _dedupEventStmt;
+}
+
+function logDedupEvent(betId, ingestId, decision, originalText, canonicalKey, matchedAgainstText, matchedAgainstKey, reason) {
+  if (!betId) return;
+  setImmediate(() => {
+    try {
+      getDedupEventStmt().run(
+        String(betId),
+        ingestId || null,
+        decision,
+        String(originalText || ''),
+        String(canonicalKey || ''),
+        matchedAgainstText || null,
+        matchedAgainstKey || null,
+        reason || null,
+      );
+    } catch (err) {
+      console.warn(`[DedupLog] write failed: ${err.message}`);
+    }
+  });
+}
+
+function levenshtein(a, b) {
+  if (a === b) return 0;
+  const al = a.length, bl = b.length;
+  if (al === 0) return bl;
+  if (bl === 0) return al;
+  if (Math.abs(al - bl) > 2) return Math.abs(al - bl);
+  let prev = new Array(bl + 1);
+  let curr = new Array(bl + 1);
+  for (let j = 0; j <= bl; j++) prev[j] = j;
+  for (let i = 1; i <= al; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= bl; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost);
+    }
+    [prev, curr] = [curr, prev];
+  }
+  return prev[bl];
+}
+
+// Bug C + Cat D: Deduplicate parlay legs before inserting.
+// betId/ingestId enable telemetry to parlay_legs_dedup_events; both optional
+// for backward compatibility with call sites that don't have a bet context yet.
+function dedupeParlayLegs(legs, betId = null, ingestId = null) {
+  const seenKey = new Map();
   const unique = [];
   const duplicates = [];
   for (const leg of legs) {
-    const key = (leg.description || '').toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
+    const original = leg.description || '';
+    const key = normalizeLeg(original);
     if (!key) continue;
-    if (seen.has(key)) { duplicates.push(leg.description); continue; }
-    seen.add(key);
+    if (seenKey.has(key)) {
+      duplicates.push(original);
+      logDedupEvent(betId, ingestId, 'dropped_duplicate', original, key,
+        seenKey.get(key), key, 'normalized_key_match');
+      continue;
+    }
+    seenKey.set(key, original);
     unique.push(leg);
+    logDedupEvent(betId, ingestId, 'kept', original, key, null, null, null);
   }
   if (duplicates.length > 0) {
     console.log(`[Parser] DEDUPED ${duplicates.length} duplicate leg(s): ${duplicates.join(' | ')}`);
   }
+
+  if (betId && unique.length > 1) {
+    const keyEntries = Array.from(seenKey.entries());
+    let nearMissCount = 0;
+    for (let i = 0; i < keyEntries.length && nearMissCount < 5; i++) {
+      for (let j = i + 1; j < keyEntries.length && nearMissCount < 5; j++) {
+        const [keyA, textA] = keyEntries[i];
+        const [keyB, textB] = keyEntries[j];
+        const dist = levenshtein(keyA, keyB);
+        if (dist > 0 && dist <= 2) {
+          logDedupEvent(betId, ingestId, 'near_miss', textA, keyA, textB, keyB,
+            `levenshtein=${dist}`);
+          nearMissCount++;
+        }
+      }
+    }
+  }
+
   return unique;
 }
 
@@ -405,7 +586,7 @@ function createBetWithLegs(betData, legs) {
   const bet = createBet(betData);
   if (bet?._deduped) return bet;
   // Deduplicate legs before inserting
-  const cleanLegs = dedupeParlayLegs(legs || []);
+  const cleanLegs = dedupeParlayLegs(legs || [], bet.id, null);
   for (const leg of cleanLegs) {
     if (!leg.description) continue;
     stmts.insertLeg.run(uid(), bet.id, leg.description, leg.odds || null);
@@ -892,6 +1073,7 @@ module.exports = {
   createBet,
   createBetWithLegs,
   dedupeParlayLegs,
+  normalizeLeg,
   gradeBet: gradeBetRecord,
   getPendingBets,
   getAllPendingBets,

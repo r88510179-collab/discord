@@ -139,7 +139,10 @@ module.exports = {
             .setDescription('Lookback window in hours (default 24, max 168)')
             .setRequired(false)
             .setMinValue(1)
-            .setMaxValue(168))),
+            .setMaxValue(168)))
+    .addSubcommand(sub =>
+      sub.setName('dedup-stats-24h')
+        .setDescription('Parlay-leg dedup stats over the last 24h (kept / dropped_duplicate / near_miss)')),
 
   async execute(interaction) {
     const sub = interaction.options.getSubcommand();
@@ -912,6 +915,79 @@ module.exports = {
         content: headerBlock + '\n' + summary,
         files: [file],
         components: [buttons],
+      });
+    }
+
+    // ── Dedup stats: kept / dropped_duplicate / near_miss counts over the last 24h ──
+    if (sub === 'dedup-stats-24h') {
+      if (process.env.OWNER_ID && interaction.user.id !== process.env.OWNER_ID) return interaction.reply({ content: '🚫', ephemeral: true });
+      await interaction.deferReply({ ephemeral: true });
+
+      const { db } = require('../services/database');
+
+      let summary, nearMisses;
+      try {
+        summary = db.prepare(`
+          SELECT
+            COUNT(*) FILTER (WHERE decision = 'kept') AS kept,
+            COUNT(*) FILTER (WHERE decision = 'dropped_duplicate') AS dropped,
+            COUNT(*) FILTER (WHERE decision = 'near_miss') AS near_miss,
+            COUNT(DISTINCT bet_id) AS bets_affected
+          FROM parlay_legs_dedup_events
+          WHERE created_at >= (strftime('%s', 'now') - 86400)
+        `).get();
+        nearMisses = db.prepare(`
+          SELECT bet_id, original_text, matched_against_text, reason
+          FROM parlay_legs_dedup_events
+          WHERE decision = 'near_miss'
+            AND created_at >= (strftime('%s', 'now') - 86400)
+          ORDER BY created_at DESC
+          LIMIT 10
+        `).all();
+      } catch (err) {
+        return interaction.editReply(`❌ Error querying parlay_legs_dedup_events: \`${err.message}\``);
+      }
+
+      const summaryLines = [
+        `**Parlay-leg Dedup Stats — last 24h**`,
+        `• Kept: ${summary.kept}`,
+        `• Dropped (duplicate): ${summary.dropped}`,
+        `• Near-miss (≤2 edits): ${summary.near_miss}`,
+        `• Bets affected: ${summary.bets_affected}`,
+      ];
+
+      const totalEvents = (summary.kept || 0) + (summary.dropped || 0) + (summary.near_miss || 0);
+      if (totalEvents === 0) {
+        return interaction.editReply(summaryLines.join('\n') + '\n\n_No dedup events recorded yet._');
+      }
+
+      const nearMissLines = nearMisses.length === 0
+        ? ['(no near-miss pairs in window)']
+        : nearMisses.map((r, i) => {
+            const a = String(r.original_text || '').slice(0, 60);
+            const b = String(r.matched_against_text || '').slice(0, 60);
+            const reason = r.reason || '';
+            return `${i + 1}. bet=${String(r.bet_id).slice(0, 8)} (${reason})\n   A: ${a}\n   B: ${b}`;
+          });
+
+      const body = summaryLines.join('\n')
+        + '\n\n**Top 10 near-miss pairs:**\n```\n'
+        + nearMissLines.join('\n')
+        + '\n```';
+
+      if (body.length <= 1990) {
+        return interaction.editReply(body);
+      }
+
+      const iso = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const fileName = `dedup-stats-24h-${iso}.txt`;
+      const filePlain = summaryLines.join('\n').replace(/\*\*/g, '')
+        + '\n\nTop 10 near-miss pairs:\n'
+        + nearMissLines.join('\n');
+      const file = new AttachmentBuilder(Buffer.from(filePlain, 'utf8'), { name: fileName });
+      return interaction.editReply({
+        content: summaryLines.join('\n') + '\nNear-miss table too long for Discord — see attachment.',
+        files: [file],
       });
     }
 
