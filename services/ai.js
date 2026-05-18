@@ -420,7 +420,17 @@ function toSafeNumber(value, fallback = null) {
 
 function normalizeBet(bet) {
   if (!bet || typeof bet !== 'object') return null;
-  const rawDesc = String(bet.description || '').trim().slice(0, 250);
+  // Cap description length defensively. Parlays legitimately run long because
+  // they contain N leg bullets — 250 truncated mid-bullet, causing leg-explosion
+  // false positives (services/grading.js:1647 guard). See docs/BACKLOG.md
+  // "Leg-explosion truncation root cause" (shipped 2026-05-18, services/ai.js:423).
+  const isParlay = String(bet.bet_type || '').toLowerCase() === 'parlay';
+  const descCap = isParlay ? 2000 : 250;
+  const rawDescFull = String(bet.description || '').trim();
+  const rawDesc = rawDescFull.slice(0, descCap);
+  if (rawDescFull.length > descCap) {
+    console.warn(`[normalizeBet] description truncated: raw_len=${rawDescFull.length} cap=${descCap} bet_type=${bet.bet_type || 'unknown'} preview="${rawDescFull.slice(0, 80)}..."`);
+  }
   if (!rawDesc) return null;
 
   // Run team and player normalization on description before storing
