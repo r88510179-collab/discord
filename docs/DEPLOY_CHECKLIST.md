@@ -76,6 +76,23 @@ fly ssh console -a bettracker-discord-bot -C 'node -e "console.log(require(\"bet
 
 The output must include the new columns. If it does not, the migration did not run.
 
+
+### 3a. Schema verified before any time-windowed or column-dependent query
+
+Before writing any SQL/JSON query that filters, joins, or projects on a column whose type and units I haven't *just* verified this session, run:
+
+```bash
+fly ssh console -a bettracker-discord-bot -C 'node -e "const db=require(\"better-sqlite3\")(\"/data/bettracker.db\"); console.log(JSON.stringify(db.prepare(\"PRAGMA table_info(<table>)\").all(), null, 2)); console.log(JSON.stringify(db.prepare(\"SELECT * FROM <table> ORDER BY rowid DESC LIMIT 1\").get(), null, 2));"'
+```
+
+Then confirm units and types from the sample row before writing the real query.
+
+This step is mandatory for any column ending in `_at`, `_time`, or any column compared against a date. SQLite stores timestamps as INTEGER (epoch seconds OR millis), TEXT (ISO), or REAL (Julian), and `datetime('now', ...)` returns ISO TEXT — comparing it against an INTEGER epoch column silently returns 0 rows with no error.
+
+**The 2026-05-18 example:** `pipeline_events.created_at` is INTEGER Unix epoch seconds. A query filtering `created_at >= datetime('now', '-7 days')` returned 0 rows and led to a false "no data found" conclusion on a merge-bug investigation. Correct filter: `created_at >= ?` with a JS-computed `Math.floor(Date.now()/1000) - 7*24*3600`.
+
+Also: pipeline_events has a dedicated `drop_reason` TEXT column. Do NOT `json_extract(payload, '$.dropReason')` — that returns nulls because the field lives in the column, not the payload.
+
 ### 4. Push succeeded
 
 ```bash

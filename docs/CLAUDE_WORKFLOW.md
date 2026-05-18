@@ -61,3 +61,10 @@ Surface Pro 5 hardware ceiling. gemma3:4b on CPU-only with 2 threads and 7.7GB R
 
 ### 2026-05-14 — SHIPPED: admin-log notice for human-channel drops (v434, 8d1668a)
 Stopgap visibility for slips that drop at PRE_FILTER_NO_BET_CONTENT or PRE_FILTER_AI_EMPTY_RESULT in human submission channels. Posts `⚠️ Slip dropped: **<capper>** in <#channel> — AI verdict: <ignore|indeterminate>. [View Original]` to ADMIN_LOG_CHANNEL_ID. Behavior otherwise unchanged. Full review-queue routing (option 3) deferred. See BACKLOG "Human-channel slip review routing" entry for full design.
+
+### 2026-05-18 — Queried INTEGER epoch column as if it were ISO TEXT
+While investigating the multi-image merge bug, I wrote `WHERE created_at >= datetime('now', '-7 days')` against `pipeline_events.created_at` which is INTEGER Unix epoch seconds. SQLite silently returned 0 rows (type mismatch, no error). Drew the wrong "no defect found" conclusion until Smokke pushed for a sanity check showing 0 MANUAL_REVIEW_HOLD rows in 7d, which forced a schema verification that surfaced the real format. Same class of bug as the v335 `is_bet !== true` regression: assumed shape rather than verified.
+
+**Rule 9: Verify column type AND units before writing any time-windowed or column-dependent query.**
+
+`PRAGMA table_info(<table>)` + inspect one recent row. SQLite is type-flexible and will compare an INTEGER column against an ISO string with zero errors and zero results. Memorized column shapes go stale across migrations; verify every session, not every project.
