@@ -271,25 +271,13 @@ Current `<parent>-leg<N>` ids don't stamp `drop_reason` on the parent bet row �
 
 **Why deferred:** Adding a "do not split alt-line props on `-`" rule to the system prompt could regress legitimate compound stats (NBA props like "Doncic - Triple Double Yes/No" sometimes use `-` legitimately). Single case across 435 parlays does not justify the regression risk. Park until pattern recurs.
 
-### Leg-explosion Category D — duplicate legs in verbose + shorthand form (recurring, Harry/Cody/Bookie pattern)
+### ✅ SHIPPED 2026-05-18 — Leg-explosion Category D (verbose+shorthand dedup)
 
-**Status:** Deferred. ~5 cases in audit, primarily Harry and Cody parlays.
+**v454 (a42ced7).** Replaced `dedupeParlayLegs` key with the Phase 1.5 validated normalization: verbose-prefix strip (`to score`/`to record`), stat-abbreviation canonicalization (`PTS`→`points`, `AST`→`assists`, `PRA(s)`→`points+rebounds+assists`, `3PM`/`3PTM`, `SOG`, `H+R+RBI`), leading betting-token reorder (`5+ Naz Reid Rebounds` → `naz reid 5+ rebounds`), whitespace-around-`+` collapse, then the legacy case/punct/whitespace flatten. Source-of-truth + smoke test in `scripts/test-dedup-normalization.js` — KNOWN_BAD 15/16, SHOULD_STAY_SEPARATE 10/10 (zero false positives). Real-world Phase 1.5 reduction on 5 sample bets: 31 → 17 legs.
 
-**Evidence pattern:** Bullets show 3 props in verbose form, but parlay_legs has 6 rows: 3 verbose + 3 shorthand. dedupeParlayLegs (services/database.js:381) normalizes case and strips punctuation but cannot recognize synonyms like "30+ Pts + Ast" vs "30+ PTS + AST" (case-only, deduped correctly) vs "Points + Rebounds + Assists" vs "PRAs" (different tokens, NOT deduped).
+Also added migration 024 (`parlay_legs_dedup_events`) for per-decision telemetry — fire-and-forget `setImmediate` INSERT logs `kept` / `dropped_duplicate` rows plus `near_miss` pairs (Levenshtein ≤ 2 on the post-normalization keys, capped at 5/bet) so the next generation of variant patterns surface in monitoring before they ship as Cat D'. New `/admin dedup-stats-24h` subcommand renders the 24h summary + top-10 near-miss list, mirroring the `pipeline-drops-24h` visual style. First production telemetry row landed within 60s of deploy (`kept` for "Thunder -6.5").
 
-**Examples:**
-- `b83ed2eb4c61` (Cody, NBA): 3 bullets, 6 legs — each prop appears once as "To Score N+ X" and once as "N+ X"
-- `e96a60e31f79` (Harry, NBA): 4 bullets, 8 legs — verbose ("De'Aaron Fox 5+ Ast") + shorthand ("De'Aaron Fox 5+ Assists")
-- `c59b47675295`, `519b84d7e77c`, `7822a83bb9a4`: same pattern across Harry and Cody
-
-**Hypothesis:** These cappers post slips where the image contains both a structured legs list AND a separate "research / summary" section that restates the same legs differently. The parser is extracting both forms. Need to inspect actual source images to confirm — not log evidence alone.
-
-**Fix paths (none chosen):**
-1. Extend dedupeParlayLegs with a sport-aware token-equivalence map (Pts ↔ Points, Reb ↔ Rebounds, Ast ↔ Assists, PRA ↔ Pts+Reb+Ast)
-2. System-prompt rule: "If you see the same player named twice with different prop wording, emit ONE leg using the verbose form"
-3. Post-parse: if N legs share the same player name and >50% token overlap, keep the longest one
-
-Option 1 is safest; option 3 risks killing legitimate same-player multi-prop parlays.
+**Residual / explicitly out of scope:** Case 11 in KNOWN_BAD — `"10+ Victor Wembanyama Rebounds"` vs `"V. WEMBANYAMA 10+ REBOUNDS"`. Requires player-initial expansion (`v.` → `victor`); deferred as a separate normalization category since the safe expansion needs roster context and risks false positives on legitimate first-initial cappers. Re-open when the dedup-events near-miss view shows a recurring `v wembanyama` ↔ `victor wembanyama` pair pattern.
 
 ### Leg-explosion Category E — buffer collision (rare, but cross-bet contamination)
 
