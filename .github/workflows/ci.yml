@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    name: Syntax check + reliability tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntactic validation (npm run check)
+        run: npm run check
+
+      - name: Reliability test suite (npm run test:reliability)
+        run: npm run test:reliability
+        env:
+          # Tests set their own mock env vars internally; provide safe defaults
+          # so any os.environ.get(...) calls with no default don't crash.
+          NODE_ENV: test
+
+      - name: Confirm DEPLOY_CHECKLIST.md exists and is non-empty
+        run: |
+          test -s docs/DEPLOY_CHECKLIST.md
+          echo "✅ DEPLOY_CHECKLIST.md present ($(wc -l < docs/DEPLOY_CHECKLIST.md) lines)"
+
+      - name: Confirm CLAUDE_WORKFLOW.md exists and is non-empty
+        run: |
+          test -s docs/CLAUDE_WORKFLOW.md
+          echo "✅ CLAUDE_WORKFLOW.md present ($(wc -l < docs/CLAUDE_WORKFLOW.md) lines)"
