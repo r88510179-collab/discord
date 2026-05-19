@@ -610,26 +610,38 @@ async function handleWarRoomInteraction(interaction) {
     const newOdds = oddsStr ? parseInt(oddsStr, 10) : null;
     const newUnits = unitsStr ? parseFloat(unitsStr) : null;
 
-    // Update all editable fields
-    if (newDesc || newOdds) {
-      db.prepare('UPDATE bets SET sport = ?, description = ?, odds = COALESCE(?, odds), units = COALESCE(?, units) WHERE id = ?')
-        .run(newSport || 'Unknown', newDesc, newOdds, newUnits, betId);
+    // Resolve capper attribution (strict — no auto-create, no rename).
+    // Run BEFORE field updates so a bad capper name rejects early.
+    let capperChanged = false;
+    if (newCapper) {
+      const existing = db.prepare('SELECT id, display_name FROM cappers WHERE LOWER(display_name) = LOWER(?) LIMIT 1').get(newCapper);
+      if (!existing) {
+        const allCappers = db.prepare('SELECT display_name FROM cappers ORDER BY display_name').all().map(c => c.display_name).join(', ');
+        return interaction.reply({
+          content: `❌ No capper named **"${newCapper}"** exists.\n\nValid cappers: ${allCappers}`,
+          ephemeral: true,
+        });
+      }
+      db.prepare('UPDATE bets SET capper_id = ? WHERE id = ?').run(existing.id, betId);
+      console.log(`[war_modal] Edit: reattributed bet ${betId.slice(0, 8)} to capper "${existing.display_name}" → ${existing.id.slice(0, 8)}`);
+      capperChanged = true;
+    }
 
-      // Update capper display name if changed
-      if (newCapper) {
-        const bet = db.prepare('SELECT capper_id FROM bets WHERE id = ?').get(betId);
-        if (bet?.capper_id) {
-          db.prepare('UPDATE cappers SET display_name = ? WHERE id = ?').run(newCapper, bet.capper_id);
-        }
+    // Update other editable fields and refresh the embed if anything changed
+    if (newDesc || newOdds || capperChanged) {
+      if (newDesc || newOdds) {
+        db.prepare('UPDATE bets SET sport = ?, description = ?, odds = COALESCE(?, odds), units = COALESCE(?, units) WHERE id = ?')
+          .run(newSport || 'Unknown', newDesc, newOdds, newUnits, betId);
       }
 
-      const current = db.prepare('SELECT * FROM bets WHERE id = ?').get(betId);
+      const current = db.prepare('SELECT b.*, c.display_name AS capper_name FROM bets b LEFT JOIN cappers c ON b.capper_id = c.id WHERE b.id = ?').get(betId);
 
       if (current) {
         const refreshedEmbed = new EmbedBuilder()
           .setTitle('Bet Pending Review (Edited)')
           .setColor(COLORS.info)
           .addFields(
+            { name: 'Capper', value: current.capper_name || 'Unknown', inline: true },
             { name: 'Sport', value: current.sport || 'Unknown', inline: true },
             { name: 'Type', value: (current.bet_type || 'straight').toUpperCase(), inline: true },
             { name: 'Odds', value: String(current.odds ?? 'N/A'), inline: true },
