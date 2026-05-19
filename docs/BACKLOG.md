@@ -862,3 +862,17 @@ The-odds-api.com free tier exhausted 2026-05-14 (498/500 credits used, returning
 
 ### Wire Cerebras grader model to env var
 `services/grading.js:1995` hardcodes the Cerebras model literal (`qwen-3-235b-a22b-instruct-2507` as of v445). The `CEREBRAS_MODEL` Fly secret exists but is unused at this call site, so model swaps require a code deploy. Either change the literal to `process.env.CEREBRAS_MODEL || 'qwen-3-235b-a22b-instruct-2507'` so swaps are `fly secrets set` + restart, or drop the unused secret to avoid confusion. Same pattern likely applies at `services/ai.js:44` — verify before touching. Low priority — current model works.
+
+## Discovered 2026-05-19 (Phase 1 session)
+
+### Bing scraper returns generic news (not just 402)
+Memory #30. `services/grading.js:1369-1404` parses `class="b_algo"` which Microsoft changed. Returns HTTP 200 with MLB.com/ESPN homepage HTML, not game recaps. Phase 1 (commit 9a19ba6) mitigates for MLB/NBA/NHL. Soccer/golf/tennis/MMA still affected. Fix: defensive multi-selector parsing + generic-news detector that returns "no reliable evidence" → PENDING instead of forcing a bad parse.
+
+### Resolver sidecar orphaned from grading hot path
+After commit 9a19ba6 (Phase 1), `services/resolver.js` no longer called from `gradeSingleBet`. Still required by `/admin snapshot` (commands/admin.js:763) and `/admin resolver-health` (commands/admin.js:999). zonetracker-resolver Fly sidecar app last deployed Apr 20 2026, paying compute for monitoring data that's now meaningless. Cleanup: repoint admin commands at sportsdata adapter health, then delete resolver.js + shut down sidecar.
+
+### Cappers table data integrity audit (post-5efcdd8)
+The capper-rename corruption bug at warRoom.js:619 (fixed in commit 5efcdd8 on 2026-05-19) means historical Edits that changed a capper name silently renamed that capper across ALL their bets. Audit query: `SELECT id, display_name, created_at FROM cappers ORDER BY display_name`. Look for: two cappers with very similar names (sign of split), one capper with disproportionate bet count vs others (sign of accidental merge), recently-created cappers with no bets attributed pre-creation-date (orphans). No corruption-recovery plan; document findings and decide case-by-case.
+
+### MANUAL_REVIEW_HOLD release-as-bet flow
+PR #25 (feature/hold-release-as-bet). Replaces plain-text admin notifications with embed + Release/Dismiss/View Original buttons. Release opens manual-creation modal (NOT AI re-run). Strict capper lookup. Awaiting review + merge + deploy. If merged: 71 backlog held events stay as audit history, forward-going only.
