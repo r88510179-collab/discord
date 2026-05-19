@@ -1,3 +1,4 @@
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const { parseBetText, parseBetSlipImage, evaluateTweet, validateParsedBet } = require('../services/ai');
 const { getOrCreateCapper, createBetWithLegs, isAuditMode, findPendingBetBySubject, gradeBet: gradeBetRecord, getBankroll, updateBankroll, db } = require('../services/database');
 const { betEmbed } = require('../utils/embeds');
@@ -6,6 +7,34 @@ const { sendStagingEmbed } = require('../services/warRoom');
 const { extractTextFromImage } = require('../services/ocr');
 const { gradeFromCelebration, finalizeBetGrading, calcProfit, canFinalizeBet, scheduleRecheckAfterDenial } = require('../services/grading');
 const { recordStage, recordDrop, recordError, makeIngestId } = require('../services/pipeline-events');
+
+// Sends the admin-log embed for MANUAL_REVIEW_HOLD with Release/Dismiss/View Original buttons.
+// Replaces the old plain-text notification so the admin can act on the hold from Discord.
+async function sendHoldReviewEmbed(client, { ingestId, capperName, channelId, aiVerdict, sample, messageUrl }) {
+  const adminLogId = process.env.ADMIN_LOG_CHANNEL_ID;
+  if (!adminLogId) return;
+  const adminLog = await client.channels.fetch(adminLogId).catch(() => null);
+  if (!adminLog) return;
+
+  const embed = new EmbedBuilder()
+    .setColor(0xF59E0B)
+    .setTitle('⚠️ Slip Held for Review')
+    .addFields(
+      { name: 'Capper', value: capperName || 'unknown', inline: true },
+      { name: 'Channel', value: `<#${channelId}>`, inline: true },
+      { name: 'AI verdict', value: aiVerdict || 'unknown' },
+      { name: 'Sample', value: (sample || '').slice(0, 200) || '(empty)' },
+    )
+    .setTimestamp();
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`hold:release:${ingestId}`).setLabel('Release as Bet').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`hold:dismiss:${ingestId}`).setLabel('Dismiss as Non-Bet').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setLabel('View Original').setStyle(ButtonStyle.Link).setURL(messageUrl),
+  );
+
+  await adminLog.send({ embeds: [embed], components: [row] });
+}
 
 // Invariant: PARSED payload's `type` and `betCount` derive from the same
 // `parsed` object and cannot disagree by construction. The legacy `isBet`
@@ -1100,14 +1129,6 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
         const humanChannelIds = (process.env.HUMAN_SUBMISSION_CHANNEL_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
         const isHumanChannel = humanChannelIds.includes(message.channel.id);
         if (isHumanChannel) {
-          try {
-            const adminLogId = process.env.ADMIN_LOG_CHANNEL_ID;
-            const adminLog = adminLogId ? await message.client.channels.fetch(adminLogId).catch(() => null) : null;
-            if (adminLog) {
-              await adminLog.send(`⚠️ Slip held for review: **${capperInfo?.name || message.author?.username || 'unknown'}** in <#${message.channel.id}> — AI verdict: \`ignore\`. [View Original](${message.url})`);
-            }
-          } catch (e) { console.log(`[ManualReviewNotice] Failed: ${e.message}`); }
-          console.log(`[Filter] Human-channel slip held for review (ai_is_bet_false): ${cleanText.substring(0, 60)}...`);
           stageAll('MANUAL_REVIEW_HOLD', {
             reason: 'ai_is_bet_false',
             channelId: message.channel.id,
@@ -1115,6 +1136,17 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
             messageUrl: message.url,
             sample: cleanText.slice(0, 80),
           });
+          try {
+            await sendHoldReviewEmbed(message.client, {
+              ingestId,
+              capperName: capperInfo?.name || message.author?.username || 'unknown',
+              channelId: message.channel.id,
+              aiVerdict: 'ignore (is_bet=false)',
+              sample: cleanText,
+              messageUrl: message.url,
+            });
+          } catch (e) { console.log(`[ManualReviewNotice] Failed: ${e.message}`); }
+          console.log(`[Filter] Human-channel slip held for review (ai_is_bet_false): ${cleanText.substring(0, 60)}...`);
           return;
         }
         console.log(`[Filter] AI rejected as non-bet: ${cleanText.substring(0, 60)}...`);
@@ -1142,14 +1174,6 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
         const humanChannelIds = (process.env.HUMAN_SUBMISSION_CHANNEL_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
         const isHumanChannel = humanChannelIds.includes(message.channel.id);
         if (isHumanChannel) {
-          try {
-            const adminLogId = process.env.ADMIN_LOG_CHANNEL_ID;
-            const adminLog = adminLogId ? await message.client.channels.fetch(adminLogId).catch(() => null) : null;
-            if (adminLog) {
-              await adminLog.send(`⚠️ Slip held for review: **${capperInfo?.name || message.author?.username || 'unknown'}** in <#${message.channel.id}> — AI verdict: \`indeterminate\` (is_bet=${parsed.is_bet}, bets=${parsed.bets?.length || 0}). [View Original](${message.url})`);
-            }
-          } catch (e) { console.log(`[ManualReviewNotice] Failed: ${e.message}`); }
-          console.log(`[Filter] Human-channel slip held for review (ai_indeterminate_no_bets): is_bet=${parsed.is_bet}, bets=${parsed.bets?.length || 0}`);
           stageAll('MANUAL_REVIEW_HOLD', {
             reason: 'ai_indeterminate_no_bets',
             is_bet_value: parsed.is_bet === undefined ? 'undefined' : String(parsed.is_bet),
@@ -1160,6 +1184,17 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
             messageUrl: message.url,
             sample: cleanText.slice(0, 80),
           });
+          try {
+            await sendHoldReviewEmbed(message.client, {
+              ingestId,
+              capperName: capperInfo?.name || message.author?.username || 'unknown',
+              channelId: message.channel.id,
+              aiVerdict: `indeterminate (is_bet=${parsed.is_bet}, bets=${parsed.bets?.length || 0})`,
+              sample: cleanText,
+              messageUrl: message.url,
+            });
+          } catch (e) { console.log(`[ManualReviewNotice] Failed: ${e.message}`); }
+          console.log(`[Filter] Human-channel slip held for review (ai_indeterminate_no_bets): is_bet=${parsed.is_bet}, bets=${parsed.bets?.length || 0}`);
           return;
         }
         console.log(`[Filter] AI returned indeterminate result (is_bet=${parsed.is_bet}, bets=${parsed.bets?.length || 0}): ${cleanText.substring(0, 60)}...`);
