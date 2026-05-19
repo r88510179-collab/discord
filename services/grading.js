@@ -1870,64 +1870,28 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
   const betTeamList = [...betTeams];
   console.log(`[AI Grader] Bet teams: [${betTeamList.join(', ')}] | Sport: ${sportContext || '?'}`);
 
-  // ── MLB StatsAPI RESOLVER PRE-CHECK ──
-  // Deterministic grading for MLB player props. Runs BEFORE ESPN so we
-  // only fall through to ESPN/AI when the resolver cannot decide.
-  // Non-MLB / non-player-prop bets skip this entirely.
-  if ((bet.sport || '').toUpperCase() === 'MLB' && looksLikePlayerProp(bet)) {
-    const parsed = parsePlayerPropDescription(bet.description || '');
-    if (parsed) {
-      const { resolvePlayerProp, mapToResolverStat } = require('./resolver');
-
-      // Pitching-context rewrite: bare "strikeouts" defaults to batter,
-      // so pitchers (whose slips often read "O 5.5 Strikeouts") would
-      // otherwise resolve against the wrong stat. If the description
-      // names a pitching cue, steer the mapper toward the pitcher key.
-      let statText = parsed.statText;
-      if (/\b(pitching|pitcher|thrown|pitched)\b/i.test(bet.description || '')
-          && /^strikeouts?$/i.test(statText.trim())) {
-        statText = `pitching ${statText}`;
+  // ── STRUCTURED DATA PRE-CHECK (replaces old MLB resolver) ──
+  // Runs structured-data adapters for MLB/NBA/NHL player props.
+  // Falls through to ESPN+AI for game-level bets and unsupported sports.
+  // Game-level bets continue through tryGradeViaESPN below (unchanged).
+  if (looksLikePlayerProp(bet) && ['MLB', 'NBA', 'NHL'].includes((bet.sport || '').toUpperCase())) {
+    try {
+      const { tryStructured } = require('./sportsdata');
+      const structured = await tryStructured(bet);
+      if (structured.resolved) {
+        const tag = `[Structured] ${bet.id?.slice(0, 8)} ${bet.sport} prop`;
+        console.log(`${tag} RESOLVED via ${structured.source}: ${structured.status} — ${structured.evidence}`);
+        audit.search_backend = structured.source;
+        audit.provider_used = structured.source;
+        audit.search_hits = 1;
+        return earlyReturn({
+          status: structured.status,
+          evidence: structured.evidence,
+        });
       }
-
-      const stat = mapToResolverStat(statText);
-      if (stat) {
-        const rawDate = bet.event_date || bet.created_at;
-        const gameDate = (rawDate && typeof rawDate === 'string' && rawDate.length >= 10)
-          ? rawDate.slice(0, 10)
-          : new Date(rawDate || Date.now()).toISOString().slice(0, 10);
-
-        try {
-          const r = await resolvePlayerProp({
-            player: parsed.player,
-            stat,
-            threshold: parsed.threshold,
-            direction: parsed.direction,
-            date: gameDate,
-            betId: bet.id,
-            betType: _auditCtx.is_parlay ? 'parlay_leg' : (bet.bet_type || 'prop'),
-          });
-          if (r.graded) {
-            console.log(`[grade] resolved via StatsAPI bet=${bet.id?.slice(0, 8)} source=${r.source} result=${r.result} actual=${r.actual}`);
-            audit.search_backend = 'resolver';
-            audit.provider_used = r.source || 'mlb.statsapi';
-            audit.search_hits = 1;
-            const playerName = r.player?.full_name || parsed.player;
-            return earlyReturn({
-              status: r.result,
-              evidence: `${playerName} ${stat}=${r.actual} vs ${parsed.direction} ${parsed.threshold} (${r.source || 'mlb.statsapi'})`,
-            });
-          }
-          if (r.reason === 'pending') {
-            console.log(`[grade] resolver says pending bet=${bet.id?.slice(0, 8)}, returning PENDING`);
-            audit.search_backend = 'resolver';
-            audit.provider_used = 'mlb.statsapi';
-            return earlyReturn({ status: 'PENDING', evidence: 'Game not yet Final (resolver)' });
-          }
-          console.log(`[grade] resolver non-decisive bet=${bet.id?.slice(0, 8)} reason=${r.reason} detail=${r.detail || ''} — falling through`);
-        } catch (err) {
-          console.error(`[Resolver] error (non-fatal, falling through): ${err.message}`);
-        }
-      }
+      console.log(`[Structured] ${bet.id?.slice(0, 8)} ${bet.sport} prop FALL-THROUGH: ${structured.reason} — "${(bet.description || '').slice(0, 60)}"`);
+    } catch (err) {
+      console.error(`[Structured] Error (non-fatal, falling through): ${err.message}`);
     }
   }
 
@@ -1991,8 +1955,11 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
   // cerebras 3.5% → groq-qwen unknown → openrouter unknown → groq-kimi 7.6% →
   // mistral unknown → ollama local → groq-llama8b 39% (last resort)
   const providers = [];
+  if (process.env.GROQ_API_KEY) {
+    providers.push({ name: 'groq-llama4-scout', url: 'https://api.groq.com/openai/v1/chat/completions', key: process.env.GROQ_API_KEY, model: 'meta-llama/llama-4-scout-17b-16e-instruct' });
+  }
   if (process.env.CEREBRAS_API_KEY) {
-    providers.push({ name: 'cerebras', url: 'https://api.cerebras.ai/v1/chat/completions', key: process.env.CEREBRAS_API_KEY, model: 'qwen-3-235b-a22b-instruct-2507' });
+    providers.push({ name: 'cerebras-gpt-oss', url: 'https://api.cerebras.ai/v1/chat/completions', key: process.env.CEREBRAS_API_KEY, model: 'gpt-oss-120b' });
   }
   if (process.env.GROQ_API_KEY) {
     providers.push({ name: 'groq-qwen', url: 'https://api.groq.com/openai/v1/chat/completions', key: process.env.GROQ_API_KEY, model: 'qwen/qwen3-32b' });
@@ -2053,7 +2020,7 @@ CRITICAL RULES:
           messages: [{ role: 'user', content: prompt }],
           response_format: { type: 'json_object' },
           temperature: 0,
-          max_tokens: 200,
+          max_tokens: 1000,
         }),
       });
 
