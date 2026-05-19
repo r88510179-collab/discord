@@ -27,6 +27,7 @@ const { handleMessage } = require('./handlers/messageHandler');
 const { handleWarRoomInteraction } = require('./services/warRoom');
 const { handleGradeInteraction } = require('./handlers/gradeButtons');
 const { handleAdminButtonInteraction } = require('./handlers/adminButtons');
+const { handleHoldInteraction } = require('./services/holdReview');
 const { runAutoGrade, probeBrave } = require('./services/grading');
 // Twitter poller loaded dynamically in ClientReady handler
 const { postGradeSummary, postDailyLeaderboard, updateScoreboard } = require('./services/dashboard');
@@ -164,6 +165,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await handleSlipFeedInteraction(interaction);
       } catch (err) {
         console.error('[SlipFeed] Interaction error:', err.message);
+      }
+      return;
+    }
+    // MANUAL_REVIEW_HOLD admin actions (release/dismiss buttons + release modal)
+    if (interaction.customId.startsWith('hold:')) {
+      try {
+        await handleHoldInteraction(interaction);
+      } catch (err) {
+        console.error('[HoldReview] Interaction error:', err.message);
       }
       return;
     }
