@@ -22,6 +22,9 @@ async function postNewPick(client, bet, capperName, sourceUrl) {
   const ch = await client.channels.fetch(chId).catch(() => null);
   if (!ch) return;
 
+  // Fall back to bet.source_url if caller didn't pass sourceUrl explicitly
+  const resolvedSourceUrl = sourceUrl || bet.source_url;
+
   const stats = bet.capper_id ? getCapperStats(bet.capper_id) : null;
   const record = stats
     ? `${stats.wins}W-${stats.losses}L (${stats.roi_pct >= 0 ? '+' : ''}${stats.roi_pct}% ROI)`
@@ -69,8 +72,8 @@ async function postNewPick(client, bet, capperName, sourceUrl) {
     new ButtonBuilder().setCustomId(`slipfeed:edit:${bet.id}`).setLabel('Edit').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId(`slipfeed:delete:${bet.id}`).setLabel('Delete').setStyle(ButtonStyle.Danger),
   ];
-  if (sourceUrl && sourceUrl.startsWith('https://')) {
-    mgmtButtons.push(new ButtonBuilder().setLabel('View Original').setStyle(ButtonStyle.Link).setURL(sourceUrl));
+  if (resolvedSourceUrl && resolvedSourceUrl.startsWith('https://')) {
+    mgmtButtons.push(new ButtonBuilder().setLabel('View Original').setStyle(ButtonStyle.Link).setURL(resolvedSourceUrl));
   }
   const mgmtRow = new ActionRowBuilder().addComponents(mgmtButtons);
 
@@ -139,9 +142,16 @@ async function postGradedResult(client, bet, result, profitUnits, evidence) {
     db.prepare('UPDATE bets SET slipfeed_message_id = NULL WHERE id = ?').run(bet.id);
   }
 
+  // Add View Original to receipts embed if source_url is present
+  const receiptComponents = [];
+  if (bet.source_url && bet.source_url.startsWith('https://')) {
+    receiptComponents.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setLabel('View Original').setStyle(ButtonStyle.Link).setURL(bet.source_url),
+    ));
+  }
   try {
     console.log(`[BetPost] Grade result → #slip-receipts (${chId})`);
-    await ch.send({ embeds: [embed] });
+    await ch.send({ embeds: [embed], components: receiptComponents });
   } catch (e) { console.error('[Receipts] Post error:', e.message); }
 
   // Post settled result to slip-feed with View Original only
