@@ -142,7 +142,20 @@ module.exports = {
             .setMaxValue(168)))
     .addSubcommand(sub =>
       sub.setName('dedup-stats-24h')
-        .setDescription('Parlay-leg dedup stats over the last 24h (kept / dropped_duplicate / near_miss)')),
+        .setDescription('Parlay-leg dedup stats over the last 24h (kept / dropped_duplicate / near_miss)'))
+    .addSubcommand(sub =>
+      sub.setName('replay-holds')
+        .setDescription('Re-emit hold embeds for unresolved MANUAL_REVIEW_HOLD rows (OWNER ONLY)')
+        .addIntegerOption(opt =>
+          opt.setName('hours')
+            .setDescription('Lookback window in hours (default 24, max 168)')
+            .setRequired(false)
+            .setMinValue(1)
+            .setMaxValue(168))
+        .addBooleanOption(opt =>
+          opt.setName('include_resolved')
+            .setDescription('Also re-post holds already released/dismissed (default false)')
+            .setRequired(false))),
 
   async execute(interaction) {
     const sub = interaction.options.getSubcommand();
@@ -916,6 +929,35 @@ module.exports = {
         files: [file],
         components: [buttons],
       });
+    }
+
+    // ── Replay holds: re-emit MANUAL_REVIEW_HOLD embeds for unresolved holds ──
+    if (sub === 'replay-holds') {
+      if (process.env.OWNER_ID && interaction.user.id !== process.env.OWNER_ID) {
+        return interaction.reply({ content: '🚫 Owner only.', ephemeral: true });
+      }
+      await interaction.deferReply({ ephemeral: true });
+
+      const hoursBack = interaction.options.getInteger('hours') ?? 24;
+      const includeResolved = interaction.options.getBoolean('include_resolved') ?? false;
+
+      try {
+        const { replayUnresolvedHolds } = require('../services/replayHolds');
+        const result = await replayUnresolvedHolds({ client: interaction.client, hoursBack, includeResolved });
+        if (result.error) {
+          return interaction.editReply(`❌ Replay failed: ${result.error}`);
+        }
+        return interaction.editReply(
+          `✅ Replay complete.\n` +
+          `- Found: ${result.found} hold rows in last ${hoursBack}h\n` +
+          `- Skipped (already resolved): ${result.skipped}\n` +
+          `- Replayed: ${result.replayed}\n` +
+          `Process them in #admin-log.`
+        );
+      } catch (err) {
+        console.error('[admin replay-holds] error:', err.message, err.stack);
+        return interaction.editReply(`❌ Replay failed: ${err.message}`);
+      }
     }
 
     // ── Dedup stats: kept / dropped_duplicate / near_miss counts over the last 24h ──
