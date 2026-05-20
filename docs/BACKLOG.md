@@ -876,3 +876,20 @@ The capper-rename corruption bug at warRoom.js:619 (fixed in commit 5efcdd8 on 2
 
 ### MANUAL_REVIEW_HOLD release-as-bet flow
 PR #25 (feature/hold-release-as-bet). Replaces plain-text admin notifications with embed + Release/Dismiss/View Original buttons. Release opens manual-creation modal (NOT AI re-run). Strict capper lookup. Awaiting review + merge + deploy. If merged: 71 backlog held events stay as audit history, forward-going only.
+## Recap / promo / sweat detection — drop instead of hold
+
+**Problem:** v447 MANUAL_REVIEW_HOLD traps everything the parser couldn't confidently classify as a bet. That includes legitimate non-bets — recaps ("cashed a +384 parlay last night"), capper promos ("Dinger Sheet — users get this every day"), sweat commentary ("7 points needed to cash"), and event hype ("Conference Finals are underway"). These should drop, not hold. Observed 2026-05-20: of 25 holds in 24h, ~15 were clearly non-bets that should never have hit admin-log.
+
+**Fix path:** Add a pre-hold heuristic in `handlers/messageHandler.js` at the `is_bet=false` and `ai_indeterminate` branches (~line 1095, 1141). Before staging MANUAL_REVIEW_HOLD, run a content classifier against the message text:
+
+- **Recap** — past-tense + result words ("cashed", "hit", "lost", "yesterday", "last night", "fell short"). Drop with `PRE_FILTER_RECAP`.
+- **Promo/sheet** — sheet/algorithm markers ("Dinger Sheet", "Bank Builder", "profit boost", "users get this", "load here", FanDuel/DraftKings promo terms). Drop with `PRE_FILTER_PROMO_SHEET`.
+- **Sweat/commentary** — in-progress watching ("needed for this to cash", "is there time", "if these guys", "let's go"). Drop with `PRE_FILTER_SWEAT_COMMENTARY`.
+
+Empty-text image-only posts (DatDude HRB pattern) keep hitting MANUAL_REVIEW_HOLD — those are the legitimate cases the hold flow exists for.
+
+**Heuristic starter** already exists in `services/replayHolds.js#guessDisposition` (shipped with `/admin replay-holds`). Promote that function to a production parser pre-filter once it's validated against more real data.
+
+**Validation:** Don't ship this until at least a week of v463 + replay data shows the false-positive rate on each pattern is < 5%. Otherwise we'll start dropping real bets that happen to contain a trigger word.
+
+**Tracking:** First spotted 2026-05-20 when 25-hold backlog audit showed recap/promo/sweat were 60%+ of the queue.
