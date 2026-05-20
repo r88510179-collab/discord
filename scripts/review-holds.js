@@ -172,6 +172,12 @@ function fmtOdds(o) {
   return o > 0 ? `+${o}` : `${o}`;
 }
 
+// Collapse newlines for single-line display (parsed descriptions can be
+// multi-line when the parser returns the whole tweet as the description).
+function oneLine(s) {
+  return String(s || '').replace(/\s*\n+\s*/g, ' / ').trim();
+}
+
 function fmtHeldTime(epochSec, nowSec = Math.floor(Date.now() / 1000)) {
   const d = new Date(epochSec * 1000);
   const iso = d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z');
@@ -331,7 +337,7 @@ function printReviewBlock({ index, total, hold, payload, sourceLabel, channelNam
     console.log(`is_bet:       ${isBetResult(out)}`);
     console.log('Bets:');
     out.bets.forEach((b, i) => {
-      console.log(`  ${i + 1}. ${b.description}    [odds: ${fmtOdds(normalizeOdds(b.odds))}]   [units: ${b.units != null ? b.units : 1}]`);
+      console.log(`  ${i + 1}. ${oneLine(b.description).slice(0, 120)}    [odds: ${fmtOdds(normalizeOdds(b.odds))}]   [units: ${b.units != null ? b.units : 1}]`);
     });
     console.log(BOTTOM_RULE);
   }
@@ -633,7 +639,7 @@ async function main() {
           }
 
           if (ARGS.dryRun) {
-            console.log(`[DRY-RUN] would release as bet (would-be ID: NEW) — ${capper.display_name} • ${fields.sport} • ${fmtOdds(fields.odds)} • ${fields.units}u • "${fields.description.slice(0, 60)}"${decision === 'released_with_edits' ? ' (edited)' : ''}`);
+            console.log(`[DRY-RUN] would release as bet (would-be ID: NEW) — ${capper.display_name} • ${fields.sport} • ${fmtOdds(fields.odds)} • ${fields.units}u • "${oneLine(fields.description).slice(0, 60)}"${decision === 'released_with_edits' ? ' (edited)' : ''}`);
             released++; reviewed++; handled = true;
             break;
           }
@@ -650,7 +656,7 @@ async function main() {
           if (!deduped) {
             try { await postNewPick(client, bet, capper.display_name, payload.messageUrl); }
             catch (e) { console.log(`  (postNewPick failed — non-fatal: ${e.message})`); }
-            console.log(`✓ Released as bet ${String(bet.id).slice(0, 8)} (${fields.description.slice(0, 40)}, ${fields.sport}, ${fmtOdds(fields.odds)}, ${fields.units}u)`);
+            console.log(`✓ Released as bet ${String(bet.id).slice(0, 8)} (${oneLine(fields.description).slice(0, 40)}, ${fields.sport}, ${fmtOdds(fields.odds)}, ${fields.units}u)`);
           } else {
             console.log(`⚠️ Bet already existed (fingerprint match): ${String(bet.id).slice(0, 8)}. Decision recorded, no duplicate created, hold resolved.`);
           }
@@ -708,6 +714,7 @@ module.exports = {
   computeConfidence,
   normalizeOdds,
   fmtOdds,
+  oneLine,
   fmtHeldTime,
   primaryBet,
   loadUnresolvedHolds,
