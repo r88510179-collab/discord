@@ -893,3 +893,88 @@ Empty-text image-only posts (DatDude HRB pattern) keep hitting MANUAL_REVIEW_HOL
 **Validation:** Don't ship this until at least a week of v463 + replay data shows the false-positive rate on each pattern is < 5%. Otherwise we'll start dropping real bets that happen to contain a trigger word.
 
 **Tracking:** First spotted 2026-05-20 when 25-hold backlog audit showed recap/promo/sweat were 60%+ of the queue.
+## Playwright shortlink expander (high value)
+
+**Problem:** Cappers post a substantial fraction of their picks as "Load here: bit.ly/X" tweets where the actual legs are behind a sportsbook share link or capper portal. Bot text-parses "$10 → $413 if these two guys go yard" and gets nothing extractable. Currently these slips hit MANUAL_REVIEW_HOLD and get dismissed because the human reviewer would also have to click through, and that's not scalable.
+
+Confirmed examples from 2026-05-19 audit:
+- Cody "+4039 Dinger Tuesday Parlay" — bit.ly/Dinger0519 → FanDuel betslip
+- Dan "+3024 Dinger Double" — bit.ly/Dinger-May19 → FanDuel betslip
+- Dan "+417 Spurs @ Thunder G1 SGP" — bit.ly/SASOKC-417 → FanDuel betslip
+- Harry "$10 into $422" — bit.ly/LOTTOEPL519 → FanDuel betslip
+- Dan "+280 Cavs @ Knicks Special" — bit.ly/CLE-NYKSpecial → FanDuel betslip
+
+Every one of these is a real pick the bot is missing.
+
+**Fix path:** Add a Playwright job to the existing Surface Pro scraper service. Given a shortlink URL, follow redirects, render the destination, scrape the bet slip DOM.
+
+Per-book selector hints:
+- FanDuel (`sportsbook.fanduel.com/addToBetslip` and `bit.ly/*` redirects): bet slip side panel renders client-side; legs are in DOM nodes with structured market/selection text + American odds. Pull legs + total odds.
+- DraftKings (`sportsbook.draftkings.com`): same pattern, different selectors.
+- Hard Rock (`share.hardrock.bet`): renders share page with selection list; structure matches existing HRB image slip schema.
+- Capper portals (`gamescript.ai/code=*`, `joinopuspicks.com`, etc.): sign-up wall, no public content — return null, fall back to manual review.
+
+**Integration point:** Add to `services/ai.js` parseBetText. When the text contains a known shortlink (bit.ly, t.co, sportsbook short domain) AND parser returns is_bet=false or empty bets, call out to the Playwright fetcher BEFORE staging MANUAL_REVIEW_HOLD. If fetcher returns legs, re-parse with the expanded leg list as if the bot had read the slip directly.
+
+**Tier-down behavior:** Playwright job has a 10s timeout. If it can't reach Surface Pro (Tailscale down) or the page hangs, fall through to existing MANUAL_REVIEW_HOLD path. Never block ingestion on the fetcher.
+
+**Why high value:** Single feature unlocks 5+ real picks per day from Cody/Dan/Harry alone, currently 100% lost. Same machinery extends to any future capper who shares via shortlink, which is most of them.
+
+**Tracking:** First spotted 2026-05-20 during 33-hold audit. 4 of 33 (12%) were link-only.
+
+---
+
+## On-ingest duplicate hold rows
+
+**Problem:** 11 of 33 unresolved holds in the 2026-05-20 audit (33%) were exact duplicates — same `messageUrl`, consecutive `ingest_id`s posted within milliseconds. The bot is processing the same Discord message twice and writing two MANUAL_REVIEW_HOLD events.
+
+Examples (each pair has identical messageUrl):
+- disc_1506048018334482494 + disc_1506048022465740860 (Cody Chourio)
+- disc_1506303475099635882 + disc_1506303479184887962 (Harry promo)
+- disc_1506312269137580142 + disc_1506312273902309668 (Cody Dinger Tuesday)
+- disc_1506357564319731792 + disc_1506357568212303953 (Cody Konnor Griffin)
+- disc_1506371420282687529 + disc_1506371424565198891 (Cody Mobley)
+- disc_1506372664271568916 + disc_1506372668465611044 (Dan Dinger Double)
+- disc_1506390284819234898 + disc_1506390289382903908 (Dan sheet)
+- disc_1506402866871664750 + disc_1506402871116173483 (Dan Bank Builder)
+- disc_1506426771044696184 + disc_1506426775364702268 (Dan algorithm sheet)
+- disc_1506484661247938773 + disc_1506484665232392242 (Dan sweat)
+
+Not the multi-image merge case (memory #20 — that was different ingest_ids with shared content). This is the same `messageUrl` getting two separate `ingest_id`s and both going through the pipeline.
+
+**Hypothesis:** Buffer collision or double-dispatch in `handlers/messageHandler.js`. Likely Discord event firing twice (MESSAGE_CREATE + something) or buffer-flush running twice. The `makeIngestId` function appears to generate unique IDs per call rather than per message — needs investigation.
+
+**Impact:** Doubles hold-table noise, doubles potential bet count if released, doubles all downstream grading work. Not yet known if this duplication extends past the hold path into successful-bet inserts (memory #15 LockedIn ingestion restore noted volume increase that may have been masked by this).
+
+**Fix path:**
+1. Query `pipeline_events` for any `messageUrl` with 2+ MANUAL_REVIEW_HOLD events in last 30 days — quantify
+2. Same query for RECEIVED stage events grouped by source_ref — does duplication start at message receipt or later
+3. If duplication is at receipt: probably a `messageCreate` handler registered twice or a shard event collision. Check `bot.js` event registration.
+4. If duplication is at staging: race between buffer flush timer and direct dispatch path. Inspect `handlers/messageHandler.js` buffer logic.
+5. After root cause: add dedup key based on `(channelId, messageId)` at ingest_id assignment — both dupes get same ingest_id, second one short-circuits.
+
+**Severity:** Quality-of-data issue, not data-corruption (dismissals/releases are per-ingest_id so duplicates are tracked correctly). But it's masking the real volume signal in every dashboard.
+
+**Tracking:** First confirmed 2026-05-20 audit. Investigate before promoting recap detection (it would 2x the dismiss rate metrics incorrectly).
+
+---
+
+## GameScript / capper portal data sheet ingestion
+
+**Problem:** Multiple cappers (Dan, Harry, Cody) post daily prop projection sheets behind `gamescript.ai/code=X` links. These sheets contain real player-prop data: line projections, hit-check stats, NRFI data. Currently dismissed as "promo" because the slip body is just sales copy ("Don't miss another sheet"), but the underlying content has actual value if we can get to it.
+
+**Examples from 2026-05-20:**
+- Dan: "MLB Dinger Sheet — users get this every day plus Hit Check, Matchup and NRFI data" → gamescript.ai/code=danx
+- Harry: "Premier League Soccer SGPs + 20+ plays on NBA, MLB & WNBA + AI Backed Picks with research + Data Sheets to help build winners" → gamescript.ai/?code=HLX
+- Dan: "I used my algorithm to project players' prop lines for Cavaliers @ Knicks" → gamescript.ai/code=danx (Knicks sheet)
+
+**Why it's hard:** Capper portals are auth-gated. Public URL hits a sign-up wall. To access the sheet you need either (a) a free-tier account on the capper's portal, (b) reverse-engineer the API endpoint behind the rendered sheet, or (c) browser-extension-style scraping of an authenticated session.
+
+**Possible paths:**
+- **(a) Per-capper portal account.** Sign up for free tier on GameScript with one capper code. Use Playwright on Surface Pro to log in once, persist cookies, scrape sheets daily. Risk: ToS violation if portal disallows scraping; legal review needed before deploying.
+- **(b) API discovery.** Inspect network traffic on a real sheet view. If the data comes from a public JSON endpoint, no auth needed. Probably auth-gated but worth checking.
+- **(c) GameScript-as-data-source partnership.** Reach out to GameScript directly about API access. Outside engineering scope but lower-risk path.
+
+**Lower priority than Playwright shortlink expander.** Shortlink fixes 5+ real-bet picks per day immediately. Sheets are aspirational data that could power future features (Jarvis suggestions, prop hit-rate validation) but doesn't directly unlock existing capper bets.
+
+**Tracking:** First flagged 2026-05-20. Park until shortlink expander ships, then revisit with concrete data-use case.
