@@ -1321,4 +1321,4 @@ async function reportErrorToAdmin(error, context, client) {
   }
 }
 
-module.exports = { handleMessage, processSlipImage, buildParsedPayload };
+module.exports = { handleMessage, processSlipImage, buildParsedPayload, sendHoldReviewEmbed };
