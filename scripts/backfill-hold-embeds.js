@@ -37,6 +37,14 @@
 //  - Unresolved-hold loading mirrors scripts/review-holds.js loadUnresolvedHolds:
 //    dedup by ingest_id keeping the MOST RECENT hold row, then sort ASC (oldest
 //    first). Same semantics as holdReview.loadHoldEvent (ORDER BY created_at DESC).
+//  - SECOND-LEVEL dedup by messageUrl (beyond the prompt's "dedup by ingest_id").
+//    Prod data showed buffered batches: one stageAll('MANUAL_REVIEW_HOLD') over a
+//    multi-message buffer writes a hold row per constituent message id (distinct
+//    ingest_ids) all sharing ONE primary messageUrl. The live pipeline calls
+//    sendHoldReviewEmbed only ONCE per aggregated message, so collapsing by
+//    messageUrl (keep the ingest_id matching the permalink, else oldest) posts one
+//    embed per held message — matching live behavior and the prompt's stated intent
+//    ("one embed per hold"). Collapsed dupes are reported as DUP-SKIP, not hidden.
 //  - aiVerdict is the raw payload `reason` ("ai_is_bet_false" /
 //    "ai_indeterminate_no_bets") per the prompt. The live ingest-time embed
 //    passes a prettier string ("ignore (is_bet=false)"); backfilled embeds show
@@ -118,6 +126,45 @@ function buildPlan(holds) {
   });
 }
 
+// Trailing message-id segment of a Discord permalink (.../channels/G/C/<id>).
+function urlMessageId(messageUrl) {
+  const tail = String(messageUrl || '').split('/').pop() || '';
+  const m = tail.match(/^(\d+)/);
+  return m ? m[1] : null;
+}
+
+// Second-level dedup, beyond ingest_id: a buffered batch of N Discord messages
+// produces N MANUAL_REVIEW_HOLD rows (one per message id via stageAll) that all
+// carry the SAME primary messageUrl, but the live pipeline calls
+// sendHoldReviewEmbed only ONCE per aggregated message. So collapse postable
+// entries by messageUrl and post one embed per held message — matching live
+// behavior. Representative = the ingest_id whose suffix matches the permalink's
+// message id (the primary), else the oldest. Returns the reps (sorted oldest
+// first) and the collapsed duplicates (for transparent reporting).
+function dedupByMessageUrl(postableEntries) {
+  const groups = new Map();
+  for (const e of postableEntries) {
+    if (!groups.has(e.messageUrl)) groups.set(e.messageUrl, []);
+    groups.get(e.messageUrl).push(e);
+  }
+  const reps = [];
+  const collapsed = [];
+  for (const [url, entries] of groups) {
+    let rep = entries[0];
+    if (entries.length > 1) {
+      const mid = urlMessageId(url);
+      rep = entries.find((e) => e.ingestId === `disc_${mid}`)
+        || entries.slice().sort((a, b) => a.createdAt - b.createdAt)[0];
+      for (const e of entries) {
+        if (e.ingestId !== rep.ingestId) collapsed.push({ ...e, keptIngestId: rep.ingestId });
+      }
+    }
+    reps.push(rep);
+  }
+  reps.sort((a, b) => a.createdAt - b.createdAt);
+  return { reps, collapsed };
+}
+
 function printLine(p, channelDisplay, status) {
   const capper = p.payload.capper || 'unknown';
   const reason = p.payload.reason || '—';
@@ -140,23 +187,31 @@ async function main() {
   const { db } = require('../services/database');
 
   const holds = loadUnresolvedHoldsSince(db, SINCE_EPOCH);
-  const plan = buildPlan(holds);
-  const postable = plan.filter((p) => p.postable);
+  const plan = buildPlan(holds); // sorted oldest-first by loadUnresolvedHoldsSince
+  const postableRaw = plan.filter((p) => p.postable);
   const skippable = plan.filter((p) => !p.postable);
+  const { reps, collapsed } = dedupByMessageUrl(postableRaw);
 
-  console.log(`\nUnresolved MANUAL_REVIEW_HOLD slips since ${SINCE_ISO} (epoch ${SINCE_EPOCH}): ${plan.length}`);
-  console.log(`  postable: ${postable.length}   skipped (no messageUrl): ${skippable.length}`);
+  // Status per ingest_id, for a chronological listing of every hold found.
+  const status = new Map();
+  for (const r of reps) status.set(r.ingestId, 'WOULD-POST');
+  for (const c of collapsed) status.set(c.ingestId, `DUP-SKIP(kept ${c.keptIngestId})`);
+  for (const s of skippable) status.set(s.ingestId, 'SKIP(no messageUrl)');
+
+  console.log(`\nUnresolved MANUAL_REVIEW_HOLD slips since ${SINCE_ISO} (epoch ${SINCE_EPOCH}): ${plan.length} ingest_ids`);
+  console.log(`  postable messages (deduped by messageUrl): ${reps.length}`);
+  console.log(`  duplicate-messageUrl collapses: ${collapsed.length}   missing messageUrl: ${skippable.length}`);
   console.log(`  mode: ${args.dryRun ? 'DRY-RUN (no posts)' : 'COMMIT (will post)'}\n`);
 
   // ── DRY-RUN: list only, never touch Discord ──
   if (args.dryRun) {
     for (const p of plan) {
-      printLine(p, p.payload.channelId, p.postable ? 'WOULD-POST' : 'SKIP(no messageUrl)');
+      printLine(p, p.payload.channelId, status.get(p.ingestId) || '?');
     }
     if (!process.env.ADMIN_LOG_CHANNEL_ID) {
       console.log('\n⚠️  ADMIN_LOG_CHANNEL_ID is NOT set here — a --commit run would abort (exit 1) and post nothing.');
     }
-    console.log(`\nDRY-RUN: would post ${postable.length} embeds. Re-run with --commit to actually post.`);
+    console.log(`\nDRY-RUN: would post ${reps.length} embeds (collapsed ${collapsed.length} duplicate-messageUrl holds, ${skippable.length} missing url). Re-run with --commit to actually post.`);
     return 0;
   }
 
@@ -169,9 +224,8 @@ async function main() {
     console.error('ABORT: DISCORD_TOKEN not set — cannot log in. Run inside the Fly machine (fly ssh console). Exit 1.');
     return 1;
   }
-  if (postable.length === 0) {
-    for (const p of skippable) printLine(p, p.payload.channelId, 'SKIP(no messageUrl)');
-    console.log(`\nTotal holds found: ${plan.length}, posted: 0, failed: 0, skipped: ${skippable.length}`);
+  if (reps.length === 0) {
+    console.log(`\nTotal holds found: ${plan.length}, posted: 0, failed: 0, skipped: ${collapsed.length + skippable.length}`);
     console.log('Nothing postable. Done.');
     return 0;
   }
@@ -189,7 +243,7 @@ async function main() {
     client.once('clientReady', async () => {
       let posted = 0;
       let failed = 0;
-      const skipped = skippable.length;
+      const skipped = collapsed.length + skippable.length;
       try {
         // Verify the admin-log channel resolves up front, so a silent
         // early-return inside sendHoldReviewEmbed can't be miscounted as POSTED.
@@ -201,13 +255,14 @@ async function main() {
           return;
         }
 
-        const nameCache = await buildChannelNameCache(client, postable.map((p) => p.payload.channelId));
+        const nameCache = await buildChannelNameCache(client, reps.map((p) => p.payload.channelId));
         const chName = (p) => nameCache.get(p.payload.channelId) || p.payload.channelId;
 
+        for (const c of collapsed) printLine(c, chName(c), `DUP-SKIP(kept ${c.keptIngestId})`);
         for (const p of skippable) printLine(p, chName(p), 'SKIP(no messageUrl)');
 
-        for (let i = 0; i < postable.length; i++) {
-          const p = postable[i];
+        for (let i = 0; i < reps.length; i++) {
+          const p = reps[i];
           try {
             await sendHoldReviewEmbed(client, {
               ingestId: p.ingestId,
@@ -223,7 +278,7 @@ async function main() {
             failed++;
             printLine(p, chName(p), `FAILED(${e.message})`);
           }
-          if (i < postable.length - 1) await sleep(POST_DELAY_MS);
+          if (i < reps.length - 1) await sleep(POST_DELAY_MS);
         }
       } catch (err) {
         console.error('[backfill] fatal during posting:', err.message);
@@ -252,6 +307,8 @@ module.exports = {
   parsePayload,
   loadUnresolvedHoldsSince,
   buildPlan,
+  urlMessageId,
+  dedupByMessageUrl,
   SINCE_EPOCH,
   SINCE_ISO,
 };
