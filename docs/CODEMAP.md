@@ -10,6 +10,134 @@ When a session discovers a new location worth remembering, update this file in t
 - "L1132" means line 1132 in that file
 - If a line number drifts more than ±20 lines from reality, refresh the section
 
+## Schemas (PRAGMA-verified 2026-05-21)
+
+Verified via `PRAGMA table_info(<table>)` against production `/data/bettracker.db`. Re-verify after any migration.
+
+### `bets` — primary bet store
+
+PK is `id` (TEXT, hex hash — **NOT** `bet_id`, common memory error).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | TEXT PK | hex hash, never `bet_id` |
+| capper_id | TEXT | FK → cappers.id |
+| sport | TEXT NOT NULL | "Unknown" is a real value; ~46% of May voids |
+| league | TEXT | |
+| bet_type | TEXT NOT NULL | "straight", "parlay", "prop", etc |
+| description | TEXT NOT NULL | newline-separated for parlays |
+| odds | INTEGER | American odds |
+| units | REAL | |
+| result | TEXT | "pending" / "win" / "loss" / "push" / "void" |
+| profit_units | REAL | signed: positive=win, negative=loss |
+| grade | TEXT | "WIN" / "LOSS" / "VOID" / "PUSH" (uppercase) or NULL while pending |
+| grade_reason | TEXT | human-readable explanation, includes `[retro-fix YYYY-MM-DD]` for manual fixes |
+| event_date | TEXT | 98.4% null — NOT a void driver |
+| graded_at | TEXT | ISO timestamp |
+| source | TEXT | see §Source enum below |
+| source_url | TEXT | Discord message URL — populated on most paths; audit pending |
+| source_channel_id | TEXT | |
+| source_message_id | TEXT | |
+| fingerprint | TEXT | dedup key |
+| raw_text | TEXT | original message text |
+| created_at | TEXT | ISO timestamp |
+| review_status | TEXT | see §Enums below |
+| wager | REAL | dollar wager |
+| payout | REAL | dollar payout if won |
+| season | TEXT NOT NULL | |
+| is_ladder | INTEGER | 0/1 |
+| ladder_step | INTEGER | |
+| slipfeed_message_id | TEXT | |
+| source_tweet_id | TEXT | |
+| source_tweet_handle | TEXT | |
+| grading_source_url | TEXT | URL the grader used as evidence |
+| grading_attempts | INTEGER | mig 016 atomic guard; >100 = pre-P0 storm |
+| grading_last_attempt_at | TEXT | |
+| grading_next_attempt_at | TEXT | reaper-driven |
+| grading_last_failure_reason | TEXT | |
+| grading_lock_until | TEXT | optimistic lock |
+| grading_state | TEXT | "pending" / "graded" / "locked" — mig 016 atomic guard |
+| drop_reason | TEXT | first-class column |
+| drop_reason_set_at | INTEGER | epoch sec |
+
+### `pipeline_events`
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | INTEGER PK | autoincrement |
+| ingest_id | TEXT | groups all events for one Discord message |
+| bet_id | TEXT | populated once a bet row exists |
+| source_type | TEXT NOT NULL | "discord" / "tweet" / "manual" |
+| source_ref | TEXT | original ref |
+| stage | TEXT NOT NULL | see §Enums |
+| event_type | TEXT NOT NULL | event variant within stage |
+| drop_reason | TEXT | when stage="DROPPED" |
+| payload | TEXT | JSON blob |
+| created_at | INTEGER | **epoch sec, NOT ISO** — see DB quirks |
+
+### `hold_review_decisions` (mig 025)
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | INTEGER PK | |
+| ingest_id | TEXT NOT NULL | links to pipeline_events |
+| hold_payload | TEXT | original hold context |
+| reparse_attempted | INTEGER NOT NULL | 0/1 |
+| reparse_input_source | TEXT | "text" / "image" / "both" |
+| reparse_input_text | TEXT | |
+| reparse_output | TEXT | JSON of parser result |
+| reparse_confidence | TEXT | confidence label |
+| human_decision | TEXT NOT NULL | "release" / "dismiss" / "edit" |
+| human_edits | TEXT | JSON of edits applied |
+| source_label | TEXT | dismiss reason: "promo_sheet" / "recap_or_sweat" / etc |
+| bet_id | TEXT | populated if released |
+| reviewed_by | TEXT | Discord user ID |
+| created_at | INTEGER NOT NULL | epoch sec |
+
+### `parlay_legs_dedup_events` (mig 024)
+
+`id INTEGER PK, bet_id TEXT NOT NULL, ingest_id TEXT, decision TEXT NOT NULL, original_text TEXT NOT NULL, canonical_key TEXT NOT NULL, matched_against_text TEXT, matched_against_key TEXT, reason TEXT, created_at INTEGER NOT NULL`
+
+### `parlay_legs`
+
+`id TEXT PK, bet_id TEXT, description TEXT NOT NULL, odds INTEGER, result TEXT, created_at TEXT, evidence TEXT, graded_at TEXT, sport TEXT`
+
+### `grading_audit`
+
+Every grader attempt logged. Cols: `bet_id, attempt_num, timestamp INTEGER, sport_in/out, reclassified, is_parlay, leg_index, leg_count, search_backend, search_query, search_hits, search_duration_ms, provider_used, raw_response, guards_passed, guards_failed, final_status, final_evidence`.
+
+### `regrade_results`, `regrade_batches`, `bet_grade_history` (mig 022)
+
+Reconciliation project. `bet_grade_history` archives old grades on regrade. `regrade_batches` tracks 25-bet export batches. `regrade_results` holds Claude+ChatGPT regrade outputs with `pile_flag` for review.
+
+### Other tables
+
+`bankrolls, bet_props, bot_health_log, cappers, daily_snapshots, processed_tweets, resolver_events (orphaned), scan_state, schema_migrations, search_backend_calls, settings, tracked_twitter, twitter_audit_log, user_bets, users, vision_failures`. Run `PRAGMA table_info(<name>)` before assuming structure for any of these.
+
+## Enums (live-verified 2026-05-21)
+
+**`bets.review_status`** (distinct values, with prod counts):
+- `confirmed` (673)
+- `needs_review` (269)
+- `auto_void_unscoped_bet` (368)
+- `auto_void_no_searchable_data` (169)
+- `auto_void_no_data` (9)
+- `discarded_as_recap` (new 2026-05-21, Cody recap fix)
+
+**`bets.result`**: `pending`, `win`, `loss`, `push`, `void`
+
+**`bets.grade`**: `WIN`, `LOSS`, `VOID`, `PUSH` (uppercase) or NULL while pending
+
+**`bets.grading_state`** (mig 016): `pending`, `graded`, `locked`
+
+**`bets.source`** (observed): `vision_slip`, `hold_review_script`, `manual_hold_release`, `untracked_win`. Set wherever `createBetWithLegs` is called.
+
+**`pipeline_events.stage`**: `STAGE_ENTER`, `EXTRACTED`, `PARSED`, `MANUAL_REVIEW_HOLD`, `DROPPED`, `GRADE_*` variants. Enum lives at `services/pipeline-events.js:18`.
+
+**`hold_review_decisions.human_decision`**: `release`, `dismiss`, `edit`
+
+**`parlay_legs_dedup_events.decision`**: `kept`, `dropped_duplicate`, `near_miss`
+
 ## Ingestion pipeline — entry to staging
 
 ### handlers/messageHandler.js
@@ -108,6 +236,8 @@ When a session discovers a new location worth remembering, update this file in t
 | --- | --- |
 | `handleHoldInteraction` import | 30 |
 | Interaction handler routing | 135 (`InteractionCreate`); `hold:` routing L172 → `handleHoldInteraction` L174 |
+| HUMAN_SUBMISSION_CHANNEL_IDS parsing | 256–258, 517 |
+| RECEIPTS_CHANNEL_ID / SLIP_FEED_CHANNEL_ID fallback (recap channel) | 729 |
 
 ### commands/admin.js
 | What | Line(s) |
@@ -125,6 +255,7 @@ When a session discovers a new location worth remembering, update this file in t
 | retro-parlay-loss.js | Bug A Part 2 retro-fix (already run, kept for reference) |
 | regrade-export.js | Pull batches of 25 pending bets for parallel Claude/ChatGPT grading |
 | test-dedup-normalization.js | Validates parlay leg dedup normalizer |
+| backfill-hold-embeds.js | v447 hold-embed backfill (PR #29) |
 
 ## Migrations
 
@@ -144,6 +275,7 @@ When a session discovers a new location worth remembering, update this file in t
 - `pipeline_events.drop_reason` is its own column. No json_extract needed.
 - Always run `PRAGMA table_info(<table>)` before time-windowed queries.
 - DB lives at `/data/bettracker.db` on Fly. Local clone reads via `fly ssh console`.
+- **Scripts in `/tmp` cannot `require('better-sqlite3')`** — `/tmp` has no node_modules. Always `cd /app` before running, or copy script under `/app/scripts/`.
 
 ## Env vars that gate behavior
 
