@@ -978,3 +978,51 @@ Not the multi-image merge case (memory #20 — that was different ingest_ids wit
 **Lower priority than Playwright shortlink expander.** Shortlink fixes 5+ real-bet picks per day immediately. Sheets are aspirational data that could power future features (Jarvis suggestions, prop hit-rate validation) but doesn't directly unlock existing capper bets.
 
 **Tracking:** First flagged 2026-05-20. Park until shortlink expander ships, then revisit with concrete data-use case.
+
+## 🚨 P1 — Twitter-relay parser drops real picks (visible-text variant)
+
+**Surfaced 2026-05-21** during PR #31 (pure-slip hold-skip gate) channel sampling. The 4 gambling-twitter-* channels were intentionally left un-bypassed because Cody and Harry post real picks that get held. Sampling confirmed those holds contain real bets the parser is fumbling — not promo, not shortlink-gated, the bet text is *right there in the tweet*.
+
+**Distinct from existing entries:**
+- L284 (Harry SGP header absorbed as legs) — slip-image parser, not text-parse
+- L901 (Cody Dinger Tuesday shortlink) — bet behind bit.ly the bot can't follow
+
+This is a third bug: bet legs visible in tweet text, parser still returns `is_bet=false` or `ai_indeterminate`.
+
+**Pattern:** `<sport emoji> <category line> / <player> <line> <market>` with optional commentary after.
+
+**Confirmed live samples (from MANUAL_REVIEW_HOLD events 2026-05-21):**
+- Cody (channel `1284613911055695893`, 28 holds/14d):
+  - `🏀 NBA Best Bet / 🟠 OG Anumoby O20.5 PRs` — player + line + market in plain text
+  - `🏀 Here's my favorite NBA straight tonight… / 🗡️ Evan Mobley Over 27.5 PRAs`
+  - `🏆 MLB Best Bet / Chourio had two hits to cash for us yesterday. Let's go on anot[her]…` (recap-framed, bet in continuation)
+  - `💥 +4039 Dinger Tuesday Parlay / 👉🏼 if these two guys go yard…` (parlay header + legs)
+- Harry (channel `1284620792713318472`, 16 holds/14d):
+  - `🏀 NBA Pick of the Day… / 👉🏼 Karl-Anthony Towns o10.5 Rebounds`
+  - `🏀 NBA Pick of the Day… / Dylan Harper o19.5 PRA's`
+  - `🏀 NBA Pick of the Day… / 👉🏼 iHart Over 8.5 Rebounds`
+
+**Hypotheses to test:**
+1. Emoji-prefixed lines confuse the parser's bet-detection heuristic (returns `is_bet=false`).
+2. Header phrasing like "Best Bet" / "Pick of the Day" / "favorite straight" is being read as marketing copy rather than bet framing.
+3. The 80-char sample preview in `pipeline_events` is a red herring — LLM gets the full text but may still bail on the line break between header and bet content.
+
+**Why not bypass:** Bypassing these 4 channels = silently dropping these real picks (bypass is a one-way drop, not silent accept). Confirmed Cody has ~3 real picks per 15-hold sample, Harry ~3/15. Bypassing would delete those.
+
+**Why P1:** Active data loss. Memory tracks ~44 holds over 14 days across Cody+Harry alone, of which sampling suggests ~20% are real picks (≈9 lost picks/14d, ≈18/month).
+
+**Fix surface area:**
+- `services/ai.js` `parseBetText` system prompt — likely needs an explicit case for emoji-prefixed Twitter-style picks.
+- Or pre-processor that strips emoji/decorative chars before the LLM sees the text.
+- Verify by re-running the failing samples through a smoke test after any prompt change.
+
+**Cross-references:**
+- PR #31 (commit a1b184b, 2026-05-21) — pure-slip hold-skip gate; explicitly chose NOT to bypass these 4 channels for this reason
+- pipeline_events query that found the pattern:
+```sql
+  SELECT json_extract(payload, '$.sample') AS sample, json_extract(payload, '$.reason') AS reason
+  FROM pipeline_events
+  WHERE stage = 'MANUAL_REVIEW_HOLD'
+    AND json_extract(payload, '$.channelId') IN ('1284613911055695893', '1284620792713318472')
+  ORDER BY created_at DESC LIMIT 30;
+```
