@@ -1128,7 +1128,11 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
       if (parsed.is_bet === false) {
         const humanChannelIds = (process.env.HUMAN_SUBMISSION_CHANNEL_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
         const isHumanChannel = humanChannelIds.includes(message.channel.id);
-        if (isHumanChannel) {
+        // PR #2: pure-slip channels skip MANUAL_REVIEW_HOLD staging. Same comma-split + trim
+        // contract as HUMAN_SUBMISSION_CHANNEL_IDS above; empty/unset → [] → no bypass (unchanged).
+        const pureSlipChannelIds = (process.env.PURE_SLIP_CHANNEL_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+        const isPureSlip = pureSlipChannelIds.includes(message.channel.id);
+        if (isHumanChannel && !isPureSlip) {
           stageAll('MANUAL_REVIEW_HOLD', {
             reason: 'ai_is_bet_false',
             channelId: message.channel.id,
@@ -1148,6 +1152,19 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
           } catch (e) { console.log(`[ManualReviewNotice] Failed: ${e.message}`); }
           console.log(`[Filter] Human-channel slip held for review (ai_is_bet_false): ${cleanText.substring(0, 60)}...`);
           return;
+        }
+        if (isHumanChannel && isPureSlip) {
+          // Pure-slip channel: skip the hold. Record a trace-only marker (STAGE_ENTER, not a
+          // DROP — stays out of /admin pipeline-drops-24h) and fall through to the existing
+          // PRE_FILTER_NO_BET_CONTENT drop/return below, unchanged.
+          stageAll('PURE_SLIP_SKIP_HOLD', {
+            reason: 'ai_is_bet_false',
+            channelId: message.channel.id,
+            capper: capperInfo?.name || message.author?.username || 'unknown',
+            messageUrl: message.url,
+            sample: cleanText.slice(0, 80),
+          });
+          console.log(`[PureSlip] Skipped MANUAL_REVIEW_HOLD (ai_is_bet_false) for pure-slip channel ${message.channel.id}.`);
         }
         console.log(`[Filter] AI rejected as non-bet: ${cleanText.substring(0, 60)}...`);
         dropAll('DROPPED', 'PRE_FILTER_NO_BET_CONTENT', { filter: 'ai_is_bet_false', sample: cleanText.slice(0, 80) });
@@ -1173,7 +1190,11 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
       if (parsed.is_bet !== true && (!parsed.bets || parsed.bets.length === 0)) {
         const humanChannelIds = (process.env.HUMAN_SUBMISSION_CHANNEL_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
         const isHumanChannel = humanChannelIds.includes(message.channel.id);
-        if (isHumanChannel) {
+        // PR #2: pure-slip channels skip MANUAL_REVIEW_HOLD staging. Same comma-split + trim
+        // contract as HUMAN_SUBMISSION_CHANNEL_IDS above; empty/unset → [] → no bypass (unchanged).
+        const pureSlipChannelIds = (process.env.PURE_SLIP_CHANNEL_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+        const isPureSlip = pureSlipChannelIds.includes(message.channel.id);
+        if (isHumanChannel && !isPureSlip) {
           stageAll('MANUAL_REVIEW_HOLD', {
             reason: 'ai_indeterminate_no_bets',
             is_bet_value: parsed.is_bet === undefined ? 'undefined' : String(parsed.is_bet),
@@ -1196,6 +1217,22 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
           } catch (e) { console.log(`[ManualReviewNotice] Failed: ${e.message}`); }
           console.log(`[Filter] Human-channel slip held for review (ai_indeterminate_no_bets): is_bet=${parsed.is_bet}, bets=${parsed.bets?.length || 0}`);
           return;
+        }
+        if (isHumanChannel && isPureSlip) {
+          // Pure-slip channel: skip the hold. Record a trace-only marker (STAGE_ENTER, not a
+          // DROP — stays out of /admin pipeline-drops-24h) and fall through to the existing
+          // PRE_FILTER_AI_EMPTY_RESULT drop/return below, unchanged.
+          stageAll('PURE_SLIP_SKIP_HOLD', {
+            reason: 'ai_indeterminate_no_bets',
+            is_bet_value: parsed.is_bet === undefined ? 'undefined' : String(parsed.is_bet),
+            parsedType: parsed.type || null,
+            betCount: parsed.bets?.length || 0,
+            channelId: message.channel.id,
+            capper: capperInfo?.name || message.author?.username || 'unknown',
+            messageUrl: message.url,
+            sample: cleanText.slice(0, 80),
+          });
+          console.log(`[PureSlip] Skipped MANUAL_REVIEW_HOLD (ai_indeterminate_no_bets) for pure-slip channel ${message.channel.id}.`);
         }
         console.log(`[Filter] AI returned indeterminate result (is_bet=${parsed.is_bet}, bets=${parsed.bets?.length || 0}): ${cleanText.substring(0, 60)}...`);
         dropAll('DROPPED', 'PRE_FILTER_AI_EMPTY_RESULT', {
