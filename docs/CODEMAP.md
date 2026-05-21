@@ -287,6 +287,79 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 | AUTOGRADER_DISABLED | autograder cron | If true, no auto-grading runs |
 | TWITTER_POLLER_DISABLED | Fly Twitter poller | Currently paused; Surface Playwright replaces |
 
+## Channels — ingestion routing (verified 2026-05-21 via `fly ssh`)
+
+ZoneTracker routes Discord messages through two env-var-gated channel allow-lists. The lists work together to control which channels are authorized for ingestion and which of those skip the `MANUAL_REVIEW_HOLD` staging step.
+
+### Env vars
+
+| Env var | What it does | Set on | Live count |
+|---|---|---|---|
+| `HUMAN_SUBMISSION_CHANNEL_IDS` | Authorizes a channel for human-posted bet ingestion. Messages from channels NOT in this list are dropped pre-pipeline. | Fly secret | 17 |
+| `PURE_SLIP_CHANNEL_IDS` | Subset of `HUMAN_SUBMISSION_CHANNEL_IDS`. When a parser result returns `is_bet=false` or `ai_indeterminate`, channels in THIS list skip the `MANUAL_REVIEW_HOLD` staging and fall through to the existing `PRE_FILTER_NO_BET_CONTENT` / `PRE_FILTER_AI_EMPTY_RESULT` drop. | Fly secret | 13 |
+| `ADMIN_LOG_CHANNEL_ID` | Channel where hold-review embeds and other admin notices post. | Fly secret | `1486825605105192960` (#admin-log) |
+
+### Subset invariant
+
+`PURE_SLIP_CHANNEL_IDS ⊂ HUMAN_SUBMISSION_CHANNEL_IDS`. A channel must be human-authorized first; the pure-slip flag is a refinement, not a separate authorization. Verify with:
+
+```bash
+fly ssh console -a bettracker-discord-bot -C 'node -e "const p=(process.env.PURE_SLIP_CHANNEL_IDS||\"\").split(\",\").map(s=>s.trim()).filter(Boolean); const h=(process.env.HUMAN_SUBMISSION_CHANNEL_IDS||\"\").split(\",\").map(s=>s.trim()).filter(Boolean); console.log(JSON.stringify({subsetHolds: p.every(id=>h.includes(id))}))"'
+```
+
+### Behavior matrix
+
+| Channel in HUMAN | Channel in PURE_SLIP | Parser result | Outcome |
+|---|---|---|---|
+| Yes | Yes | Valid bets | Bets stage normally |
+| Yes | Yes | `is_bet=false` or `ai_indeterminate` | Skip hold → emit `PURE_SLIP_SKIP_HOLD` trace → drop as existing `PRE_FILTER_*` |
+| Yes | No | Valid bets | Bets stage normally |
+| Yes | No | `is_bet=false` or `ai_indeterminate` | Stage `MANUAL_REVIEW_HOLD` for human review |
+| No | n/a | n/a | Dropped pre-pipeline (channel not authorized) |
+
+Gate code lives at `handlers/messageHandler.js` — search for `PURE_SLIP_CHANNEL_IDS` to find the two inline reads at the `is_bet=false` and `ai_indeterminate` branches.
+
+### Pure-slip channels — bypass MANUAL_REVIEW_HOLD (13)
+
+Cappers who post slip images, not text picks. Vision extraction (`parseBetSlipImage`) handles the bet; text-parser holds here are structurally unrescueable.
+
+| Channel | ID | Capper |
+|---|---|---|
+| #ig-dave-picks | 1473347391284576469 | IgDave |
+| #datdude-slips | 1355182920163262664 | DatDude |
+| #lockedin-slips | 1473343783876821198 | LockedIn |
+| #gamescript-picks | 1286934932769472646 | GameScript |
+| #boogieman-slips | 1282742197460144202 | Boogieman |
+| #gnp-slips | 1473343838587457626 | GNP |
+| #gallery-picks | 1473345468716028044 | Gallery |
+| #trent-slips | 1484572863439704246 | Trent |
+| #degen-tail-slips | 1282707049276244029 | Degens |
+| #mez-slips | 1473341245500690473 | Mez |
+| #zooteid-slips | 1473341435351929097 | Zootied |
+| #t-slips | 1473341563961606375 | T |
+| #smokke-slips | 1473341333325217950 | Smokke |
+
+Note: `-picks` suffix is misleading for ig-dave, gamescript, and gallery — IgDave has 8/8 lifetime bets with `source=vision_slip`, confirming these are functionally slip channels regardless of naming.
+
+### Human-submission only — hold gated (4)
+
+Twitter relay channels. Bet content arrives as text via a relay bot; text-parser holds here CAN be rescued because the bet is in the message text. Holding them lets a human review unparseable picks.
+
+| Channel | ID | Capper |
+|---|---|---|
+| #_-_-_-_gambling-twitter-dan | 1284613965128925234 | Dan |
+| #_-_-_gambling-twitter-cody | 1284613911055695893 | Cody |
+| #_-_-_gambling-twitter-harry | 1284620792713318472 | Harry |
+| #_-_-_gambling-twitter-gavin | 1284614717071032464 | Gavin |
+
+Active known issue: parser drops real picks shaped as `<emoji> <category> / <player> <line> <market>` from these channels (e.g. `🏀 NBA Best Bet / 🟠 OG Anunoby O20.5 PRs`). See BACKLOG.md.
+
+### Admin
+
+| Channel | ID | Purpose |
+|---|---|---|
+| #admin-log | 1486825605105192960 | Hold-review embeds and admin notices (`ADMIN_LOG_CHANNEL_ID`) |
+
 ## Fly deploy invariants
 
 - Auto-deploy from main is UNRELIABLE (verified 2026-05-18). ci.yml only runs check + tests. fly.toml has no `[deploy]`.
