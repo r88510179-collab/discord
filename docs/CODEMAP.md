@@ -132,7 +132,7 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 
 **`bets.source`** (observed): `vision_slip`, `hold_review_script`, `manual_hold_release`, `untracked_win`. Set wherever `createBetWithLegs` is called.
 
-**`pipeline_events.stage`**: `STAGE_ENTER`, `EXTRACTED`, `PARSED`, `MANUAL_REVIEW_HOLD`, `DROPPED`, `GRADE_*` variants. Enum lives at `services/pipeline-events.js:18`.
+**`pipeline_events.stage`**: `RECEIVED`, `AUTHORIZED`, `BUFFERED`, `EXTRACTED`, `PARSED`, `VALIDATED`, `STAGED`, `DROPPED`, `MANUAL_REVIEW_HOLD`, `MANUAL_REVIEW_DISMISSED`, `PURE_SLIP_SKIP_HOLD`, `GRADING_ENTER`, `GRADING_SEARCH`, `GRADING_AI`, `GRADING_GUARDS`, `GRADING_COMPLETE`, `GRADING_DROPPED`. Enum lives at `services/pipeline-events.js:18`. Note: `STAGE_ENTER` etc. listed here previously were `event_type` values, not stages — those are `STAGE_ENTER`, `STAGE_EXIT`, `DROP`, `ERROR` (line 32). `recordStage()` does not enforce the enum at the write boundary (see audit F-17).
 
 **`hold_review_decisions.human_decision`**: `release`, `dismiss`, `edit`
 
