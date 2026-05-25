@@ -1018,6 +1018,8 @@ This is a third bug: bet legs visible in tweet text, parser still returns `is_be
 
 **Cross-references:**
 - PR #31 (commit a1b184b, 2026-05-21) — pure-slip hold-skip gate; explicitly chose NOT to bypass these 4 channels for this reason
+
+**Verification 2026-05-25 (v489 prod, 24h window):** PR #31 bypass clean — zero of 13 bypassed channels holding. All 14 holds in 4 Twitter-relay (Harry 9, Dan 3, Cody 2). HUMAN=17 / PURE_SLIP=13 subset invariant holds live. Distribution shifted from 14-day sample (Cody 28, Harry 16): Dan now appearing in holds; Cody volume down. Tomorrow’s work: parser fix per hypotheses above.
 - pipeline_events query that found the pattern:
 ```sql
   SELECT json_extract(payload, '$.sample') AS sample, json_extract(payload, '$.reason') AS reason
@@ -1026,3 +1028,24 @@ This is a third bug: bet legs visible in tweet text, parser still returns `is_be
     AND json_extract(payload, '$.channelId') IN ('1284613911055695893', '1284620792713318472')
   ORDER BY created_at DESC LIMIT 30;
 ```
+
+## P2 — `recordStage()` does not enforce enum at write boundary
+
+**Source:** Audit finding F-17 (`docs/audits/2026-05-22-full-audit.md`).
+
+**Symptom:** `services/pipeline-events.js` exports canonical `STAGES`, `EVENT_TYPES`, and `DROP_REASONS` arrays (lines 18, 32, 33). `recordStage()` and the other write helpers do not validate the arguments they pass to SQLite against these enums. Any string value succeeds.
+
+**How this surfaced 2026-05-25:** Prod 24h `pipeline_events.stage` distribution showed `MANUAL_REVIEW_DISMISSED` (3 events) which was not in the `STAGES` array. Call site at `services/holdReview.js:64` had been passing it for weeks; writes succeeded silently. Doc fix shipped (e165fa4 added it to the enum, d1b9432 mirrored in CODEMAP), but the root cause — no write-boundary validation — is still open.
+
+**Risk:** Drift between source-of-truth enums and what call sites actually emit. Aggregate analytics on top drop causes get misleading because new freeform values dilute the closed-set assumption. Audit's recommendation for a closed `drop_reason` enum (F-17) only matters if it's enforced.
+
+**Fix surface area:**
+- Add validation in `recordStage()` / `recordEvent()` / `recordDrop()` at the top: if argument not in canonical array, log a warning + still write (don't fail closed — keep observability fire-and-forget per the file's stated contract at line 8-10).
+- Or stricter: maintain a `pipeline_events_unknown` companion table for non-canonical writes, separate from the main stream.
+- Add a unit test that imports all `recordStage` call sites and asserts each literal is in the enum.
+
+**Why P2, not P1:** Doesn't cause data loss. Already-known event types continue to work; the gap is purely observability/integrity. The `MANUAL_REVIEW_DISMISSED` case has been silently working in prod; the audit catching it is the win, the enforcement is the hardening.
+
+**Cross-references:**
+- Commits: e165fa4 (source enum fix), d1b9432 (CODEMAP fix)
+- Audit: `docs/audits/2026-05-22-full-audit.md` F-17
