@@ -18,6 +18,7 @@ const SOURCE_TYPES = ['discord', 'twitter', 'webhook', 'manual', 'grading'];
 const STAGES = [
   'RECEIVED', 'AUTHORIZED', 'BUFFERED', 'EXTRACTED', 'PARSED', 'VALIDATED', 'STAGED', 'DROPPED',
   'MANUAL_REVIEW_HOLD',  // human-channel slip held for admin review instead of silent drop
+  'MANUAL_REVIEW_DISMISSED', // human reviewer dismissed a held slip (services/holdReview.js:64)
   'PURE_SLIP_SKIP_HOLD', // PR #2: pure-slip channel skipped MANUAL_REVIEW_HOLD staging (trace-only marker, NOT a drop; like MANUAL_REVIEW_HOLD it is intentionally absent from pipelineHealth.EXPECTED_STAGES)
   // Grading-side stages (added alongside BetService skeleton — migration 020)
   'GRADING_ENTER',
