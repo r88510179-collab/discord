@@ -1,5 +1,15 @@
 # ZoneTracker Backlog
 
+## ✅ Shipped
+
+### DubClub email → Discord bridge (2026-05-30)
+Built as standalone service `zonetracker-dubclub` on Surface Pro (PM2), NOT in this repo.
+Repo: github.com/r88510179-collab/zonetracker-dubclub (commit 21f81c1). Watches Gmail via IMAP
+for DubClub "New plays from <Capper>!" emails, follows CTA link, Playwright-scrapes plays page,
+posts to per-capper Discord webhook → ingested via existing messageHandler path.
+Live cappers: GuessAndPrayBets (GNP), TeamLockTalk (LockedIn → #lockedin-slips).
+See that repo's docs/CODEMAP.md for env vars, config.json shape, and gotchas.
+
 ## ✅ SHIPPED - Weekend 1 (Apr 20)
 
 ### MLB StatsAPI Resolver — live in production
@@ -382,9 +392,6 @@ Hypothesis: exactly the bet types the v291 resolver pre-check was built for. The
 3. Consider a backfill script that force-resolves stuck Mode B bets in batch — no new Vision calls, just resolver retries
 
 ## Ingestion Expansion
-
-### DubClub email → Discord bridge
-Enable per-capper emails in DubClub. Gmail filters → Discord webhook per capper → ingestion pipeline. Bouncer update for email format. Capper attribution via webhook source.
 
 ## Infrastructure
 
