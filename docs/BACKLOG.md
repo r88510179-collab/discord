@@ -969,6 +969,14 @@ Not the multi-image merge case (memory #20 — that was different ingest_ids wit
 
 ---
 
+## Durable slip-image storage (image bytes, not url) — FLAGGED, NOT PRIORITIZED
+
+Not an active item. The only case live re-fetch can't cover: a capper **deletes** a slip post before its `MANUAL_REVIEW_HOLD` is walked. `review-holds.js` re-fetches the live Discord message per walk (`channel.messages.fetch` from `payload.messageUrl`) and reads attachments fresh, so every other case is already handled — including stale CDN signed-url TTL: the ~26h HRB-walk median outruns the ~24h signed-url TTL, which is exactly why a stored *url* would not help and only stored image **bytes** would survive a pre-walk deletion.
+
+Rare, and `review-holds.js` already degrades gracefully when the message is gone. Revisit ONLY if message-deletion-before-walk shows up as real lost capper data. Do NOT re-open the imageUrl-persistence approach — closed as not-worth-it (no consumer reads `payload.imageUrl`; see the hold-rescue note in docs/CODEMAP.md).
+
+---
+
 ## GameScript / capper portal data sheet ingestion
 
 **Problem:** Multiple cappers (Dan, Harry, Cody) post daily prop projection sheets behind `gamescript.ai/code=X` links. These sheets contain real player-prop data: line projections, hit-check stats, NRFI data. Currently dismissed as "promo" because the slip body is just sales copy ("Don't miss another sheet"), but the underlying content has actual value if we can get to it.

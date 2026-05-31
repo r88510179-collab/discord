@@ -168,6 +168,11 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 - Vision extraction lands in `description` — intentional. The grader reads `description` only and never `raw_text` (enforced by the `buildGraderSearchQuery` doc-comment at `services/grading.js:1142-1149` + `tests/grader-uses-description.test.js`), so the HRB `raw_text` boilerplate is purely cosmetic — do not "fix" it.
 - `processSlipImage` (L562) differs: stores `ocrText || description` in `raw_text`. The two paths diverge by history, not design intent — recorded here so it is not mistaken for a bug.
 
+**Hold rescue is messageUrl-based — the slip image is never rendered, `payload.imageUrl` is never read (do NOT "persist imageUrl"):**
+- All three rescue surfaces key off the Discord **messageUrl**, not any image: the admin-log hold embed's "View Original" Link button (`sendHoldReviewEmbed` L13, `.setURL(messageUrl)` L33), the `holdReview.js` Release flow (`payload.messageUrl`, L174–213), and the `review-holds.js` CLI. None calls `setImage`/`setThumbnail`; none reads `payload.imageUrl`.
+- `review-holds.js` re-fetches the live Discord message per walk (`channel.messages.fetch` from `payload.messageUrl`, L547–554) and reads attachments fresh (L80, L91) → always a current signed image url, so no stored snapshot is needed.
+- `EXTRACTED.imageUrl` (single-image branch, L1009) is `imageUrl.slice(0, 120)` — a truncated, HMAC-stripped debug breadcrumb, NOT an openable link. The multi-image branch (L1014) stores no url at all. Treat neither as a usable image link; do not add imageUrl-persistence to the multi-image branch — no consumer reads it (closed; see BACKLOG.md).
+
 ### services/ai.js
 | What | Line(s) |
 | --- | --- |
