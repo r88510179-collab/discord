@@ -1059,3 +1059,36 @@ This is a third bug: bet legs visible in tweet text, parser still returns `is_be
 **Cross-references:**
 - Commits: e165fa4 (source enum fix), d1b9432 (CODEMAP fix)
 - Audit: `docs/audits/2026-05-22-full-audit.md` F-17
+
+## SHIPPED — 2026-05-31
+
+### DubClub split pipeline (LockedIn + GNP) — COMPLETE
+- Webhook gate: `ALLOWED_WEBHOOK_IDS` set with LockedIn (`1510485995751997603`) + GNP (`1510019730906546277`). Was blocking all DubClub posts (`bot_not_whitelisted`).
+- Bridge split (`zonetracker-dubclub` 27db0ed): `splitIntoPicks` filter splits independent-pick sheets into one webhook post per pick. Per-capper `splitIndependent` flag in config.json (LockedIn/GNP=true).
+- Buffer bypass (main 34ea903): webhook posts in `DUBCLUB_SPLIT_CHANNEL_IDS` skip the 4s aggregation buffer (was re-merging the split posts back into one slip).
+- GUARD 5 bypass (main ffddb09): bypass moved above GUARD 5 so bare totals ("Cubs Cardinals O8", "Spurs OKC O212.5") aren't dropped by looksLikePick's >=2 signal requirement.
+- Verified: 9-leg MAG7 → 9 separate clean straights in #lockedin-slips, all totals included.
+
+## KNOWN BUG — Priority 1 (new 2026-05-31)
+
+### normalizeDescription injects wrong team for ambiguous cities
+**Symptom**: "Baltimore Orioles +105" stored as "Baltimore Ravens Orioles +105". The bare city alias in data/mappings/teams.json maps to ONE team even when another team name already follows.
+**Root cause**: teams.json has bare-city aliases that fire via `\bcity\b` word-boundary match. When the city's full "City Team" string isn't also an alias key, the bare city expands wrongly. Affects raw→normalized description only; raw_text (and channel display) stays clean.
+**Ambiguous-city aliases to remove** (multi-team cities):
+- line 38 SF 49ers: "san francisco"
+- line 39 Dallas Cowboys: "dallas"
+- line 40 Baltimore Ravens: "baltimore"
+- line 42 Miami Dolphins: "miami"
+- line 43 Detroit Lions: "detroit"
+- line 45 NY Jets: "new york"
+- line 49 LA Dodgers: "la"
+- line 50 Houston Astros: "houston"
+- line 51 Atlanta Braves: "atlanta"
+- line 53 Boston Red Sox: "boston"
+- line 54 Chicago Cubs: "chicago"
+- (also check Philadelphia "philly", Kansas City "kansas city")
+**Fix**: Remove bare ambiguous-city aliases. Each entry keeps non-ambiguous aliases (e.g. Ravens keeps "ravens"/"bal"/"baltimore ravens"). BUILD A TEST HARNESS FIRST: run normalizeDescription against ~30 real bet descriptions from the bets table, diff before/after, confirm only ambiguous cases change. This is shared normalization affecting every capper — do not hand-edit without the harness. Codex audit before deploy.
+
+### Odds API key 401 Unauthorized
+**Symptom**: `[Odds] API error: 401 Unauthorized` on every MLB bet, primary AND backup key. Returns 0 events. Feeds the existing "86% of slip bets have bad odds" problem.
+**Fix**: rotate/verify the odds API key(s). Check which provider, check billing/expiry.
