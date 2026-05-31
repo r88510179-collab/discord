@@ -906,6 +906,27 @@ async function handleMessage(message, { isUpdate = false } = {}) {
     return;
   }
 
+  // ═══ DUBCLUB SPLIT BYPASS ═══
+  // Webhook posts from DubClub split channels are one-pick-per-message and
+  // must skip the 4s aggregation buffer (which keys on author:channel and
+  // would re-merge them into one slip). Route each straight to single-message
+  // processing. Text-only by design — images are not expected on this path.
+  const dubclubSplitChannels = (process.env.DUBCLUB_SPLIT_CHANNEL_IDS || '')
+    .split(',').map((s) => s.trim()).filter(Boolean);
+  const isDubclubSplit =
+    (message.webhookId || message.author?.bot) &&
+    dubclubSplitChannels.includes(message.channel?.id);
+
+  if (isDubclubSplit) {
+    console.log(`[DubclubSplit] Bypassing buffer for webhook pick in #${message.channel?.name} (msg=${message.id})`);
+    try {
+      await processAggregatedMessage(message, fullText, [], { ingestIds: [ingestId], primaryIngestId: ingestId });
+    } catch (err) {
+      console.error(`[DubclubSplit] processAggregatedMessage failed for ${message.id}: ${err.message}`);
+    }
+    return;
+  }
+
   // ═══ BUFFER: Aggregate text + image from split TweetShift messages ═══
   bufferMessage(message);
 }
