@@ -379,3 +379,14 @@ Active known issue: parser drops real picks shaped as `<emoji> <category> / <pla
 3. DEPLOY_CHECKLIST.md applies for every non-trivial deploy. Step 2 (grep for call sites) catches half-shipped functions.
 4. Run `PRAGMA table_info` on any table you query for the first time in a session.
 5. Update this file in the same PR as any change that moves or adds the locations above.
+
+## DubClub split bypass (handlers/messageHandler.js, 2026-05-31)
+
+DubClub bridge webhooks post one independent pick per message into split channels. handleMessage has a DUBCLUB SPLIT BYPASS block placed ABOVE GUARD 5:
+- Detects: `(message.webhookId || message.author?.bot)` AND channel in `DUBCLUB_SPLIT_CHANNEL_IDS` env CSV.
+- Effect: routes the message straight to processAggregatedMessage as a single-message batch — skips BOTH the 4s aggregation buffer (would re-merge split posts) AND GUARD 5 looksLikePick (would drop bare totals like "Cubs Cardinals O8" that score <2 PICK_SIGNALS).
+- Must stay above GUARD 5. Auth/bouncer guards (1-4) still run before it.
+- Env: DUBCLUB_SPLIT_CHANNEL_IDS=1473343783876821198(LockedIn),1473343838587457626(GNP)
+- Commits: 34ea903 (buffer bypass), ffddb09 (moved above GUARD 5).
+
+Note: looksLikePick (PICK_SIGNALS, ~line 199) has no bare over/under total signal — "O8"/"O212.5" only match the half-point pattern, scoring <2. Latent bug for any non-DubClub total-only pick. Not fixed (DubClub bypasses the gate instead).
