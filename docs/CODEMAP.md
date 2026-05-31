@@ -163,6 +163,11 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 | Multi-image merge | 960 (loop), 995–1020 (merge) |
 | ADMIN_LOG send (path B) | 1313 (guard L1311) |
 
+**`raw_text` semantics — two ingest paths, inconsistent by history (NOT a bug):**
+- Pure-slip / HRB path (`processAggregatedMessage`, L1288): `raw_text` = the scrubbed Discord message *body* (`cleanText`, defined L683). For HRB shares that body is share-card boilerplate (e.g. "Check out this bet I placed on Hard Rock Bet!"), **not** the Vision extraction.
+- Vision extraction lands in `description` — intentional. The grader reads `description` only and never `raw_text` (enforced by the `buildGraderSearchQuery` doc-comment at `services/grading.js:1142-1149` + `tests/grader-uses-description.test.js`), so the HRB `raw_text` boilerplate is purely cosmetic — do not "fix" it.
+- `processSlipImage` (L562) differs: stores `ocrText || description` in `raw_text`. The two paths diverge by history, not design intent — recorded here so it is not mistaken for a bug.
+
 ### services/ai.js
 | What | Line(s) |
 | --- | --- |

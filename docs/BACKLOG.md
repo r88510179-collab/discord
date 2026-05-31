@@ -497,7 +497,10 @@ Reusable prompt templates in ~/Documents/discord/.code-prompts/:
 
 Each is a fill-in-the-blank template. We've been writing these from scratch — saves 10-15min per Code session. Build next time we have low-pressure time.
 
-### Vision extraction failure on dense slip-share images — wire Gemma 3:4b as fallback
+### Vision extraction failure on dense slip-share images — wire Gemma 3:4b as fallback — CLOSED (investigated, not pursued) 2026-05-30
+
+**CLOSED (investigated, not pursued):** Gemini Vision extracts HRB slips correctly into `description`; no vision-accuracy problem exists. `raw_text` boilerplate is cosmetic — the grader reads `description` only, never `raw_text` (`services/grading.js:1142-1149` + `tests/grader-uses-description.test.js`; see the CODEMAP `raw_text` note). gemma-4-31b / Gemma 3:4b swap unnecessary, and independently hardware-infeasible since **v431** (`GEMMA_FALLBACK_DISABLED=true`, Surface Pro inference 7-17 min vs Fly's 90 s timeout). Scope: this closes the Gemma-as-vision-fallback approach only — it does NOT resolve the separate `ai_is_bet_false` HRB routing drop (P1 above), and any residual dense-slip leak for other cappers (zrob4444/Trent/rbs) needs a different lever (Playwright shortlink expander / paid Gemini quota), not Gemma. Original plan preserved for audit:
+
 **Tested Apr 15 — proven working.** Gemma 3:4b on Surface Pro Ollama successfully extracted player picks from a zrob4444 PrizePicks slip image (732x1199 JPEG, 70KB) via local HTTP API. Output: structured player names. Note: tested model is `gemma3:4b` (3.3GB), not the previously-noted `gemma4:e4b` which doesn't exist as a current Ollama tag.
 
 Current Gemini Vision returns "missing legs / capper hid the picks in image" placeholder for dense slips, bouncer correctly rejects. Confirmed leak: ~10 real bets/week from missing-image bucket alone (audit verified Apr 15).
