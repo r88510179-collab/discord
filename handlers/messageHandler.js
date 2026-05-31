@@ -897,33 +897,32 @@ async function handleMessage(message, { isUpdate = false } = {}) {
   // fullText = message.content + embed descriptions (already built above as fullContent)
   const fullText = fullContent;
 
+  // ═══ DUBCLUB SPLIT BYPASS ═══
+  // DubClub split-channel webhooks are pre-filtered at the bridge (splitIntoPicks)
+  // and are one-pick-per-message. Bypass BOTH the GUARD 5 signal filter (which
+  // drops bare totals like "Cubs Cardinals O8") AND the 4s aggregation buffer
+  // (which would re-merge the split posts). Must run before GUARD 5.
+  const dubclubSplitChannels = (process.env.DUBCLUB_SPLIT_CHANNEL_IDS || '')
+    .split(',').map((s) => s.trim()).filter(Boolean);
+  const isDubclubSplit =
+    (message.webhookId || message.author?.bot) &&
+    dubclubSplitChannels.includes(message.channel?.id);
+  if (isDubclubSplit) {
+    console.log(`[DubclubSplit] Bypassing buffer + GUARD 5 for webhook pick in #${message.channel?.name} (msg=${message.id})`);
+    try {
+      await processAggregatedMessage(message, fullText, [], { ingestIds: [ingestId], primaryIngestId: ingestId });
+    } catch (err) {
+      console.error(`[DubclubSplit] processAggregatedMessage failed for ${message.id}: ${err.message}`);
+    }
+    return;
+  }
+
   // ═══ GUARD 5: Must have SOME signal — text signals, images, or celebration keywords ═══
   // All messages go to the buffer. The AI decides type (bet, result, untracked_win, ignore).
   const textIsPick = looksLikePick(fullText);
   const textIsCelebration = looksLikeCelebration(fullText);
   if (!textIsPick && !textIsCelebration && !hasImages) {
     recordDrop({ ingestId, sourceType: 'discord', sourceRef, stage: 'DROPPED', dropReason: 'PRE_FILTER_NO_BET_CONTENT', payload: { textLen: fullText.length } });
-    return;
-  }
-
-  // ═══ DUBCLUB SPLIT BYPASS ═══
-  // Webhook posts from DubClub split channels are one-pick-per-message and
-  // must skip the 4s aggregation buffer (which keys on author:channel and
-  // would re-merge them into one slip). Route each straight to single-message
-  // processing. Text-only by design — images are not expected on this path.
-  const dubclubSplitChannels = (process.env.DUBCLUB_SPLIT_CHANNEL_IDS || '')
-    .split(',').map((s) => s.trim()).filter(Boolean);
-  const isDubclubSplit =
-    (message.webhookId || message.author?.bot) &&
-    dubclubSplitChannels.includes(message.channel?.id);
-
-  if (isDubclubSplit) {
-    console.log(`[DubclubSplit] Bypassing buffer for webhook pick in #${message.channel?.name} (msg=${message.id})`);
-    try {
-      await processAggregatedMessage(message, fullText, [], { ingestIds: [ingestId], primaryIngestId: ingestId });
-    } catch (err) {
-      console.error(`[DubclubSplit] processAggregatedMessage failed for ${message.id}: ${err.message}`);
-    }
     return;
   }
 
