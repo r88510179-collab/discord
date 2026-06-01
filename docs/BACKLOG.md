@@ -1100,3 +1100,17 @@ This is a third bug: bet legs visible in tweet text, parser still returns `is_be
 ### Odds API key 401 Unauthorized
 **Symptom**: `[Odds] API error: 401 Unauthorized` on every MLB bet, primary AND backup key. Returns 0 events. Feeds the existing "86% of slip bets have bad odds" problem.
 **Fix**: rotate/verify the odds API key(s). Check which provider, check billing/expiry.
+
+## P1 follow-ups
+
+### detectSport: SF Giants data gap
+`MLB_TEAMS` omits the Giants, so bare "Giants"/"SF Giants" resolves NFL. detectSport is nickname-only — needs a city-aware signal. Low frequency, but wrong sport poisons grading routing.
+
+### normalizeDescription: player-index nickname over-match
+Same class as the team-nickname guard (3d12196) but in the player index — e.g. "Judge" → Aaron Judge fires in prose. Fix: reuse `hasBetContext` on the player replacement path. Firing rate unmeasured.
+
+### Install Codex CLI on the Mac
+Codex CLI was absent all session; the audit step fell back to an independent sub-agent substitute. Install it so hot-path diffs get a real second-opinion pass.
+
+### Read-only audit: historical description corruption
+The bare-city (93cbe5e), abbrev (564a88a), and verb/nickname guard (3d12196) fixes only correct NEW inserts. Existing stored `description` rows still carry injected wrong teams ("the game Washington Wizards close", "Baltimore Ravens Orioles"). Read-only audit to quantify before deciding on a backfill.
