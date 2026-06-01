@@ -519,12 +519,35 @@ const SPORT_KEYWORDS = {
 };
 
 function detectSport(t) {
-  const l = t.toLowerCase();
-  // Check keywords first
+  const text = t || '';
+  const l = text.toLowerCase();
+  // 1. League/sport keyword is unambiguous — return immediately (unchanged).
   for (const [k, v] of Object.entries(SPORT_KEYWORDS)) if (l.includes(k)) return v;
-  // Then check team names
-  for (const [sport, regex] of Object.entries(TEAM_MAP)) if (regex.test(t)) return sport;
-  return 'Unknown';
+  // 2. Collect ALL leagues whose team regex matches (not just the first).
+  const matched = [];
+  for (const [sport, regex] of Object.entries(TEAM_MAP)) if (regex.test(text)) matched.push(sport);
+  // 3. Zero or one league — behavior unchanged.
+  if (matched.length === 0) return 'Unknown';
+  if (matched.length === 1) return matched[0];
+  // 4. Ambiguous shared nickname (e.g. "Cardinals" = NFL+MLB). If the text also contains
+  //    a nickname owned by exactly ONE league (e.g. "Cubs" -> MLB), prefer that league.
+  //    Nickname->owner index is derived once from the *_TEAMS lists and cached on the fn.
+  if (!detectSport._unambiguous) {
+    const lists = { NBA: NBA_TEAMS, NFL: NFL_TEAMS, MLB: MLB_TEAMS, NHL: NHL_TEAMS };
+    const owners = {};
+    for (const [sport, list] of Object.entries(lists))
+      for (const tok of list.split('|')) (owners[tok] = owners[tok] || []).push(sport);
+    detectSport._unambiguous = Object.entries(owners)
+      .filter(([, sports]) => sports.length === 1)
+      .map(([tok, sports]) => ({ sport: sports[0], re: new RegExp(`\\b${tok}\\b`, 'i') }));
+  }
+  const pinned = new Set();
+  for (const { sport, re } of detectSport._unambiguous) if (re.test(text)) pinned.add(sport);
+  if (pinned.size === 1) return [...pinned][0];
+  // 5. Still tied (no unambiguous nickname, or conflicting ones) — fall back to the
+  //    original first-match priority order (NBA -> NFL -> MLB -> NHL). Never Unknown here.
+  for (const sport of Object.keys(TEAM_MAP)) if (matched.includes(sport)) return sport;
+  return matched[0];
 }
 
 // ── Confidence assessment for parsed bets ───────────────────
