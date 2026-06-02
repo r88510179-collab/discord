@@ -1,0 +1,41 @@
+{
+  "book": "Hard Rock Bet",
+  "bet_type": "parlay",
+  "total_odds": "+700",
+  "stake": "$10",
+  "payout": "$80.05",
+  "legs": [
+    {
+      "matchup": "Rays vs Tigers",
+      "player": null,
+      "market": "Moneyline",
+      "selection": "Rays",
+      "odds": "-170",
+      "start_time": "Today, 6:40pm EDT"
+    },
+    {
+      "matchup": "Nationals vs Marlins",
+      "player": null,
+      "market": "Total Runs",
+      "selection": "Over 6.5",
+      "odds": "-250",
+      "start_time": "Today, 6:45pm EDT"
+    },
+    {
+      "matchup": "Cardinals vs Rangers",
+      "player": null,
+      "market": "Moneyline",
+      "selection": "Rangers",
+      "odds": "-125",
+      "start_time": "Today, 7:45pm EDT"
+    },
+    {
+      "matchup": "Reds vs Royals",
+      "player": null,
+      "market": "Spread",
+      "selection": "Reds -1.5",
+      "odds": "+100",
+      "start_time": "Today, 7:10pm EDT"
+    }
+  ]
+}
