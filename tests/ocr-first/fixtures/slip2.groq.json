@@ -1,0 +1,49 @@
+{
+  "book": "Hard Rock Bet",
+  "bet_type": "sgpmax",
+  "total_odds": "+340",
+  "stake": "$10",
+  "payout": "$43.96",
+  "legs": [
+    {
+      "matchup": "Angels vs Rockies",
+      "player": "Nick Madrigal",
+      "market": "Hits",
+      "selection": "Over 0.5",
+      "odds": "-129",
+      "start_time": "Today, 9:38pm EDT"
+    },
+    {
+      "matchup": "Angels vs Rockies",
+      "player": "Mike Trout",
+      "market": "To Record 1+ Hits",
+      "selection": "Over 0.5",
+      "odds": "-129",
+      "start_time": "Today, 9:38pm EDT"
+    },
+    {
+      "matchup": "Diamondbacks vs Dodgers",
+      "player": "Shohei Ohtani",
+      "market": "To Record 1+ Hits",
+      "selection": "Over 0.5",
+      "odds": "-153",
+      "start_time": "Today, 9:40pm EDT"
+    },
+    {
+      "matchup": "Diamondbacks vs Dodgers",
+      "player": "Freddie Freeman",
+      "market": "To Record 1+ Hits",
+      "selection": "Over 0.5",
+      "odds": "-153",
+      "start_time": "Today, 9:40pm EDT"
+    },
+    {
+      "matchup": "Brewers vs Giants",
+      "player": "William Contreras",
+      "market": "Hits",
+      "selection": "Over 0.5",
+      "odds": "-200",
+      "start_time": "Today, 7:40pm EDT"
+    }
+  ]
+}

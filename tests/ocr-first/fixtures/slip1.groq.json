@@ -1,0 +1,33 @@
+{
+  "book": "Hard Rock Bet",
+  "bet_type": "parlay",
+  "total_odds": "+143",
+  "stake": "$20",
+  "payout": "$48.63",
+  "legs": [
+    {
+      "matchup": "Athletics vs Yankees",
+      "player": null,
+      "market": "Total Runs",
+      "selection": "Over 7.5",
+      "odds": "-275",
+      "start_time": "Today, 4:05pm EDT"
+    },
+    {
+      "matchup": "Mariners vs Diamondbacks",
+      "player": null,
+      "market": "Total Runs",
+      "selection": "Under 9.5",
+      "odds": "-275",
+      "start_time": "Today, 4:10pm EDT"
+    },
+    {
+      "matchup": "Dodgers vs Phillies",
+      "player": null,
+      "market": "Total Runs",
+      "selection": "Over 6.5",
+      "odds": "-325",
+      "start_time": "Today, 4:10pm EDT"
+    }
+  ]
+}
