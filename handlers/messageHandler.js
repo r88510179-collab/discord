@@ -7,6 +7,7 @@ const { sendStagingEmbed } = require('../services/warRoom');
 const { extractTextFromImage } = require('../services/ocr');
 const { gradeFromCelebration, finalizeBetGrading, calcProfit, canFinalizeBet, scheduleRecheckAfterDenial } = require('../services/grading');
 const { recordStage, recordDrop, recordError, makeIngestId } = require('../services/pipeline-events');
+const ocrFirstWiring = require('../services/ocrFirstWiring');
 
 // Sends the admin-log embed for MANUAL_REVIEW_HOLD with Release/Dismiss/View Original buttons.
 // Replaces the old plain-text notification so the admin can act on the hold from Discord.
@@ -516,7 +517,19 @@ async function processSlipImage(client, imageUrl, capperId, capperName, opts = {
   const prompt = ocrText.length > 10
     ? `Read the attached betting slip image AND the following OCR text to extract all bets:\n\n${ocrText}${contextLine}`
     : `Read the attached betting slip image and extract all bets, players, lines, and odds.${contextLine}`;
-  const parsed = await parseBetText(prompt, imageUrl, { imageUrl });
+  let parsed = await parseBetText(prompt, imageUrl, { imageUrl });
+
+  // ── OCR-first (gated; default OFF). docs/specs/ocr-first.md §6/§8. ──
+  // off: zero calls (guard short-circuits, byte-for-byte unchanged). shadow:
+  // fire-and-forget compare, never mutates `parsed`, never blocks staging.
+  // cutover (dormant): on USE_OCR replace `parsed` with the OCR-derived bet;
+  // FALLBACK/timeout → live path unchanged. Can never break the live path.
+  if (ocrFirstWiring.MODE !== 'off' && imageUrl) {
+    const ocrRes = await ocrFirstWiring.applyOcrFirst({
+      parsed, imageUrl, mediaType: undefined, requestId: ingestId, sourceRef,
+    });
+    parsed = ocrRes.parsed;
+  }
 
   if (!parsed.bets || parsed.bets.length === 0) {
     console.log('[SlipPipeline] Stage 2: No bets found in image.');
@@ -1043,6 +1056,24 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
 
       console.log(`[DEBUG] AI Response: type=${parsed.type || 'bet'} is_bet=${parsed.is_bet} bets=${parsed.bets?.length || 0} ticket_status=${parsed.ticket_status || 'new'}`);
       stageAll('PARSED', buildParsedPayload(parsed));
+
+      // ── OCR-first (gated; default OFF). docs/specs/ocr-first.md §6/§8. ──
+      // Primary production slip seam (pure-slip capper channels flow here). off:
+      // zero calls (guard short-circuits, byte-for-byte unchanged). shadow:
+      // fire-and-forget compare vs the live vision parse, never mutates `parsed`,
+      // adds ZERO latency to staging. cutover (dormant): on USE_OCR replace
+      // `parsed` with the OCR-derived bet so it flows into the existing staging
+      // block below; FALLBACK/timeout → live path unchanged. Can never break it.
+      if (ocrFirstWiring.MODE !== 'off' && imageUrls.length > 0) {
+        const ocrRes = await ocrFirstWiring.applyOcrFirst({
+          parsed,
+          imageUrl: imageUrls[0],
+          mediaType: combinedImages[0]?.type,
+          requestId: ingestId,
+          sourceRef,
+        });
+        parsed = ocrRes.parsed;
+      }
 
       // Auto-grade detection
       if (parsed.type === 'result') {

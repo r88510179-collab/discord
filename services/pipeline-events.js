@@ -20,6 +20,7 @@ const STAGES = [
   'MANUAL_REVIEW_HOLD',  // human-channel slip held for admin review instead of silent drop
   'MANUAL_REVIEW_DISMISSED', // human reviewer dismissed a held slip (services/holdReview.js:64)
   'PURE_SLIP_SKIP_HOLD', // PR #2: pure-slip channel skipped MANUAL_REVIEW_HOLD staging (trace-only marker, NOT a drop; like MANUAL_REVIEW_HOLD it is intentionally absent from pipelineHealth.EXPECTED_STAGES)
+  'OCR_FIRST',           // OCR-first wiring observability marker (services/ocrFirstWiring.js): shadow compare + cutover route. Trace-only, NOT a drop; intentionally absent from pipelineHealth.EXPECTED_STAGES.
   // Grading-side stages (added alongside BetService skeleton — migration 020)
   'GRADING_ENTER',
   'GRADING_SEARCH',
@@ -28,7 +29,14 @@ const STAGES = [
   'GRADING_COMPLETE',
   'GRADING_DROPPED',
 ];
-const EVENT_TYPES = ['STAGE_ENTER', 'STAGE_EXIT', 'DROP', 'ERROR'];
+const EVENT_TYPES = [
+  'STAGE_ENTER', 'STAGE_EXIT', 'DROP', 'ERROR',
+  // OCR-first wiring event types (stage 'OCR_FIRST'). Additive/observational —
+  // recordStage does not enforce the enum at the write boundary (see CODEMAP F-17).
+  'ocr_shadow_decision', // shadow: one per slip — OCR decision compared to the live vision parse
+  'ocr_used',            // cutover (dormant): OCR parse accepted, staged in place of Gemini
+  'ocr_fallback',        // cutover (dormant): degraded to the live Gemini path
+];
 const DROP_REASONS = [
   'DUPLICATE_IMAGE',
   'AGE_GATE',

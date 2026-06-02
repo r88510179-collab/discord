@@ -226,3 +226,72 @@ Prerequisites (pre-existing secrets, not added here): `GROQ_API_KEY` (Groq parse
 
 `OCR_TIMEOUT_MS=8000` matches the measured ~3s OCR latency with headroom (see the
 `zonetracker-ocr` service notes).
+
+---
+
+## 8. Wiring (`services/ocrFirstWiring.js`) — shadow/cutover into the slip path
+
+The isolation modules (§2–§5) are now gated into the slip-ingest path behind the
+tri-state `OCR_FIRST_MODE` flag by `services/ocrFirstWiring.js`. Status: **shadow-ready,
+cutover dormant. No deploy, no merge.** (Updates the §6 contract with the as-built seam.)
+
+### Seams (two — both slip-image entry points share ONE tested dispatch)
+
+`extractViaOcr` needs `base64 + mediaType`; the slip seams carry a Discord CDN **URL**,
+so the wiring fetches the bytes itself (in the background in shadow; inside the timeout
+budget in cutover). The flag is read **at module load**. The seam guards on
+`MODE !== 'off'` so off-mode makes **zero** calls and is byte-for-byte unchanged.
+
+| seam | file | reached by | role |
+|------|------|-----------|------|
+| `processAggregatedMessage` (after `PARSED`) | `handlers/messageHandler.js` | main buffer path — **pure-slip capper channels (DatDude, Smokke, …) flow here** | **primary** shadow-data source |
+| `processSlipImage` (after the vision parse) | `handlers/messageHandler.js` | `/slip` command + `SLIP_FEED_CHANNEL_ID` | secondary |
+
+> **Deviation from the prompt's singular "seam":** the prompt named `processSlipImage`,
+> but production slip traffic flows through `processAggregatedMessage` (verified:
+> `handleMessage` → `bufferMessage` → `processAggregatedMessage`; `processSlipImage`
+> only serves `/slip` + the dedicated slip-feed channel). Both are wired through the
+> shared `applyOcrFirst` dispatch so shadow actually observes live parlays (the §8.1
+> bar) while still honoring the named function.
+
+### Mode behavior (as built)
+
+- **off** — `applyOcrFirst` is never called (seam guard). Zero OCR/network/Groq calls.
+- **shadow** — `runShadow` is **fire-and-forget**: `extractViaOcr` is kicked off WITHOUT
+  `await` on the request path, so the ~4s OCR floor adds **zero** latency and the bet
+  stages exactly as today. The staged bet is **never** modified. On resolve it emits one
+  `ocr_shadow_decision` event comparing OCR to the live vision parse. ALL errors are
+  swallowed.
+- **cutover (dormant)** — `runCutover` awaits `extractViaOcr` within `OCR_TIMEOUT_MS`.
+  `USE_OCR` → the OCR parse is converted to internal bets (`ocrBetToInternalBets`),
+  substituted into `parsed`, and staged by the existing pipeline (emits `ocr_used`).
+  `FALLBACK_GEMINI` / timeout / throw → returns null, live path runs unchanged (emits
+  `ocr_fallback`). A thrown or null-y ocrFirst can never break the live path in any mode.
+
+### 8.1 Shadow acceptance criteria (bar to clear before flipping shadow → cutover)
+
+- **≥ ~50–100 live STANDARD (non-SGP) parlays** observed in shadow.
+- **0 critical mismatches** — a `USE_OCR` whose `parsedBet` disagrees with a *correct*
+  live Gemini parse (wrong/missing leg, wrong selection, wrong combined odds).
+- **≥ 90 % valid-parse (`USE_OCR`) rate** on standard (non-SGP) parlays.
+- **shadow OCR path p95 < 5s** — non-blocking; never affects ingest either way.
+- **every fallback route exercised at least once:** `OCR_TIMEOUT`, `OCR_UNREACHABLE`,
+  `OCR_CIRCUIT_OPEN`, `OCR_SGP_GATE`, `OCR_PARSE_FAIL`, `OCR_VALIDATE_FAIL`.
+
+Observe via `pipeline_events` where `stage='OCR_FIRST'` and
+`event_type='ocr_shadow_decision'`: `action`/`reason` histogram, `agreement` rate,
+`ocrLegCount` vs `liveLegCount`, and `ocrMs` for the p95.
+
+### 8.2 Cutover gaps (must clear before flipping the flag — dormant today)
+
+- **Sport** — the OCR/Groq schema (§4) has no sport; `ocrBetToInternalBets` defaults to
+  `'Unknown'` (a known grading void-driver). Sport inference is a pre-cutover requirement.
+- **Validator** — `validateParsedBet` runs against the Discord message text, not the OCR
+  text; OCR slips rely on its `hasMedia:true` slip-exemption. Shadow must confirm OCR
+  bets survive that validator before cutover.
+- **Settled-recap routing** — the cutover hook replaces `parsed` *before* the
+  `result` / `untracked_win` / `ticket_status` (winner/loser) branches, so a settled slip
+  that OCR misreads as `USE_OCR` would be staged as a NEW bet instead of auto-grading the
+  recap. The outer settled-marker pre-filter still runs first, and this surfaces as a
+  shadow mismatch (live `ticket_status` vs OCR `USE_OCR`) — it is covered by the §8.1
+  "0 critical mismatches" bar.
