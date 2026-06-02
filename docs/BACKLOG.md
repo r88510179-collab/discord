@@ -1114,3 +1114,13 @@ Codex CLI was absent all session; the audit step fell back to an independent sub
 
 ### Read-only audit: historical description corruption
 The bare-city (93cbe5e), abbrev (564a88a), and verb/nickname guard (3d12196) fixes only correct NEW inserts. Existing stored `description` rows still carry injected wrong teams ("the game Washington Wizards close", "Baltimore Ravens Orioles"). Read-only audit to quantify before deciding on a backfill.
+
+### Link/VIP-gated pick recovery — INVESTIGATED + SHELVED (2026-05-29)
+Discovery ran (prompts/relay-hold-link-recovery-discovery.md). Findings:
+- **Full held-message text is NOT persisted.** messageHandler.js:1141 computes cleanText but stores only an 80-char slice in pipeline_events.payload.sample. 0 URLs survive the clip — the link-gated fraction is unmeasurable from the DB alone. Sizing it would require re-fetching every held message from Discord via messageUrl, OR adding a hold-side raw_text store first.
+- **~45% of holds are TweetShift re-emit duplicates.** 214 raw holds/30d collapse to ~117 distinct (capper, sample) pairs. TweetShift re-fires on edit/media-attach. Real distinct universe ≈ 4 tweets/day across all four relay cappers (Dan/Cody/Harry/Gavin).
+- **Ceiling is tiny and skewed toward paywalled.** Best case ≤4 picks/day, and Harry's share is visibly VIP-pitched — genuinely gated, not technically recoverable.
+
+**Decision: SHELVED.** Poor ROI vs. post-P0 roadmap — requires persistence rework just to *measure*, with a ~4/day ceiling mostly paywalled. NO parser, NO expander, NO persistence change at this time.
+
+**Cheap kill-check (manual, ~10 min):** open 5 of Dan's "Load here:" messages in Discord, see where the t.co link redirects (DubClub / Whop / free page) and whether it's gated. All paywalled → item is permanently dead. Some free → revisit, and the DubClub bridge is the likely lever, not a per-message expander.
