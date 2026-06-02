@@ -526,7 +526,7 @@ async function processSlipImage(client, imageUrl, capperId, capperName, opts = {
   // FALLBACK/timeout → live path unchanged. Can never break the live path.
   if (ocrFirstWiring.MODE !== 'off' && imageUrl) {
     const ocrRes = await ocrFirstWiring.applyOcrFirst({
-      parsed, imageUrl, mediaType: undefined, requestId: ingestId, sourceRef,
+      parsed, imageUrl, mediaType: undefined, imageCount: 1, requestId: ingestId, sourceRef,
     });
     parsed = ocrRes.parsed;
   }
@@ -1069,6 +1069,7 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
           parsed,
           imageUrl: imageUrls[0],
           mediaType: combinedImages[0]?.type,
+          imageCount: imageUrls.length,
           requestId: ingestId,
           sourceRef,
         });

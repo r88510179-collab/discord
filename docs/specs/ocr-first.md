@@ -262,11 +262,12 @@ budget in cutover). The flag is read **at module load**. The seam guards on
   stages exactly as today. The staged bet is **never** modified. On resolve it emits one
   `ocr_shadow_decision` event comparing OCR to the live vision parse. ALL errors are
   swallowed.
-- **cutover (dormant)** — `runCutover` awaits `extractViaOcr` within `OCR_TIMEOUT_MS`.
-  `USE_OCR` → the OCR parse is converted to internal bets (`ocrBetToInternalBets`),
-  substituted into `parsed`, and staged by the existing pipeline (emits `ocr_used`).
-  `FALLBACK_GEMINI` / timeout / throw → returns null, live path runs unchanged (emits
-  `ocr_fallback`). A thrown or null-y ocrFirst can never break the live path in any mode.
+- **cutover (dormant)** — `runCutover` awaits `extractViaOcr` within `OCR_TIMEOUT_MS`. It
+  replaces `parsed` with the converted OCR bet (`ocrBetToInternalBets`, emits `ocr_used`)
+  **only when all §8.2 eligibility guards pass** (new bet + single-image + supported sport).
+  `FALLBACK_GEMINI` / timeout / throw / any failed guard → returns null, live path runs
+  unchanged (emits `ocr_fallback` with the specific reason). A thrown or null-y ocrFirst can
+  never break the live path in any mode.
 
 ### 8.1 Shadow acceptance criteria (bar to clear before flipping shadow → cutover)
 
@@ -282,16 +283,35 @@ Observe via `pipeline_events` where `stage='OCR_FIRST'` and
 `event_type='ocr_shadow_decision'`: `action`/`reason` histogram, `agreement` rate,
 `ocrLegCount` vs `liveLegCount`, and `ocrMs` for the p95.
 
-### 8.2 Cutover gaps (must clear before flipping the flag — dormant today)
+### 8.2 Cutover eligibility guards (in code; from Codex review of PR #33)
 
-- **Sport** — the OCR/Groq schema (§4) has no sport; `ocrBetToInternalBets` defaults to
-  `'Unknown'` (a known grading void-driver). Sport inference is a pre-cutover requirement.
-- **Validator** — `validateParsedBet` runs against the Discord message text, not the OCR
-  text; OCR slips rely on its `hasMedia:true` slip-exemption. Shadow must confirm OCR
-  bets survive that validator before cutover.
-- **Settled-recap routing** — the cutover hook replaces `parsed` *before* the
-  `result` / `untracked_win` / `ticket_status` (winner/loser) branches, so a settled slip
-  that OCR misreads as `USE_OCR` would be staged as a NEW bet instead of auto-grading the
-  recap. The outer settled-marker pre-filter still runs first, and this surfaces as a
-  shadow mismatch (live `ticket_status` vs OCR `USE_OCR`) — it is covered by the §8.1
-  "0 critical mismatches" bar.
+Cutover (`runCutover`) replaces the staged bet **ONLY when ALL three hold**: the live
+parse is a **new bet**, it is **single-image**, and the OCR parse resolves a **supported
+sport**. Every other case emits `ocr_fallback` with a distinct reason and stays on the
+live path. Guards run cheapest-first so the OCR call is skipped when we already know we'll
+fall back. (All dormant — `OCR_FIRST_MODE=off` — but enforced + tested.)
+
+| guard | skip reason | rationale |
+|-------|-------------|-----------|
+| live parse is `result` / `untracked_win` / `ticket_status` winner\|loser | `OCR_CUTOVER_SKIP_NONBET` | never restage a settled recap as a new bet (Fix 2) |
+| `imageCount > 1` | `OCR_CUTOVER_SKIP_MULTI_IMAGE` | OCR sees only `image[0]`; don't clobber the merged multi-image parse (Fix 3) |
+| OCR-derived sport ∉ {MLB,NBA,NFL,NHL,SOCCER,TENNIS,GOLF,MMA} | `OCR_CUTOVER_SKIP_SPORT` | no Unknown-sport replacements (Fix 4) |
+
+**Image-fetch hardening (Fix 1, holds in shadow AND cutover).** `fetchImageBytes` never
+fetches an arbitrary host: **HTTPS + Discord-CDN allowlist** (`cdn.discordapp.com`,
+`media.discordapp.net`) — a disallowed/non-https URL returns `OCR_IMAGE_HOST_BLOCKED` with
+no network call. An `AbortController` actually **aborts** the underlying fetch at the
+deadline (shadow: `OCR_SHADOW_TIMEOUT_MS` → `OCR_IMAGE_TIMEOUT`; cutover: remaining
+`OCR_TIMEOUT_MS` budget). Bytes are capped at `OCR_IMAGE_MAX_BYTES` (default 10MB) via a
+content-length pre-check **and** a streaming ceiling that aborts mid-download
+(`OCR_IMAGE_TOO_LARGE`) — never buffered unbounded.
+
+**Sport inference (Fix 4 first pass).** `ocrBetToInternalBets` infers sport lazily from the
+leg text via `ai.js inferLegSport` (the same map used live); it stays `'Unknown'` when
+nothing resolves, and the guard above then falls back. Full OCR-side sport inference (e.g.
+when only player names are present) is a later enhancement.
+
+**Remaining gap (not yet addressed; shadow must confirm before flip):** `validateParsedBet`
+runs against the Discord message text, not the OCR text — OCR slips rely on its
+`hasMedia:true` slip-exemption. Shadow must confirm OCR bets survive that validator before
+cutover.

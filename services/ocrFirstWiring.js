@@ -11,10 +11,10 @@
 //                        bet. NEVER throws. Adds ZERO latency to ingest (the OCR
 //                        ~4s floor runs entirely off the request path).
 //   cutover  (dormant) — awaits extractViaOcr within an OCR_TIMEOUT_MS budget.
-//                        On USE_OCR, returns OCR-derived bets to stage in place
-//                        of Gemini (emits `ocr_used`). On FALLBACK / timeout /
-//                        throw, returns null so the caller falls through to the
-//                        existing live path unchanged (emits `ocr_fallback`).
+//                        Replaces the staged bet ONLY when ALL eligibility guards
+//                        pass: live parse is a NEW bet (not a result/recap),
+//                        single-image, and OCR produced a SUPPORTED sport. Any
+//                        other case → null → caller stays on the live path.
 //
 // This module is the SINGLE tested code path shared by both slip seams
 // (handlers/messageHandler.js: processAggregatedMessage + processSlipImage), so
@@ -23,8 +23,9 @@
 // SAFETY: applyOcrFirst / runShadow / runCutover NEVER throw and NEVER return
 // null-for-parsed — a thrown or null-y ocrFirst can never break the live path in
 // ANY mode. All network/OCR work is dependency-injectable for unit tests
-// (deps.{fetchImageBytes, extractViaOcr, callOcrService, callGroqParse}); the
-// recordStage sink is injectable too (recordStageFn) so wiring tests need no DB.
+// (deps.{fetchImageBytes, extractViaOcr, inferSport, callOcrService,
+// callGroqParse}); the recordStage sink is injectable too (recordStageFn) so
+// wiring tests need no DB.
 // ═══════════════════════════════════════════════════════════
 
 'use strict';
@@ -39,13 +40,42 @@ function resolveMode(raw) {
 }
 const MODE = resolveMode(process.env.OCR_FIRST_MODE);
 
-// Cutover total-orchestration budget. extractViaOcr has its own internal OCR +
-// Groq timeouts; this caps the whole await so cutover never blocks staging past
-// the deadline. Read at call time so it tracks OCR_TIMEOUT_MS hot-swaps.
-function cutoverBudgetMs() {
-  const n = parseInt(process.env.OCR_TIMEOUT_MS, 10);
-  return Number.isFinite(n) && n > 0 ? n : 8000;
+// ── Wiring-level reason codes (distinct from ocrFirst's ReasonCode; surfaced in
+//    the shadow/cutover events so each fallback route is attributable). ──
+const WiringReason = Object.freeze({
+  NO_IMAGE_BYTES: 'OCR_NO_IMAGE_BYTES',
+  IMAGE_HOST_BLOCKED: 'OCR_IMAGE_HOST_BLOCKED',   // Fix 1: non-https / non-allowlisted host — never fetched
+  IMAGE_TOO_LARGE: 'OCR_IMAGE_TOO_LARGE',         // Fix 1: content-length or streamed bytes exceed cap — aborted
+  IMAGE_TIMEOUT: 'OCR_IMAGE_TIMEOUT',             // Fix 1: fetch AbortController fired — fetch aborted
+  CUTOVER_SKIP_NONBET: 'OCR_CUTOVER_SKIP_NONBET', // Fix 2: live parse is result/recap — never restage as new bet
+  CUTOVER_SKIP_MULTI_IMAGE: 'OCR_CUTOVER_SKIP_MULTI_IMAGE', // Fix 3: >1 image — OCR saw only image[0]
+  CUTOVER_SKIP_SPORT: 'OCR_CUTOVER_SKIP_SPORT',   // Fix 4: OCR-derived sport unresolved/unsupported
+  CUTOVER_EXCEPTION: 'OCR_CUTOVER_EXCEPTION',
+  CONVERT_EMPTY: 'OCR_CONVERT_EMPTY',
+});
+
+// Discord CDN image hosts — slip images arrive as direct uploads
+// (getImageAttachments → att.url on cdn.discordapp.com; media.discordapp.net is
+// the refreshed/proxied variant). Embed images are external tweet previews, NOT
+// slips, so they are intentionally NOT allowlisted. No arbitrary-host fetch.
+const ALLOWED_IMAGE_HOSTS = new Set(['cdn.discordapp.com', 'media.discordapp.net']);
+
+// Sports the grader supports (mirrors services/ai.js SPORT_TEAM_MAP keys). The
+// cutover converter must resolve one of these or it falls back (Fix 4).
+const SUPPORTED_SPORTS = new Set(['MLB', 'NBA', 'NFL', 'NHL', 'SOCCER', 'TENNIS', 'GOLF', 'MMA']);
+
+// ── Config getters (read at call time so secrets hot-swap) ──
+function intEnv(name, fallback) {
+  const n = parseInt(process.env[name], 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
 }
+function baseTimeoutMs() { return intEnv('OCR_TIMEOUT_MS', 8000); }
+// Cutover total-orchestration budget: ONE deadline shared across fetch + extract.
+function cutoverBudgetMs() { return baseTimeoutMs(); }
+// Shadow fetch abort deadline (fire-and-forget path); falls back to OCR_TIMEOUT_MS.
+function shadowTimeoutMs() { return intEnv('OCR_SHADOW_TIMEOUT_MS', baseTimeoutMs()); }
+// Hard ceiling on fetched image bytes (content-length AND streamed). Default 10MB.
+function imageMaxBytes() { return intEnv('OCR_IMAGE_MAX_BYTES', 10 * 1024 * 1024); }
 
 // Lazy pipeline-events require — keeps this module (and the wiring unit tests)
 // free of the database.js require chain unless an emit actually fires with the
@@ -54,6 +84,18 @@ let _recordStage = null;
 function defaultRecordStage(evt) {
   if (!_recordStage) _recordStage = require('./pipeline-events').recordStage;
   return _recordStage(evt);
+}
+
+// Lazy ai.js require for sport inference — ai.js carries no DB dep but is heavy
+// (sharp); load it only when the cutover converter actually runs. Never throws.
+let _inferLegSport = null;
+function lazyInferLegSport(desc) {
+  try {
+    if (!_inferLegSport) _inferLegSport = require('./ai').inferLegSport;
+    return _inferLegSport(desc);
+  } catch (_) {
+    return null;
+  }
 }
 
 // ── Small parse helpers (cutover converter) ──
@@ -97,20 +139,31 @@ function mapBetType(ocrBetType, legCount) {
   return legCount > 1 ? 'parlay' : 'straight';
 }
 
+// First supported sport inferred across the leg descriptions, else null.
+function inferSportFromLegs(internalLegs, inferFn) {
+  const fn = inferFn || lazyInferLegSport;
+  for (const l of internalLegs) {
+    const sport = fn(l.description || '');
+    if (sport && SUPPORTED_SPORTS.has(String(sport).toUpperCase())) return String(sport).toUpperCase();
+  }
+  return null;
+}
+function isSupportedSport(sport) {
+  return !!sport && SUPPORTED_SPORTS.has(String(sport).toUpperCase().trim());
+}
+
 /**
  * Convert a Groq OCR parsedBet (docs/specs/ocr-first.md §4 schema) into the
  * internal bet shape consumed by the existing staging pipeline
  * (createBetWithLegs). Returns an ARRAY (one slip = one bet w/ legs) so a
  * multi-image merge upstream is a no-op (length 1). Returns [] if unusable.
  *
- * CUTOVER GAPS (dormant — must clear before flipping the flag, see spec §8):
- *  - The OCR/Groq schema carries NO sport → bets default to sport 'Unknown'
- *    (a known grading void-driver). Sport inference is a pre-cutover requirement.
- *  - validateParsedBet runs against the Discord message text, not the OCR text;
- *    OCR slips rely on its hasMedia:true slip-exemption. Shadow must confirm OCR
- *    bets survive that validator before cutover.
+ * Sport is inferred lazily from the leg text via ai.js inferLegSport (Fix 4); it
+ * stays 'Unknown' when nothing resolves, and the cutover path then falls back
+ * rather than staging an Unknown-sport bet. `opts.inferSport` overrides the
+ * inferrer for tests.
  */
-function ocrBetToInternalBets(ocr) {
+function ocrBetToInternalBets(ocr, opts = {}) {
   if (!ocr || typeof ocr !== 'object') return [];
   const legs = Array.isArray(ocr.legs) ? ocr.legs.filter(Boolean) : [];
   if (legs.length === 0) return [];
@@ -123,9 +176,10 @@ function ocrBetToInternalBets(ocr) {
   if (internalLegs.length === 0) return [];
 
   const description = internalLegs.map((l) => l.description).join('\n');
+  const sport = inferSportFromLegs(internalLegs, opts.inferSport) || 'Unknown';
 
   return [{
-    sport: 'Unknown',         // OCR schema has no sport — see CUTOVER GAPS above
+    sport,
     league: null,
     bet_type: betType,
     description,
@@ -138,28 +192,6 @@ function ocrBetToInternalBets(ocr) {
   }];
 }
 
-// ── Image fetch (URL → base64 + mediaType). NEVER throws. ──
-// The slip seam has the image as a Discord CDN URL, not base64; OCR needs bytes.
-// In shadow this runs in the background (off the request path); in cutover it
-// runs inside the timeout budget.
-async function fetchImageBytes(imageUrl, fallbackMediaType) {
-  try {
-    if (!imageUrl) return null;
-    const res = await fetch(imageUrl);
-    if (!res || !res.ok) return null;
-    let mediaType = s(fallbackMediaType) || null;
-    try {
-      const ct = res.headers && res.headers.get ? res.headers.get('content-type') : '';
-      if (ct && ct.toLowerCase().startsWith('image/')) mediaType = ct.split(';')[0].trim();
-    } catch (_) { /* header read optional */ }
-    if (!mediaType) mediaType = guessMediaType(imageUrl) || 'image/png';
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (!buf || buf.length === 0) return null;
-    return { base64: buf.toString('base64'), mediaType };
-  } catch (_) {
-    return null; // unreachable / aborted — caller degrades to live path
-  }
-}
 function guessMediaType(url) {
   const u = String(url || '').toLowerCase().split('?')[0];
   if (u.endsWith('.webp')) return 'image/webp';
@@ -167,6 +199,94 @@ function guessMediaType(url) {
   if (u.endsWith('.png')) return 'image/png';
   if (u.endsWith('.gif')) return 'image/gif';
   return null;
+}
+
+/**
+ * Fetch slip image bytes (URL → base64 + mediaType). NEVER throws — returns a
+ * typed result `{ ok:true, base64, mediaType }` or `{ ok:false, reason }`.
+ *
+ * Hardened (Fix 1):
+ *  - HTTPS + host allowlist (Discord CDN). Disallowed/non-https → IMAGE_HOST_BLOCKED
+ *    with NO network attempt.
+ *  - AbortController that actually ABORTS the underlying fetch at `timeoutMs`
+ *    (shadow: OCR_SHADOW_TIMEOUT_MS; cutover: remaining OCR_TIMEOUT_MS budget).
+ *  - Byte cap (OCR_IMAGE_MAX_BYTES): content-length pre-check AND a streaming
+ *    ceiling that aborts mid-download; never buffers unbounded.
+ */
+async function fetchImageBytes(imageUrl, fallbackMediaType, timeoutMs) {
+  if (!imageUrl) return { ok: false, reason: WiringReason.NO_IMAGE_BYTES };
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(String(imageUrl));
+  } catch (_) {
+    return { ok: false, reason: WiringReason.IMAGE_HOST_BLOCKED };
+  }
+  if (parsedUrl.protocol !== 'https:' || !ALLOWED_IMAGE_HOSTS.has(parsedUrl.hostname.toLowerCase())) {
+    return { ok: false, reason: WiringReason.IMAGE_HOST_BLOCKED }; // never fetched
+  }
+
+  const max = imageMaxBytes();
+  const controller = new AbortController();
+  const ms = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : baseTimeoutMs();
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; try { controller.abort(); } catch (_) { /* noop */ } }, ms);
+
+  try {
+    const res = await fetch(String(imageUrl), { signal: controller.signal });
+    if (!res || !res.ok) { clearTimeout(timer); return { ok: false, reason: WiringReason.NO_IMAGE_BYTES }; }
+
+    // mediaType: prefer the response content-type, then caller hint, then ext, then png.
+    let mediaType = '';
+    try {
+      const ct = res.headers && res.headers.get ? res.headers.get('content-type') : '';
+      if (ct && ct.toLowerCase().startsWith('image/')) mediaType = ct.split(';')[0].trim();
+    } catch (_) { /* header read optional */ }
+    if (!mediaType) mediaType = s(fallbackMediaType) || guessMediaType(imageUrl) || 'image/png';
+
+    // content-length pre-check — reject before downloading a known-oversized body.
+    let clen = NaN;
+    try { clen = parseInt(res.headers && res.headers.get ? res.headers.get('content-length') : '', 10); } catch (_) { /* noop */ }
+    if (Number.isFinite(clen) && clen > max) {
+      try { controller.abort(); } catch (_) { /* noop */ }
+      clearTimeout(timer);
+      return { ok: false, reason: WiringReason.IMAGE_TOO_LARGE };
+    }
+
+    // Streaming ceiling — abort mid-download if the body exceeds the cap.
+    let buf = null;
+    const reader = res.body && typeof res.body.getReader === 'function' ? res.body.getReader() : null;
+    if (reader) {
+      const chunks = [];
+      let total = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          total += value.length;
+          if (total > max) {
+            try { controller.abort(); } catch (_) { /* noop */ }
+            try { await reader.cancel(); } catch (_) { /* noop */ }
+            clearTimeout(timer);
+            return { ok: false, reason: WiringReason.IMAGE_TOO_LARGE };
+          }
+          chunks.push(Buffer.from(value));
+        }
+      }
+      buf = Buffer.concat(chunks);
+    } else {
+      // No streaming reader available — buffer then post-check the cap.
+      buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length > max) { clearTimeout(timer); return { ok: false, reason: WiringReason.IMAGE_TOO_LARGE }; }
+    }
+
+    clearTimeout(timer);
+    if (!buf || buf.length === 0) return { ok: false, reason: WiringReason.NO_IMAGE_BYTES };
+    return { ok: true, base64: buf.toString('base64'), mediaType };
+  } catch (err) {
+    clearTimeout(timer);
+    if (timedOut || (err && err.name === 'AbortError')) return { ok: false, reason: WiringReason.IMAGE_TIMEOUT };
+    return { ok: false, reason: WiringReason.NO_IMAGE_BYTES }; // unreachable / reset
+  }
 }
 
 // ── Live-vs-OCR comparison (shadow) ──
@@ -203,6 +323,14 @@ function compareToLive(decision, parsed) {
   return { ocrLegCount, liveLegCount, agreement, mismatchFields };
 }
 
+// Live parse is a settled result / recap, not a new bet to stage.
+function isNonNewBet(parsed) {
+  if (!parsed || typeof parsed !== 'object') return false;
+  if (parsed.type === 'result' || parsed.type === 'untracked_win') return true;
+  if (parsed.ticket_status === 'winner' || parsed.ticket_status === 'loser') return true;
+  return false;
+}
+
 // ── Event emitters (lean payloads; never throw) ──
 function emit(recordStageFn, eventType, requestId, sourceRef, payload) {
   try {
@@ -221,18 +349,27 @@ function emit(recordStageFn, eventType, requestId, sourceRef, payload) {
  * SHADOW — fire-and-forget. Returns the background promise (for tests to await),
  * but PRODUCTION CALLERS MUST NOT AWAIT IT. Never rejects; never touches the
  * staged bet. Emits exactly one `ocr_shadow_decision` per invocation.
+ *
+ * Fix 1: the fetch is hardened + abort-bounded by OCR_SHADOW_TIMEOUT_MS.
+ * Fix 3: when imageCount > 1 the OCR saw only image[0] while the live parse
+ *        merged all images — the event is labelled `scope:image[0]_of_multi`,
+ *        agreement is forced false, and `multiImage` is added to mismatchFields
+ *        so the comparison is not misread as agreement.
  */
-function runShadow({ imageUrl, mediaType, requestId, sourceRef, liveParsed, deps, recordStageFn }) {
+function runShadow({ imageUrl, mediaType, requestId, sourceRef, liveParsed, deps, recordStageFn, imageCount }) {
   const fetchBytes = (deps && deps.fetchImageBytes) || fetchImageBytes;
   const extract = (deps && deps.extractViaOcr) || extractViaOcr;
+  const count = Number(imageCount) > 0 ? Number(imageCount) : 1;
+  const multi = count > 1;
+  const scope = multi ? 'image[0]_of_multi' : 'single';
   return Promise.resolve()
     .then(async () => {
-      const img = await fetchBytes(imageUrl, mediaType);
-      if (!img) {
+      const img = await fetchBytes(imageUrl, mediaType, shadowTimeoutMs());
+      if (!img || img.ok !== true) {
         emit(recordStageFn, 'ocr_shadow_decision', requestId, sourceRef, {
-          action: 'FALLBACK_GEMINI', reason: 'OCR_NO_IMAGE_BYTES',
+          action: 'FALLBACK_GEMINI', reason: (img && img.reason) || WiringReason.NO_IMAGE_BYTES,
           ocrLegCount: 0, liveLegCount: countLiveLegs(liveParsed),
-          agreement: false, mismatchFields: ['noImageBytes'],
+          agreement: false, mismatchFields: ['noImageBytes'], imageCount: count, scope,
         });
         return;
       }
@@ -243,9 +380,11 @@ function runShadow({ imageUrl, mediaType, requestId, sourceRef, liveParsed, deps
         reason: decision.reason,
         ocrLegCount: cmp.ocrLegCount,
         liveLegCount: cmp.liveLegCount,
-        agreement: cmp.agreement,
-        mismatchFields: cmp.mismatchFields,
+        agreement: multi ? false : cmp.agreement,
+        mismatchFields: multi ? [...new Set([...cmp.mismatchFields, 'multiImage'])] : cmp.mismatchFields,
         ocrMs: decision.timingsMs ? decision.timingsMs.total : null,
+        imageCount: count,
+        scope,
         validationErrors: decision.validationErrors && decision.validationErrors.length ? decision.validationErrors : undefined,
       });
     })
@@ -269,22 +408,45 @@ function withTimeout(p, ms, fallback) {
 }
 
 /**
- * CUTOVER (dormant) — await extractViaOcr within the OCR_TIMEOUT_MS budget.
- * Returns { useOcr:true, parsed:<bet>, decision } on a usable USE_OCR, else null
- * (→ caller stays on the live path). NEVER throws. Emits `ocr_used`/`ocr_fallback`.
+ * CUTOVER (dormant) — replace the staged bet with an OCR parse ONLY when every
+ * eligibility guard passes; otherwise return null (→ caller stays on the live
+ * path). NEVER throws. Emits `ocr_used` / `ocr_fallback`.
+ *
+ * Eligibility (in order, cheapest first so we skip the OCR call when we already
+ * know we'll fall back):
+ *   Fix 2 — live parse must be a NEW bet (not result/untracked_win/winner/loser).
+ *   Fix 3 — single image only (imageCount <= 1).
+ *   then fetch (Fix 1) + extractViaOcr within the shared OCR_TIMEOUT_MS deadline.
+ *   Fix 4 — the OCR-derived bet must resolve a SUPPORTED sport.
  */
-async function runCutover({ imageUrl, mediaType, requestId, sourceRef, deps, recordStageFn }) {
+async function runCutover({ imageUrl, mediaType, requestId, sourceRef, deps, recordStageFn, liveParsed, imageCount }) {
   const fetchBytes = (deps && deps.fetchImageBytes) || fetchImageBytes;
   const extract = (deps && deps.extractViaOcr) || extractViaOcr;
-  // ONE total budget shared across fetch + extract (the "OCR_TIMEOUT_MS budget"):
-  // each stage gets only the remaining time, so cutover staging is bounded at
-  // ~OCR_TIMEOUT_MS total, not 2× (fetch then extract each getting the full budget).
-  const deadline = Date.now() + cutoverBudgetMs();
-  const remainingMs = () => Math.max(0, deadline - Date.now());
   try {
-    const img = await withTimeout(fetchBytes(imageUrl, mediaType), remainingMs(), null);
-    if (!img) {
-      emit(recordStageFn, 'ocr_fallback', requestId, sourceRef, { reason: 'OCR_NO_IMAGE_BYTES' });
+    // Fix 2 — never restage a settled result / recap slip as a new bet.
+    if (isNonNewBet(liveParsed)) {
+      emit(recordStageFn, 'ocr_fallback', requestId, sourceRef, {
+        reason: WiringReason.CUTOVER_SKIP_NONBET,
+        liveType: (liveParsed && liveParsed.type) || null,
+        ticketStatus: (liveParsed && liveParsed.ticket_status) || null,
+      });
+      return null;
+    }
+    // Fix 3 — single-image OCR must not replace a merged multi-image parse.
+    if (Number(imageCount) > 1) {
+      emit(recordStageFn, 'ocr_fallback', requestId, sourceRef, {
+        reason: WiringReason.CUTOVER_SKIP_MULTI_IMAGE, imageCount: Number(imageCount),
+      });
+      return null;
+    }
+
+    // ONE total budget shared across fetch + extract (the "OCR_TIMEOUT_MS budget").
+    const deadline = Date.now() + cutoverBudgetMs();
+    const remainingMs = () => Math.max(0, deadline - Date.now());
+
+    const img = await fetchBytes(imageUrl, mediaType, remainingMs());
+    if (!img || img.ok !== true) {
+      emit(recordStageFn, 'ocr_fallback', requestId, sourceRef, { reason: (img && img.reason) || WiringReason.NO_IMAGE_BYTES });
       return null;
     }
     const decision = await withTimeout(
@@ -292,22 +454,31 @@ async function runCutover({ imageUrl, mediaType, requestId, sourceRef, deps, rec
       remainingMs(),
       { action: 'FALLBACK_GEMINI', reason: 'OCR_TIMEOUT', parsedBet: null },
     );
-    if (decision && decision.action === 'USE_OCR' && decision.parsedBet) {
-      const bets = ocrBetToInternalBets(decision.parsedBet);
-      if (!bets.length) {
-        emit(recordStageFn, 'ocr_fallback', requestId, sourceRef, { reason: 'OCR_CONVERT_EMPTY' });
-        return null;
-      }
-      emit(recordStageFn, 'ocr_used', requestId, sourceRef, {
-        reason: decision.reason, legCount: bets[0].legs ? bets[0].legs.length : 0,
-      });
-      return { useOcr: true, parsed: { type: 'bet', is_bet: true, bets, ticket_status: 'new' }, decision };
+    if (!(decision && decision.action === 'USE_OCR' && decision.parsedBet)) {
+      emit(recordStageFn, 'ocr_fallback', requestId, sourceRef, { reason: decision ? decision.reason : 'OCR_UNKNOWN' });
+      return null;
     }
-    emit(recordStageFn, 'ocr_fallback', requestId, sourceRef, { reason: decision ? decision.reason : 'OCR_UNKNOWN' });
-    return null;
+
+    const bets = ocrBetToInternalBets(decision.parsedBet, { inferSport: deps && deps.inferSport });
+    if (!bets.length) {
+      emit(recordStageFn, 'ocr_fallback', requestId, sourceRef, { reason: WiringReason.CONVERT_EMPTY });
+      return null;
+    }
+    // Fix 4 — do not stage an Unknown/unsupported-sport bet.
+    if (!isSupportedSport(bets[0].sport)) {
+      emit(recordStageFn, 'ocr_fallback', requestId, sourceRef, {
+        reason: WiringReason.CUTOVER_SKIP_SPORT, sport: bets[0].sport || null,
+      });
+      return null;
+    }
+
+    emit(recordStageFn, 'ocr_used', requestId, sourceRef, {
+      reason: decision.reason, sport: bets[0].sport, legCount: bets[0].legs ? bets[0].legs.length : 0,
+    });
+    return { useOcr: true, parsed: { type: 'bet', is_bet: true, bets, ticket_status: 'new' }, decision };
   } catch (err) {
     // Cutover must degrade to the live path on ANY failure.
-    emit(recordStageFn, 'ocr_fallback', requestId, sourceRef, { reason: 'OCR_CUTOVER_EXCEPTION', error: s(err && err.message).slice(0, 120) });
+    emit(recordStageFn, 'ocr_fallback', requestId, sourceRef, { reason: WiringReason.CUTOVER_EXCEPTION, error: s(err && err.message).slice(0, 120) });
     return null;
   }
 }
@@ -319,20 +490,20 @@ async function runCutover({ imageUrl, mediaType, requestId, sourceRef, deps, rec
  *   off / no image → no-op; extractViaOcr never called.
  *   shadow         → fire-and-forget; `parsed` returned UNCHANGED (same ref);
  *                    `shadowPromise` is the bg task (callers DO NOT await it).
- *   cutover        → awaited; on USE_OCR `parsed` is REPLACED with OCR bets,
- *                    else returned unchanged.
+ *   cutover        → awaited; on an ELIGIBLE USE_OCR `parsed` is REPLACED with
+ *                    OCR bets, else returned unchanged.
  */
-async function applyOcrFirst({ parsed, imageUrl, mediaType, requestId, sourceRef, mode = MODE, deps, recordStageFn } = {}) {
+async function applyOcrFirst({ parsed, imageUrl, mediaType, imageCount, requestId, sourceRef, mode = MODE, deps, recordStageFn } = {}) {
   try {
     if (mode === 'off' || !imageUrl) return { parsed, ranOcr: false, shadowPromise: null };
 
     if (mode === 'shadow') {
-      const shadowPromise = runShadow({ imageUrl, mediaType, requestId, sourceRef, liveParsed: parsed, deps, recordStageFn });
+      const shadowPromise = runShadow({ imageUrl, mediaType, imageCount, requestId, sourceRef, liveParsed: parsed, deps, recordStageFn });
       return { parsed, ranOcr: true, shadowPromise };
     }
 
     if (mode === 'cutover') {
-      const ocr = await runCutover({ imageUrl, mediaType, requestId, sourceRef, deps, recordStageFn });
+      const ocr = await runCutover({ imageUrl, mediaType, imageCount, requestId, sourceRef, deps, recordStageFn, liveParsed: parsed });
       if (ocr && ocr.useOcr) return { parsed: ocr.parsed, ranOcr: true, shadowPromise: null, decision: ocr.decision };
       return { parsed, ranOcr: true, shadowPromise: null, decision: ocr ? ocr.decision : null };
     }
@@ -354,6 +525,12 @@ module.exports = {
   ocrBetToInternalBets,
   compareToLive,
   fetchImageBytes,
+  isNonNewBet,
+  isSupportedSport,
+  inferSportFromLegs,
+  WiringReason,
+  ALLOWED_IMAGE_HOSTS,
+  SUPPORTED_SPORTS,
   // exposed for tests / introspection
   parseAmericanOdds,
   parseMoney,
