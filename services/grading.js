@@ -1,7 +1,145 @@
+const crypto = require('crypto');
 const { getPendingBets, gradeBet, updateBankroll, saveDailySnapshot, getBankroll, db, payoutTailers } = require('./database');
 const { gradeBetAI } = require('./ai');
 const bets = require('./bets');
 const delay = ms => new Promise(res => setTimeout(res, ms));
+
+// ═══════════════════════════════════════════════════════════
+// Phase-1 deterministic grading gates (the LLM proposes; code disposes).
+//   Gate 1 — reduceParlayResult: pure parlay reducer (keystone)
+//   Gate 2 — GRADER_VERSION / computeEvidenceHash / decideFinalGradeWrite
+//   Gate 3 — validateEvidenceQuote: quote-bound, code-enforced grading
+// See docs/CODEMAP.md §grading.js and prompts/phase1-grading-gates.md.
+// ═══════════════════════════════════════════════════════════
+
+// ── Gate 2: idempotent final grades ──
+// GRADER_VERSION is a code constant — bump it manually whenever grading LOGIC
+// changes (reducer precedence, guards, prompt). It is deliberately NOT tied to
+// the Fly release: a redeploy of unchanged logic must keep the same version so
+// existing final grades stay idempotent.
+const GRADER_VERSION = 'phase1-gates-v1';
+
+// sha256 of the canonicalized evidence text used to grade a bet. Whitespace-
+// collapsed and lowercased so cosmetically-different-but-identical evidence
+// hashes the same. Same inputs → same hash.
+function computeEvidenceHash(evidenceText) {
+  const canon = String(evidenceText == null ? '' : evidenceText)
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  return crypto.createHash('sha256').update(canon).digest('hex');
+}
+
+// Pure decision: given a bet's currently-persisted grade row and a new grade's
+// idempotency key, decide whether the write may proceed.
+//   existing: { result, grade, evidence_hash, grader_version } | null | undefined
+// Returns { write: boolean, reason: string }.
+//
+// Rules (per Gate 2 spec):
+//   - No prior FINAL grade (never graded, or still 'pending')      → write.
+//   - Already finalized, SAME (evidence_hash, grader_version)      → DO NOT
+//     rewrite; the caller returns the stored final.
+//   - Already finalized, key differs → overwrite ONLY on explicit admin
+//     override OR genuinely newer evidence (evidence_hash changed). Otherwise
+//     the final grade is locked.
+function decideFinalGradeWrite(existing, { evidenceHash, graderVersion, adminOverride = false } = {}) {
+  // No prior FINAL grade (never graded, or still 'pending') → write.
+  if (!existing || !existing.result || existing.result === 'pending') {
+    return { write: true, reason: 'no_prior_final' };
+  }
+  // Explicit admin override always wins (a standalone overwrite permission).
+  if (adminOverride) return { write: true, reason: 'admin_override' };
+  // Same idempotency key → return the stored final; do NOT rewrite.
+  if (existing.evidence_hash === evidenceHash && existing.grader_version === graderVersion) {
+    return { write: false, reason: 'idempotent_same_key' };
+  }
+  // Genuinely newer evidence (a non-null prior hash that changed) → write.
+  if (existing.evidence_hash && existing.evidence_hash !== evidenceHash) {
+    return { write: true, reason: 'evidence_changed' };
+  }
+  // Finalized, key differs for any other reason (e.g. version bump only) → locked.
+  return { write: false, reason: 'final_grade_locked' };
+}
+
+// ── Gate 3: quote-bound grading (code-enforced anti-hallucination) ──
+// For any non-PENDING result, the model must return an evidence_quote that is
+// an EXACT substring (whitespace-normalized) of the evidence it was given.
+// This is a string check, not a trust call — it works with a small model.
+function normalizeQuoteWhitespace(s) {
+  return String(s == null ? '' : s).replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+// Returns { ok: boolean, reason: string, detail?: string }.
+// PENDING is exempt (nothing to verify). For WIN/LOSS/PUSH/VOID the quote must
+// be a non-empty exact substring of evidenceText; otherwise UNVERIFIED_QUOTE.
+function validateEvidenceQuote(parsed, evidenceText) {
+  const status = String(parsed && parsed.status != null ? parsed.status : '').toUpperCase();
+  if (status === 'PENDING' || status === '') return { ok: true, reason: 'pending_exempt' };
+
+  const quote = parsed ? parsed.evidence_quote : null;
+  if (!quote || typeof quote !== 'string' || normalizeQuoteWhitespace(quote).length === 0) {
+    return { ok: false, reason: 'UNVERIFIED_QUOTE', detail: 'missing evidence_quote' };
+  }
+  const haystack = normalizeQuoteWhitespace(evidenceText);
+  const needle = normalizeQuoteWhitespace(quote);
+  if (!haystack.includes(needle)) {
+    return { ok: false, reason: 'UNVERIFIED_QUOTE', detail: 'evidence_quote is not an exact substring of the evidence' };
+  }
+  return { ok: true, reason: 'verified' };
+}
+
+// ── Gate 1: deterministic parlay reducer (keystone) ──
+// The LLM grades legs only; THIS pure function computes the parlay result.
+// Precedence (first match wins): LOSS > PENDING > WIN.
+//   1. any leg LOSS                          → LOSS  (a confirmed failed leg
+//                                              settles it; PENDING legs are
+//                                              irrelevant)
+//   2. else any leg PENDING/null/unknown     → PENDING
+//   3. else every non-VOID/PUSH leg is WIN:
+//        ≥1 WIN remains  → WIN  (reduced=true if any VOID/PUSH were dropped)
+//        all VOID/PUSH   → VOID (per existing behavior — PUSH is folded into
+//                          VOID here, unchanged from the prior aggregator)
+//
+// INVARIANT: a leg not explicitly WIN/LOSS/PUSH/VOID is treated as PENDING and
+// can NEVER count toward a WIN. Uncertainty → PENDING.
+const PARLAY_LEG_STATUSES = new Set(['WIN', 'LOSS', 'PUSH', 'VOID']);
+
+function normalizeLegStatus(s) {
+  const up = String(s == null ? '' : s).trim().toUpperCase();
+  return PARLAY_LEG_STATUSES.has(up) ? up : 'PENDING';
+}
+
+// rawStatuses: array of per-leg status strings (any case; null/unknown allowed).
+// Returns { status: 'WIN'|'LOSS'|'PUSH'|'VOID'|'PENDING', reduced: boolean }.
+function reduceParlayResult(rawStatuses) {
+  const statuses = (rawStatuses || []).map(normalizeLegStatus);
+  const count = st => statuses.filter(s => s === st).length;
+  const hasPending = statuses.includes('PENDING') || statuses.length === 0;
+
+  let result;
+  if (count('LOSS') > 0) {
+    result = { status: 'LOSS', reduced: false };
+  } else if (hasPending) {
+    result = { status: 'PENDING', reduced: false };
+  } else {
+    const wins = count('WIN');
+    const dropped = statuses.length - wins; // remaining are VOID/PUSH
+    if (wins > 0) {
+      result = { status: 'WIN', reduced: dropped > 0 };
+    } else {
+      result = { status: 'VOID', reduced: false }; // all legs VOID/PUSH
+    }
+  }
+
+  // Invariant assertion: WIN must never be returned while any leg is PENDING.
+  // If this ever trips, the reducer has a logic bug — fail closed to PENDING
+  // (uncertainty → PENDING) and log loudly rather than emit a phantom WIN.
+  if (result.status === 'WIN' && statuses.includes('PENDING')) {
+    console.error(`[reduceParlayResult] INVARIANT VIOLATION: WIN with PENDING leg(s) — forcing PENDING. statuses=${JSON.stringify(statuses)}`);
+    return { status: 'PENDING', reduced: false, invariantViolation: true };
+  }
+  return result;
+}
 // ── Supported sports for grading ──
 // Bets outside this set get auto-voided at the top of gradePropWithAI
 // (see the "AUTO-VOID UNSCOPED BETS" block). Keep in sync with the
@@ -1622,62 +1760,68 @@ function isTrustedLossLeg(leg, evidence, parentSport) {
 // Extracted from gradeParlay so the trusted-LOSS short-circuit and the
 // leg-explosion guard are unit-testable without live leg grading.
 function aggregateParlayLegResults(legResults, legs, parlayBet) {
-  // Compute parlay result
-  const statuses = legResults.map(lr => lr.status);
-  const losses = statuses.filter(s => s === 'LOSS').length;
-  const pendings = statuses.filter(s => s === 'PENDING').length;
-  const wins = statuses.filter(s => s === 'WIN').length;
-  const voids = statuses.filter(s => s === 'VOID' || s === 'PUSH').length;
-
   const summary = legResults.map((lr, i) =>
     `Leg ${i + 1}: ${lr.status} — ${lr.leg.description?.slice(0, 50)} (${lr.evidence?.slice(0, 60)})`
   ).join('\n');
 
-  // Trusted-LOSS short-circuit (added 2026-05-14).
-  // A LOSS leg ends the parlay regardless of other legs — IF the evidence is
-  // trustworthy. Untrusted LOSS evidence (cross-sport contamination, prop
-  // guard tripped, placeholder text) falls through to PENDING-blocks-LOSS
-  // (commit 42a2296, 2026-05-13).
-  //
-  // Leg-explosion guard: if legs.length > bullet_count + 1, the parser has
-  // over-split this bet. Don't short-circuit on any LOSS — these bets need
-  // manual review.
+  // Trusted-LOSS handling (added 2026-05-14, commit 42a2296).
+  // A LOSS leg ends the parlay — IF its evidence is trustworthy. Untrusted
+  // LOSS evidence (cross-sport contamination, prop-guard tripped, placeholder
+  // text) is NOT a confirmed loss, so we DOWNGRADE it to PENDING before the
+  // reducer runs (uncertainty → PENDING). That preserves the prior
+  // "PENDING-blocks-untrusted-LOSS" behavior while letting Gate 1's pure
+  // reducer own the final precedence (LOSS > PENDING > WIN).
+  const adjusted = legResults.map(lr => {
+    if (lr.status === 'LOSS' && !isTrustedLossLeg(lr.leg, lr.evidence, parlayBet.sport)) {
+      return { ...lr, status: 'PENDING', _untrustedLoss: true };
+    }
+    return lr;
+  });
+  const statuses = adjusted.map(lr => lr.status);
+  const pendings = statuses.filter(s => s === 'PENDING').length;
 
+  // Leg-explosion guard: if legs.length > bullet_count + 1 the parser has
+  // over-split this bet. While anything is still pending, the split is
+  // unreliable — force PENDING for manual review (runs BEFORE the reducer so a
+  // trusted LOSS can't settle an over-split parlay).
   const bulletCount = (parlayBet.description?.match(/•/g) || []).length;
   const legCountSane = bulletCount === 0
     ? legs.length <= 20
     : legs.length <= bulletCount + 1;
-
-  if (legCountSane && losses > 0) {
-    // Find the first trusted LOSS leg
-    const trustedLoss = legResults.find(lr =>
-      lr.status === 'LOSS' && isTrustedLossLeg(lr.leg, lr.evidence, parlayBet.sport)
-    );
-
-    if (trustedLoss) {
-      const legIdx = legResults.indexOf(trustedLoss) + 1;
-      const shortDesc = (trustedLoss.leg.description || '').slice(0, 50);
-      const shortEvidence = (trustedLoss.evidence || '').slice(0, 80);
-      return {
-        status: 'LOSS',
-        evidence: `Parlay LOSS — leg ${legIdx} (${shortDesc}) lost. ${shortEvidence}\n${summary}`,
-      };
-    }
+  if (!legCountSane && pendings > 0) {
+    return {
+      status: 'PENDING',
+      evidence: `Parlay PENDING [LEG_EXPLOSION_GUARD]: legs.length=${legs.length} exceeds bullet_count=${bulletCount}+1. Manual review required.\n${summary}`,
+    };
   }
 
-  if (pendings > 0) {
-    if (!legCountSane) {
-      return {
-        status: 'PENDING',
-        evidence: `Parlay PENDING [LEG_EXPLOSION_GUARD]: legs.length=${legs.length} exceeds bullet_count=${bulletCount}+1. Manual review required.\n${summary}`,
-      };
-    }
+  // Gate 1: the pure reducer is the SINGLE source of the parlay's result.
+  const reduced = reduceParlayResult(statuses);
+
+  if (reduced.status === 'LOSS') {
+    // Name the first confirmed losing leg, preserving the prior evidence shape.
+    const lossIdx = adjusted.findIndex(lr => lr.status === 'LOSS');
+    const lossLeg = adjusted[lossIdx];
+    const shortDesc = (lossLeg?.leg.description || '').slice(0, 50);
+    const shortEvidence = (lossLeg?.evidence || '').slice(0, 80);
+    return {
+      status: 'LOSS',
+      evidence: `Parlay LOSS — leg ${lossIdx + 1} (${shortDesc}) lost. ${shortEvidence}\n${summary}`,
+    };
+  }
+  if (reduced.status === 'PENDING') {
     return { status: 'PENDING', evidence: `Parlay PENDING — ${pendings} leg(s) unresolved.\n${summary}` };
   }
-  if (losses > 0) return { status: 'LOSS', evidence: `Parlay LOSS — ${losses} leg(s) lost.\n${summary}` };
-  if (wins === legResults.length) return { status: 'WIN', evidence: `Parlay WIN — all ${wins} legs hit.\n${summary}` };
-  if (voids === legResults.length) return { status: 'VOID', evidence: `Parlay VOID — all legs voided.\n${summary}` };
-  return { status: 'WIN', evidence: `Parlay WIN (reduced) — ${wins} won, ${voids} voided.\n${summary}` };
+  if (reduced.status === 'VOID') {
+    return { status: 'VOID', evidence: `Parlay VOID — all legs voided.\n${summary}` };
+  }
+  // WIN (reduced flag distinguishes "all hit" from "some VOID/PUSH dropped").
+  const wins = statuses.filter(s => s === 'WIN').length;
+  const voids = statuses.filter(s => s === 'VOID' || s === 'PUSH').length;
+  if (reduced.reduced) {
+    return { status: 'WIN', evidence: `Parlay WIN (reduced) — ${wins} won, ${voids} voided.\n${summary}` };
+  }
+  return { status: 'WIN', evidence: `Parlay WIN — all ${wins} legs hit.\n${summary}` };
 }
 
 // ── Parlay grader — grades each leg independently then computes result ──
@@ -1982,18 +2126,26 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
 
   if (providers.length === 0) return earlyReturn({ status: 'PENDING', evidence: 'No AI providers configured' });
 
+  // Gate 3: this exact string is the evidence the model is "given" — the
+  // quote validator checks evidence_quote against THIS (not the full snippets).
+  const evidenceForModel = searchSnippets.slice(0, 1500);
+
   const prompt = `You MUST respond with valid JSON only. No prose, no markdown, no code fences.
 Grade this bet ONLY using the search results below. Today: ${today}. Bet placed: ${betDate}.
 Bet: "${bet.description}" | Sport: ${bet.sport || '?'}
 
 Search results:
-${searchSnippets.slice(0, 1500)}
+${evidenceForModel}
 
 Required JSON format:
-{"status": "WIN", "evidence": "Final score Lakers 118 Nuggets 112 per ESPN"}
+{"status": "WIN", "evidence": "Final score Lakers 118 Nuggets 112 per ESPN", "evidence_quote": "Lakers 118 Nuggets 112"}
 
 status must be exactly one of: "WIN", "LOSS", "PUSH", "VOID", "PENDING"
 evidence must reference specific scores or stats from the search results above.
+evidence_quote (REQUIRED for any non-PENDING status) must be an EXACT, verbatim
+  substring copied character-for-character from the search results above — the
+  snippet that proves the result. Do NOT paraphrase or reword. If you cannot
+  copy an exact proving substring, return PENDING.
 
 CRITICAL RULES:
 - Cite specific numbers from search results. If no final score found for this game on ${betDate}, return PENDING.
@@ -2063,6 +2215,24 @@ CRITICAL RULES:
 
   const guardsLog = [];
   console.log(`[AI Grader] Running post-AI guards on ${bet.id?.slice(0, 8)} | status=${parsed.status} | sport=${bet.sport}`);
+
+  // ── GATE 3: Quote-bound grading (code-enforced anti-hallucination) ──
+  // Any non-PENDING result must carry an evidence_quote that is an exact
+  // substring of the evidence given to the model. On failure, force PENDING
+  // (UNVERIFIED_QUOTE). Applies to WIN/LOSS/PUSH/VOID — broader than G5–G9,
+  // which only gate WIN/LOSS. Kill-switch: QUOTE_BOUND_GRADING=off.
+  if ((process.env.QUOTE_BOUND_GRADING || 'enforce') !== 'off') {
+    const qv = validateEvidenceQuote(parsed, evidenceForModel);
+    if (!qv.ok) {
+      console.warn(`[AI Grader] GATE3 FAIL: ${bet.id?.slice(0, 8)} | ${qv.reason} (${qv.detail}) | model claimed ${parsed.status}`);
+      audit.guards_failed.push('GATE3:unverified_quote');
+      return earlyReturn({
+        status: 'PENDING',
+        evidence: `UNVERIFIED_QUOTE: ${qv.detail} — forced PENDING (model claimed ${parsed.status}). Original: ${String(parsed.evidence || '').slice(0, 100)}`,
+      });
+    }
+    guardsLog.push('GATE3:quote_ok');
+  }
 
   if (parsed.status === 'WIN' || parsed.status === 'LOSS') {
     // ── GUARD 5: Score hallucination — fabricated scores ──
@@ -2180,9 +2350,32 @@ CRITICAL RULES:
 }
 
 // ── Finalize: DB update + capper bankroll + tailer payouts + ticker ──
-async function finalizeBetGrading(client, bet, status, evidence) {
+async function finalizeBetGrading(client, bet, status, evidence, opts = {}) {
   const resultLower = status.toLowerCase();
   const profitUnits = (resultLower === 'void') ? 0 : calcProfit(bet.odds || -110, bet.units || 1, resultLower);
+
+  // ── GATE 2: idempotent final grade ──
+  // A bet's final grade is written once per (bet_id, evidence_hash,
+  // grader_version). If a final grade already exists for this exact key,
+  // return the stored final and do NOT rewrite (kills contradictory regrades).
+  const evidenceHash = computeEvidenceHash(evidence);
+  const existingGrade = db.prepare(
+    'SELECT result, grade, grade_reason, evidence_hash, grader_version FROM bets WHERE id = ?'
+  ).get(bet.id);
+  const decision = decideFinalGradeWrite(existingGrade, {
+    evidenceHash, graderVersion: GRADER_VERSION, adminOverride: !!opts.adminOverride,
+  });
+  if (!decision.write) {
+    console.log(`[Gate2:IDEMPOTENT bet=${(bet.id || '').slice(0, 8)} reason=${decision.reason}] returning stored final (${existingGrade?.result})`);
+    return {
+      bet,
+      result: existingGrade?.result || bet.result || 'unknown',
+      profitUnits: 0,
+      grade: { grade: existingGrade?.grade || '?', reason: `gate2:${decision.reason}` },
+      graded: false,
+      idempotent: true,
+    };
+  }
 
   // P0 gateway — log policy decision, short-circuit on denial. Note the
   // hardened gradeBetRecord will also refuse if pending_legs is present, so
@@ -2196,11 +2389,13 @@ async function finalizeBetGrading(client, bet, status, evidence) {
   }
 
   // ATOMIC GRADE: returns {graded: false} if another worker already finalized
-  // AI grader is NOT a trusted path — does NOT auto-confirm needs_review bets
+  // AI grader is NOT a trusted path — does NOT auto-confirm needs_review bets.
+  // Gate 2: stamp evidence_hash + grader_version atomically with the grade.
   const gradeResult = gradeBet(bet.id, resultLower, profitUnits,
     resultLower === 'win' ? 'B' : resultLower === 'void' ? 'N/A' : 'D',
     `AI Grader: ${evidence || 'Graded via search'}`,
-    false);
+    false,
+    { graderVersion: GRADER_VERSION, evidenceHash });
 
   if (!gradeResult.graded) {
     console.log(`[Grader] SKIP race-lost bet ${bet.id?.slice(0, 8)} (${gradeResult.reason})`);
@@ -2290,7 +2485,13 @@ module.exports = {
   SUPPORTED_SPORTS,
   isSupportedSport,
   // Exported for unit tests only — do not rely on these from bot code:
-  _internal: { looksLikePlayerProp, parsePlayerPropDescription, searchWeb, isTrustedLossLeg, aggregateParlayLegResults },
+  _internal: {
+    looksLikePlayerProp, parsePlayerPropDescription, searchWeb, isTrustedLossLeg, aggregateParlayLegResults,
+    // Phase-1 grading gates:
+    reduceParlayResult, normalizeLegStatus,            // Gate 1
+    computeEvidenceHash, decideFinalGradeWrite, GRADER_VERSION, // Gate 2
+    validateEvidenceQuote, normalizeQuoteWhitespace,   // Gate 3
+  },
   // Exported for tests + observability — these are called from
   // gradePropWithAI internally; importers MUST NOT mutate.
   evaluatePlayerPropEvidence,
