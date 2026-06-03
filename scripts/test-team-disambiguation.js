@@ -59,7 +59,7 @@ const { normalizeDescription } = require('../services/normalization');
 // services/ai.js → services/database.js runs migrations at module-load and logs
 // each one. Silence stdout across the require so the snapshot output stays clean
 // (the in-memory DB is rebuilt every run, so those logs are pure bootstrap noise).
-const { parseBetText, inferLegSport, reclassifySport } = (() => {
+const { parseBetText, inferLegSport, reclassifySport, disambiguateAmbiguousTeam } = (() => {
   const orig = console.log;
   console.log = () => {};
   try { return require('../services/ai'); } finally { console.log = orig; }
@@ -96,6 +96,21 @@ const BUG2_CASES = [
   { input: 'Los Angeles Kings ML',      expected: 'NHL', note: 'kings: lone shared nick (NBA+NHL) → priority picks NBA' },
   { input: 'Florida Panthers -1.5',     expected: 'NHL', note: 'panthers: lone shared nick (NFL+NHL) → priority picks NFL' },
   { input: 'Winnipeg Jets ML',          expected: 'NHL', note: 'jets: lone shared nick (NFL+NHL) → priority picks NFL' },
+];
+
+// ─── Multi-franchise cases (Codex blocker): assert disambiguateAmbiguousTeam
+//     DIRECTLY. The helper now matches a CONTIGUOUS "<city> <nickname>" phrase
+//     and ABSTAINS (returns null) when the string holds franchises of DIFFERENT
+//     sports. The old (nickname-anywhere + that-nickname's-city-anywhere) logic
+//     force-classified these to the first table hit / wrong sport; phrase-match
+//     + abstain fixes it. expected:null means "should abstain, let downstream
+//     resolve the cross-sport string". These assert the helper's return value,
+//     not the 3-way gate (null isn't a sport the stored/infer/reclass paths emit).
+const MULTI_FRANCHISE_CASES = [
+  { input: 'New York Rangers vs Giants',                  expected: 'NHL', note: 'only "new york rangers" is a phrase; bare "giants" has no adjacent city (old bug: NFL via giants + "new york")' },
+  { input: 'New York Giants vs Rangers',                  expected: 'NFL', note: 'only "new york giants" is a phrase; bare "rangers" has no adjacent city' },
+  { input: 'New York Rangers ML, San Francisco Giants ML', expected: null, note: 'NHL + MLB franchises → conflict → abstain (old bug: forced MLB via giants + "san francisco")' },
+  { input: 'Florida Panthers vs Sacramento Kings',        expected: null, note: 'NHL + NBA franchises → conflict → abstain (old bug: forced NBA via kings + "sacramento")' },
 ];
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -198,10 +213,37 @@ async function runBug2() {
   return rows;
 }
 
+// ─── Multi-franchise: call disambiguateAmbiguousTeam DIRECTLY and assert its
+//     return value (a sport string, or null when it abstains on a cross-sport
+//     conflict). This is the unit the Codex blocker was about — the contiguous
+//     phrase match — so it is asserted at the helper, not through the callers.
+function runMultiFranchise() {
+  console.log('\n══════════════════════════════════════════════════════════════════════');
+  console.log(' MULTI-FRANCHISE — disambiguateAmbiguousTeam(text) asserted DIRECTLY');
+  console.log(' Phrase-match a contiguous "<city> <nickname>"; abstain (null) on cross-sport conflict.');
+  console.log('══════════════════════════════════════════════════════════════════════');
+  const rows = MULTI_FRANCHISE_CASES.map((c) => {
+    const out = quiet(() => disambiguateAmbiguousTeam(c.input));
+    return { ...c, out, ok: out === c.expected };
+  });
+  const W = 42, S = 7;
+  const show = (v) => (v == null ? '(null)' : v);
+  console.log(`\n  ${'INPUT'.padEnd(W)} ${'GOT'.padEnd(S)} ${'EXPECT'.padEnd(S)} RESULT`);
+  console.log(`  ${'─'.repeat(W)} ${'─'.repeat(S)} ${'─'.repeat(S)} ──────`);
+  for (const r of rows) {
+    console.log(`  ${JSON.stringify(r.input).padEnd(W)} ${String(show(r.out)).padEnd(S)} ${String(show(r.expected)).padEnd(S)} ${pass(r.ok)}`);
+    console.log(`      ${DIM}${r.note}${RST}`);
+  }
+  const p = rows.filter((r) => r.ok).length;
+  console.log(`\n  Multi-franchise (helper-direct): ${p}/${rows.length} pass  ${p === rows.length ? '(phrase-match + abstain holds)' : '(REGRESSION)'}`);
+  return rows;
+}
+
 (async () => {
   console.log('P1 disambiguation + sport-detection harness (read-only)');
   const b1 = runBug1();
   const b2 = await runBug2();
+  const mf = runMultiFranchise();
   const total = b1.length + b2.length;
   // Headline pass count tracks STORED (the persisted value) for Bug 2 + the
   // Bug 1 injection guard — this is the number the before-snapshot documented.
@@ -210,9 +252,12 @@ async function runBug2() {
   // must ALL equal EXPECT. Bug 1 has no INFER/RECLASS, so its ok IS its 3-way
   // state. The fix must drive this to total/total with zero green→red flips.
   const threeWay = b1.filter((r) => r.ok).length + b2.filter((r) => r.allOk).length;
+  // New helper-direct gate: disambiguateAmbiguousTeam phrase-match + abstain.
+  const mfPassed = mf.filter((r) => r.ok).length;
   console.log('\n══════════════════════════════════════════════════════════════════════');
   console.log(` TOTAL (STORED verdict): ${passed}/${total} pass · ${total - passed} fail`);
   console.log(` 3-WAY GATE (STORED==INFER==RECLASS==EXPECT): ${threeWay}/${total} · ${threeWay === total ? 'PASS ✅' : 'FAIL ❌'}`);
+  console.log(` MULTI-FRANCHISE (helper-direct phrase-match + abstain): ${mfPassed}/${mf.length} · ${mfPassed === mf.length ? 'PASS ✅' : 'FAIL ❌'}`);
   console.log('══════════════════════════════════════════════════════════════════════');
   // Read-only snapshot/gate — always exit 0; the gate is read from the output.
   process.exit(0);

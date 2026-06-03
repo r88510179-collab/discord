@@ -536,27 +536,43 @@ const AMBIGUOUS_TEAMS = {
   jets:      { winnipeg: 'NHL', 'new york': 'NFL' },
 };
 
-// Returns the mapped sport when `text` contains an ambiguous nickname AND one
-// of THAT nickname's city tokens — both matched as WHOLE WORDS, not substrings
-// — else null. Keyed on BOTH nick and city, so "new york rangers" -> NHL and
-// "new york giants" -> NFL. Null-on-no-match is essential: it lets the three
+// Returns the mapped sport when `text` contains a franchise's contiguous
+// "<city> <nickname>" phrase — or several phrases that all map to the same
+// sport — else null. The matching unit is the WHOLE adjacent phrase
+// ("new york rangers" -> NHL, "new york giants" -> NFL), NOT an independent
+// nickname + that nickname's city found anywhere: "New York Rangers vs Giants"
+// is NHL (bare "Giants" has no adjacent city), never NFL. When the text holds
+// CONFLICTING franchises (e.g. "New York Rangers ML, San Francisco Giants ML"
+// — NHL + MLB), it ABSTAINS (null) so each caller falls through to its own
+// cross-sport handling. No-match also returns null — essential so the three
 // callers fall through to their existing, unchanged resolution logic.
 function disambiguateAmbiguousTeam(text) {
   const l = (text || '').toLowerCase();
-  // Whole-word match of a possibly multi-word / punctuated token (e.g.
-  // "st. louis"): escape regex metachars, allow flexible whitespace, bound
-  // with \b so "kings" never matches "kingsford".
-  const hasWord = (token) => {
-    const esc = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
-    return new RegExp(`\\b${esc}\\b`).test(l);
-  };
-  for (const [nick, cities] of Object.entries(AMBIGUOUS_TEAMS)) {
-    if (!hasWord(nick)) continue;
-    for (const [city, sport] of Object.entries(cities)) {
-      if (hasWord(city)) return sport;
-    }
+  // Derive the (phrase regex -> sport) list once from AMBIGUOUS_TEAMS: every
+  // (city, nickname) pair becomes the contiguous phrase "<city> <nickname>".
+  // Each phrase is escaped (metachars), given flexible whitespace, and bounded
+  // with \b so "kings" never matches "kingsford". The "st. louis"/"st louis"
+  // period variants are both table keys, so both phrase spellings are generated
+  // and each maps to MLB. Cached on the fn like detectSport._unambiguous.
+  if (!disambiguateAmbiguousTeam._phrases) {
+    const toRegex = (phrase) => {
+      const esc = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+      return new RegExp(`\\b${esc}\\b`);
+    };
+    const phrases = [];
+    for (const [nick, cities] of Object.entries(AMBIGUOUS_TEAMS))
+      for (const [city, sport] of Object.entries(cities))
+        phrases.push({ sport, re: toRegex(`${city} ${nick}`) });
+    disambiguateAmbiguousTeam._phrases = phrases;
   }
-  return null;
+  // Collect the sport of every franchise phrase actually present in the text.
+  const sports = new Set();
+  for (const { sport, re } of disambiguateAmbiguousTeam._phrases)
+    if (re.test(l)) sports.add(sport);
+  // One distinct sport (one or more phrases, all agreeing) -> force it. Zero
+  // phrases (no recognized franchise) or >=2 distinct sports (conflicting
+  // franchises) -> null: callers fall through to their own resolution / abstain.
+  return sports.size === 1 ? [...sports][0] : null;
 }
 
 function detectSport(t) {
@@ -1965,4 +1981,4 @@ function normalizeEventDate(raw) {
   return null;
 }
 
-module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, evaluateTweet, validateParsedBet, validateLegSportConsistency, validateLegShape, isSportsbookBrand, reclassifySport, inferLegSport, isInSeason, normalizeEventDate, AMBIGUITY_THRESHOLD, tryVisionGemma, parseGemmaOutputWithCerebras, runGemmaVisionFallback, logVisionFailure, GEMMA_SLIP_PROMPT, gemmaHealth, isGemmaHealthy, recordGemmaResult, callLLM, callLLMResult, callGemini, callOpenAI, AdapterError, FALLBACK_ELIGIBLE };
+module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, evaluateTweet, validateParsedBet, validateLegSportConsistency, validateLegShape, isSportsbookBrand, reclassifySport, inferLegSport, disambiguateAmbiguousTeam, isInSeason, normalizeEventDate, AMBIGUITY_THRESHOLD, tryVisionGemma, parseGemmaOutputWithCerebras, runGemmaVisionFallback, logVisionFailure, GEMMA_SLIP_PROMPT, gemmaHealth, isGemmaHealthy, recordGemmaResult, callLLM, callLLMResult, callGemini, callOpenAI, AdapterError, FALLBACK_ELIGIBLE };
