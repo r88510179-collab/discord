@@ -59,6 +59,8 @@ PK is `id` (TEXT, hex hash — **NOT** `bet_id`, common memory error).
 | grading_state | TEXT | "pending" / "graded" / "locked" — mig 016 atomic guard |
 | drop_reason | TEXT | first-class column |
 | drop_reason_set_at | INTEGER | epoch sec |
+| grader_version | TEXT | mig 026 (Gate 2) — code-constant grading-logic version that produced the final grade |
+| evidence_hash | TEXT | mig 026 (Gate 2) — sha256 of canonicalized grade evidence; idempotency key with grader_version |
 
 ### `pipeline_events`
 
@@ -165,7 +167,7 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 
 **`raw_text` semantics — two ingest paths, inconsistent by history (NOT a bug):**
 - Pure-slip / HRB path (`processAggregatedMessage`, L1288): `raw_text` = the scrubbed Discord message *body* (`cleanText`, defined L683). For HRB shares that body is share-card boilerplate (e.g. "Check out this bet I placed on Hard Rock Bet!"), **not** the Vision extraction.
-- Vision extraction lands in `description` — intentional. The grader reads `description` only and never `raw_text` (enforced by the `buildGraderSearchQuery` doc-comment at `services/grading.js:1142-1149` + `tests/grader-uses-description.test.js`), so the HRB `raw_text` boilerplate is purely cosmetic — do not "fix" it.
+- Vision extraction lands in `description` — intentional. The grader reads `description` only and never `raw_text` (enforced by the `buildGraderSearchQuery` doc-comment at `services/grading.js:~1287-1295` + `tests/grader-uses-description.test.js`), so the HRB `raw_text` boilerplate is purely cosmetic — do not "fix" it.
 - `processSlipImage` (L562) differs: stores `ocrText || description` in `raw_text`. The two paths diverge by history, not design intent — recorded here so it is not mistaken for a bug.
 
 **Hold rescue is messageUrl-based — the slip image is never rendered, `payload.imageUrl` is never read (do NOT "persist imageUrl"):**
@@ -185,19 +187,34 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 | MAG7/sheet detector emit per-sport straights (v423) | 984 (prompt-level SHEET-vs-PARLAY rule in `GEMMA_SLIP_PROMPT` — model emits per-sport straights; no separate JS detector) |
 
 ### services/grading.js
+
+> Line numbers refreshed 2026-06-03 (PR `phase1-grading-gates`). A ~145-line
+> Phase-1 gates block was inserted near the top (L18–162), shifting everything
+> below by ~+155. The gates: the LLM grades legs only; **code** owns aggregation
+> (Gate 1), idempotency (Gate 2), and quote enforcement (Gate 3).
+> Refreshed again 2026-06-03 (PR `gate3-shadow-mode`): the Gate 3 helper block
+> grew by +64 lines (tri-state mode resolver + `applyGate3`), so everything
+> below `validateEvidenceQuote` shifted by +64.
+
 | What | Line(s) |
 | --- | --- |
-| `gradeFromCelebration` | 1030 |
-| `finalizeBetGrading` | 2183 (also exported as `gradeBet` L2280) |
-| `calcProfit` | 753 |
-| `canFinalizeBet` | 299 |
-| `scheduleRecheckAfterDenial` | 373 |
-| Grader waterfall (groq-llama4-scout → cerebras-gpt-oss → tail) | 1954–1980 (`providers[]` L1957; groq-llama4-scout 1959 → cerebras-gpt-oss 1962 → groq-qwen 1965 → openrouter 1968 → groq-gpt-oss 1971 → mistral 1974 → ollama 1977 → groq-llama8b 1980). NOTE: prior ~L1369 hint was `searchBing`, not the waterfall. |
-| `searchBing` (BROKEN — returns 200 OK with garbage HTML) | 1369 |
-| `aggregateParlayLegResults` "Parlay LOSS — leg N" emit | 1624 (fn), 1663 (leg-loss emit) |
-| `isTrustedLossLeg` (Bug A Part 1, v438) | 1569 |
-| `looksLikePlayerProp` gate to structured grading | 28 (fn), 1877 (gate → `tryStructured` L1879) |
-| `resolvePlayerProp` | REMOVED (v459) — replaced by `tryStructured()` from services/sportsdata, called at L1879 |
+| **Gate 1** `reduceParlayResult` (pure parlay reducer — keystone; LOSS>PENDING>WIN) | 178 (fn); `normalizeLegStatus` 171 |
+| **Gate 2** `GRADER_VERSION` / `computeEvidenceHash` / `decideFinalGradeWrite` | 20 / 25 / 45 |
+| **Gate 3** quote-bound grading — tri-state `QUOTE_BOUND_GRADING` (`off`/`shadow`(default)/`enforce`); shadow logs `[GATE3 would-fire]` and leaves the grade, enforce forces PENDING (`UNVERIFIED_QUOTE`); unknown/legacy → shadow | `normalizeQuoteWhitespace` 76 (now folds curly quotes + en/em-dash); `validateEvidenceQuote` 89; `resolveGate3Mode` 115; `applyGate3` 129 |
+| `looksLikePlayerProp` | 230 (fn); structured gate → `tryStructured` 2087 (call L2088) |
+| `canFinalizeBet` | 501 |
+| `scheduleRecheckAfterDenial` | 575 |
+| `calcProfit` | 955 |
+| `gradeFromCelebration` | 1232 |
+| `buildGraderSearchQuery` (description-only; doc-comment above) | 1359 |
+| `searchBing` (BROKEN — returns 200 OK with garbage HTML) | 1571 |
+| `gradePropWithAI` (dispatch: parlay→gradeParlay, else gradeSingleBet) | 1705 |
+| `isTrustedLossLeg` (Bug A Part 1, v438) | 1771 |
+| `aggregateParlayLegResults` (now downgrades untrusted-LOSS→PENDING, then delegates precedence to Gate 1 reducer) | 1826 (fn); reducer call 1863; "Parlay LOSS — leg N" emit 1873 |
+| `gradeParlay` | 1892 |
+| `gradeSingleBet` | 1929; structured pre-check 2085; **Gate 3** quote check 2283 (`applyGate3` call 2290); grader waterfall 2166–2188 (groq-llama4-scout 2167 → cerebras-gpt-oss → groq-qwen → openrouter → groq-gpt-oss → mistral → ollama → groq-llama8b 2188) |
+| `finalizeBetGrading` | 2421 (also exported as `gradeBet` ~L2543); **Gate 2** idempotency check 2433; atomic write stamps `grader_version`+`evidence_hash` via `gradeBetRecord` |
+| `resolvePlayerProp` | REMOVED (v459) — replaced by `tryStructured()` from services/sportsdata, called at L2088 |
 
 ### services/sportsdata/ (Phase 1 structured grading, v459)
 | File | Purpose |
@@ -278,6 +295,7 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 | 023 | search_backend_calls |
 | 024 | parlay_legs_dedup_events |
 | 025 | hold_review_decisions |
+| 026 | bets.grader_version + bets.evidence_hash (Gate 2 idempotency) + idx_bets_grade_idem |
 
 ## Database — quirky things
 

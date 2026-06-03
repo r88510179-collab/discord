@@ -594,22 +594,29 @@ function createBetWithLegs(betData, legs) {
   return bet;
 }
 
-function gradeBetRecord(betId, result, profitUnits, grade, gradeReason, allowAutoConfirm = false) {
+function gradeBetRecord(betId, result, profitUnits, grade, gradeReason, allowAutoConfirm = false, provenance = {}) {
   // Hardened atomic conditional update:
   //  1. Only updates bets still in 'pending' (race-safe vs concurrent graders)
   //  2. For parlay/sgp, blocks finalize if any leg is still pending
   //  3. Clears grading_state=done + grading_lock_until on terminal write
+  //  4. Gate 2: stamps grader_version + evidence_hash provenance (migration
+  //     026). COALESCE keeps existing values when a caller omits provenance,
+  //     so legacy call sites (manual grade, sweeper, untracked win) are
+  //     unaffected.
   const info = db.prepare(`
     UPDATE bets SET
       result = ?, profit_units = ?, grade = ?, grade_reason = ?, graded_at = datetime('now'),
-      grading_state = 'done', grading_lock_until = NULL
+      grading_state = 'done', grading_lock_until = NULL,
+      grader_version = COALESCE(?, grader_version),
+      evidence_hash = COALESCE(?, evidence_hash)
     WHERE id = ?
       AND (result = 'pending' OR result IS NULL)
       AND (
         bet_type NOT IN ('parlay','sgp')
         OR (SELECT COUNT(*) FROM parlay_legs WHERE bet_id = bets.id AND result = 'pending') = 0
       )
-  `).run(result, profitUnits, grade, gradeReason, betId);
+  `).run(result, profitUnits, grade, gradeReason,
+    provenance.graderVersion ?? null, provenance.evidenceHash ?? null, betId);
 
   if (info.changes === 0) {
     return { graded: false, reason: 'already_graded_or_pending_legs' };
