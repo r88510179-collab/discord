@@ -147,6 +147,7 @@ async function runBug2() {
   console.log('\n══════════════════════════════════════════════════════════════════════');
   console.log(' BUG 2 — stored sport vs expected  (STORED = parseBetText→detectSport)');
   console.log(' INFER = inferLegSport (grade-time, per leg) · RECLASS = reclassifySport(STORED)');
+  console.log(' [S/I/R ✓/✗] = each of STORED / INFER / RECLASS vs EXPECT · 3-way gate = all three == EXPECT');
   console.log('══════════════════════════════════════════════════════════════════════');
 
   // Compute every row first, then render a clean table. Suppress console.log
@@ -159,36 +160,60 @@ async function runBug2() {
     for (const c of BUG2_CASES) {
       const parsed = await parseBetText(c.input); // no image → regex fast-path → detectSport
       const stored = parsed && parsed.bets && parsed.bets[0] ? parsed.bets[0].sport : '(no-bet)';
-      const infer = inferLegSport(c.input);
-      const reclass = reclassifySport(stored, c.input);
-      rows.push({ ...c, stored, infer: infer == null ? '(null)' : infer, reclass, ok: stored === c.expected });
+      const inferRaw = inferLegSport(c.input);
+      const reclass = reclassifySport(stored, c.input); // reclassifySport(<detected sport>, input)
+      const storedOk = stored === c.expected;
+      const inferOk = inferRaw === c.expected;
+      const reclassOk = reclass === c.expected;
+      rows.push({
+        ...c, stored,
+        infer: inferRaw == null ? '(null)' : inferRaw,
+        reclass, storedOk, inferOk, reclassOk,
+        allOk: storedOk && inferOk && reclassOk,
+        ok: storedOk, // headline verdict tracks STORED — the value actually persisted
+      });
     }
   } finally {
     console.log = origLog;
   }
 
   const W = 30, S = 7;
-  console.log(`\n  ${'INPUT'.padEnd(W)} ${'STORED'.padEnd(S)} ${'INFER'.padEnd(S)} ${'RECLASS'.padEnd(S)} ${'EXPECT'.padEnd(S)} VERDICT`);
-  console.log(`  ${'─'.repeat(W)} ${'─'.repeat(S)} ${'─'.repeat(S)} ${'─'.repeat(S)} ${'─'.repeat(S)} ───────`);
+  const m = (ok) => (ok ? `${GREEN}✓${RST}` : `${RED}✗${RST}`); // each column vs EXPECT
+  console.log(`\n  ${'INPUT'.padEnd(W)} ${'STORED'.padEnd(S)} ${'INFER'.padEnd(S)} ${'RECLASS'.padEnd(S)} ${'EXPECT'.padEnd(S)} STORED?  vs EXPECT`);
+  console.log(`  ${'─'.repeat(W)} ${'─'.repeat(S)} ${'─'.repeat(S)} ${'─'.repeat(S)} ${'─'.repeat(S)} ───────  ─────────`);
   for (const r of rows) {
-    const disagree = r.infer !== r.stored ? `${DIM} ⟂ infer≠stored${RST}` : '';
-    console.log(`  ${JSON.stringify(r.input).padEnd(W)} ${String(r.stored).padEnd(S)} ${String(r.infer).padEnd(S)} ${String(r.reclass).padEnd(S)} ${String(r.expected).padEnd(S)} ${pass(r.ok)}${disagree}`);
+    const cells = `${String(r.stored).padEnd(S)} ${String(r.infer).padEnd(S)} ${String(r.reclass).padEnd(S)} ${String(r.expected).padEnd(S)}`;
+    const compare = `[S${m(r.storedOk)} I${m(r.inferOk)} R${m(r.reclassOk)}]`;
+    console.log(`  ${JSON.stringify(r.input).padEnd(W)} ${cells} ${pass(r.ok)}  ${compare}`);
     console.log(`      ${DIM}${r.note}${RST}`);
   }
   const p = rows.filter((r) => r.ok).length;
-  console.log(`\n  Bug 2: ${p}/${rows.length} pass  (FAILs = current sport-disambiguation bug; this is the before-snapshot)`);
+  const consistent = rows.filter((r) => r.allOk).length;
+  console.log(`\n  Bug 2 (STORED verdict — the value persisted): ${p}/${rows.length} pass`);
+  console.log(`  Bug 2 (3-way gate STORED==INFER==RECLASS==EXPECT): ${consistent}/${rows.length} consistent`);
+  const broken = rows.filter((r) => !r.allOk);
+  if (broken.length) {
+    console.log(`  ${DIM}↳ not 3-way consistent (fix target): ${broken.map((r) => JSON.stringify(r.input)).join(', ')}${RST}`);
+  }
   return rows;
 }
 
 (async () => {
-  console.log('P1 disambiguation + sport-detection BEFORE-SNAPSHOT (read-only)');
+  console.log('P1 disambiguation + sport-detection harness (read-only)');
   const b1 = runBug1();
   const b2 = await runBug2();
   const total = b1.length + b2.length;
+  // Headline pass count tracks STORED (the persisted value) for Bug 2 + the
+  // Bug 1 injection guard — this is the number the before-snapshot documented.
   const passed = b1.filter((r) => r.ok).length + b2.filter((r) => r.ok).length;
+  // The 3-way gate is the real Bug-2 fix criterion: STORED, INFER and RECLASS
+  // must ALL equal EXPECT. Bug 1 has no INFER/RECLASS, so its ok IS its 3-way
+  // state. The fix must drive this to total/total with zero green→red flips.
+  const threeWay = b1.filter((r) => r.ok).length + b2.filter((r) => r.allOk).length;
   console.log('\n══════════════════════════════════════════════════════════════════════');
-  console.log(` TOTAL: ${passed}/${total} pass · ${total - passed} fail (documented current state)`);
+  console.log(` TOTAL (STORED verdict): ${passed}/${total} pass · ${total - passed} fail`);
+  console.log(` 3-WAY GATE (STORED==INFER==RECLASS==EXPECT): ${threeWay}/${total} · ${threeWay === total ? 'PASS ✅' : 'FAIL ❌'}`);
   console.log('══════════════════════════════════════════════════════════════════════');
-  // Always exit 0 — this is a snapshot of current (buggy) behavior, not a CI gate.
+  // Read-only snapshot/gate — always exit 0; the gate is read from the output.
   process.exit(0);
 })();

@@ -518,8 +518,53 @@ const SPORT_KEYWORDS = {
   'f1':'F1','nascar':'NASCAR','formula 1':'F1',
 };
 
+// ── City-aware disambiguation for shared team nicknames (P1 Bug 2) ──────────
+// Six nicknames are shared across leagues (e.g. "Cardinals" = NFL Arizona +
+// MLB St. Louis). Map-priority order alone mis-files a lone shared nickname,
+// and the stored-sport path (detectSport, TEAM_MAP order NBA>NFL>MLB>NHL)
+// disagrees with the grade-time paths (inferLegSport / reclassifySport, which
+// scan SPORT_TEAM_MAP MLB-first). This table keys on (nickname, FULL city
+// name) and is the single source of truth all three functions consult FIRST.
+// FULL CITY NAMES ONLY — a bare nickname with no recognized city returns null
+// (see disambiguateAmbiguousTeam) so unambiguous teams resolve normally.
+const AMBIGUOUS_TEAMS = {
+  cardinals: { 'st. louis': 'MLB', 'st louis': 'MLB', arizona: 'NFL' },
+  giants:    { 'san francisco': 'MLB', 'new york': 'NFL' },
+  rangers:   { 'new york': 'NHL', texas: 'MLB' },
+  kings:     { 'los angeles': 'NHL', sacramento: 'NBA' },
+  panthers:  { florida: 'NHL', carolina: 'NFL' },
+  jets:      { winnipeg: 'NHL', 'new york': 'NFL' },
+};
+
+// Returns the mapped sport when `text` contains an ambiguous nickname AND one
+// of THAT nickname's city tokens — both matched as WHOLE WORDS, not substrings
+// — else null. Keyed on BOTH nick and city, so "new york rangers" -> NHL and
+// "new york giants" -> NFL. Null-on-no-match is essential: it lets the three
+// callers fall through to their existing, unchanged resolution logic.
+function disambiguateAmbiguousTeam(text) {
+  const l = (text || '').toLowerCase();
+  // Whole-word match of a possibly multi-word / punctuated token (e.g.
+  // "st. louis"): escape regex metachars, allow flexible whitespace, bound
+  // with \b so "kings" never matches "kingsford".
+  const hasWord = (token) => {
+    const esc = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+    return new RegExp(`\\b${esc}\\b`).test(l);
+  };
+  for (const [nick, cities] of Object.entries(AMBIGUOUS_TEAMS)) {
+    if (!hasWord(nick)) continue;
+    for (const [city, sport] of Object.entries(cities)) {
+      if (hasWord(city)) return sport;
+    }
+  }
+  return null;
+}
+
 function detectSport(t) {
   const text = t || '';
+  // P1 Bug 2: a recognized (nickname, full-city) pair forces the sport, ahead
+  // of both the league-keyword scan and the map-priority fallback below.
+  const forced = disambiguateAmbiguousTeam(text);
+  if (forced) return forced;
   const l = text.toLowerCase();
   // 1. League/sport keyword is unambiguous — return immediately (unchanged).
   for (const [k, v] of Object.entries(SPORT_KEYWORDS)) if (l.includes(k)) return v;
@@ -1572,6 +1617,11 @@ const SPORT_ACTION_MAP = {
 };
 
 function reclassifySport(parsedSport, description) {
+  // P1 Bug 2: a recognized (nickname, full-city) pair forces the sport. This
+  // overrides the multi-sport "keep original" no-op below (a shared nickname
+  // matches >=2 sports in SPORT_TEAM_MAP, so without this it never reclassed).
+  const forced = disambiguateAmbiguousTeam(description);
+  if (forced) return forced;
   console.log(`[Guard:Reclassify] Checking sport=${parsedSport} desc="${(description || '').slice(0, 60)}"`);
   const desc = (description || '').toLowerCase();
   const matchedSports = new Set();
@@ -1602,6 +1652,11 @@ function reclassifySport(parsedSport, description) {
 
 // Infer sport from a single leg description
 function inferLegSport(legDescription) {
+  // P1 Bug 2: city-aware disambiguation precedes the (oppositely-ordered)
+  // SPORT_TEAM_MAP scan below, so a lone shared nickname + a known city
+  // resolves consistently with detectSport instead of MLB-first.
+  const forced = disambiguateAmbiguousTeam(legDescription);
+  if (forced) return forced;
   const desc = (legDescription || '').toLowerCase();
   // Team-name keywords first — these are the strongest signal (whole
   // franchise names rarely false-match).
