@@ -518,8 +518,69 @@ const SPORT_KEYWORDS = {
   'f1':'F1','nascar':'NASCAR','formula 1':'F1',
 };
 
+// ── City-aware disambiguation for shared team nicknames (P1 Bug 2) ──────────
+// Six nicknames are shared across leagues (e.g. "Cardinals" = NFL Arizona +
+// MLB St. Louis). Map-priority order alone mis-files a lone shared nickname,
+// and the stored-sport path (detectSport, TEAM_MAP order NBA>NFL>MLB>NHL)
+// disagrees with the grade-time paths (inferLegSport / reclassifySport, which
+// scan SPORT_TEAM_MAP MLB-first). This table keys on (nickname, FULL city
+// name) and is the single source of truth all three functions consult FIRST.
+// FULL CITY NAMES ONLY — a bare nickname with no recognized city returns null
+// (see disambiguateAmbiguousTeam) so unambiguous teams resolve normally.
+const AMBIGUOUS_TEAMS = {
+  cardinals: { 'st. louis': 'MLB', 'st louis': 'MLB', arizona: 'NFL' },
+  giants:    { 'san francisco': 'MLB', 'new york': 'NFL' },
+  rangers:   { 'new york': 'NHL', texas: 'MLB' },
+  kings:     { 'los angeles': 'NHL', sacramento: 'NBA' },
+  panthers:  { florida: 'NHL', carolina: 'NFL' },
+  jets:      { winnipeg: 'NHL', 'new york': 'NFL' },
+};
+
+// Returns the mapped sport when `text` contains a franchise's contiguous
+// "<city> <nickname>" phrase — or several phrases that all map to the same
+// sport — else null. The matching unit is the WHOLE adjacent phrase
+// ("new york rangers" -> NHL, "new york giants" -> NFL), NOT an independent
+// nickname + that nickname's city found anywhere: "New York Rangers vs Giants"
+// is NHL (bare "Giants" has no adjacent city), never NFL. When the text holds
+// CONFLICTING franchises (e.g. "New York Rangers ML, San Francisco Giants ML"
+// — NHL + MLB), it ABSTAINS (null) so each caller falls through to its own
+// cross-sport handling. No-match also returns null — essential so the three
+// callers fall through to their existing, unchanged resolution logic.
+function disambiguateAmbiguousTeam(text) {
+  const l = (text || '').toLowerCase();
+  // Derive the (phrase regex -> sport) list once from AMBIGUOUS_TEAMS: every
+  // (city, nickname) pair becomes the contiguous phrase "<city> <nickname>".
+  // Each phrase is escaped (metachars), given flexible whitespace, and bounded
+  // with \b so "kings" never matches "kingsford". The "st. louis"/"st louis"
+  // period variants are both table keys, so both phrase spellings are generated
+  // and each maps to MLB. Cached on the fn like detectSport._unambiguous.
+  if (!disambiguateAmbiguousTeam._phrases) {
+    const toRegex = (phrase) => {
+      const esc = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+      return new RegExp(`\\b${esc}\\b`);
+    };
+    const phrases = [];
+    for (const [nick, cities] of Object.entries(AMBIGUOUS_TEAMS))
+      for (const [city, sport] of Object.entries(cities))
+        phrases.push({ sport, re: toRegex(`${city} ${nick}`) });
+    disambiguateAmbiguousTeam._phrases = phrases;
+  }
+  // Collect the sport of every franchise phrase actually present in the text.
+  const sports = new Set();
+  for (const { sport, re } of disambiguateAmbiguousTeam._phrases)
+    if (re.test(l)) sports.add(sport);
+  // One distinct sport (one or more phrases, all agreeing) -> force it. Zero
+  // phrases (no recognized franchise) or >=2 distinct sports (conflicting
+  // franchises) -> null: callers fall through to their own resolution / abstain.
+  return sports.size === 1 ? [...sports][0] : null;
+}
+
 function detectSport(t) {
   const text = t || '';
+  // P1 Bug 2: a recognized (nickname, full-city) pair forces the sport, ahead
+  // of both the league-keyword scan and the map-priority fallback below.
+  const forced = disambiguateAmbiguousTeam(text);
+  if (forced) return forced;
   const l = text.toLowerCase();
   // 1. League/sport keyword is unambiguous — return immediately (unchanged).
   for (const [k, v] of Object.entries(SPORT_KEYWORDS)) if (l.includes(k)) return v;
@@ -1572,6 +1633,11 @@ const SPORT_ACTION_MAP = {
 };
 
 function reclassifySport(parsedSport, description) {
+  // P1 Bug 2: a recognized (nickname, full-city) pair forces the sport. This
+  // overrides the multi-sport "keep original" no-op below (a shared nickname
+  // matches >=2 sports in SPORT_TEAM_MAP, so without this it never reclassed).
+  const forced = disambiguateAmbiguousTeam(description);
+  if (forced) return forced;
   console.log(`[Guard:Reclassify] Checking sport=${parsedSport} desc="${(description || '').slice(0, 60)}"`);
   const desc = (description || '').toLowerCase();
   const matchedSports = new Set();
@@ -1602,6 +1668,11 @@ function reclassifySport(parsedSport, description) {
 
 // Infer sport from a single leg description
 function inferLegSport(legDescription) {
+  // P1 Bug 2: city-aware disambiguation precedes the (oppositely-ordered)
+  // SPORT_TEAM_MAP scan below, so a lone shared nickname + a known city
+  // resolves consistently with detectSport instead of MLB-first.
+  const forced = disambiguateAmbiguousTeam(legDescription);
+  if (forced) return forced;
   const desc = (legDescription || '').toLowerCase();
   // Team-name keywords first — these are the strongest signal (whole
   // franchise names rarely false-match).
@@ -1910,4 +1981,4 @@ function normalizeEventDate(raw) {
   return null;
 }
 
-module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, evaluateTweet, validateParsedBet, validateLegSportConsistency, validateLegShape, isSportsbookBrand, reclassifySport, inferLegSport, isInSeason, normalizeEventDate, AMBIGUITY_THRESHOLD, tryVisionGemma, parseGemmaOutputWithCerebras, runGemmaVisionFallback, logVisionFailure, GEMMA_SLIP_PROMPT, gemmaHealth, isGemmaHealthy, recordGemmaResult, callLLM, callLLMResult, callGemini, callOpenAI, AdapterError, FALLBACK_ELIGIBLE };
+module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, evaluateTweet, validateParsedBet, validateLegSportConsistency, validateLegShape, isSportsbookBrand, reclassifySport, inferLegSport, disambiguateAmbiguousTeam, isInSeason, normalizeEventDate, AMBIGUITY_THRESHOLD, tryVisionGemma, parseGemmaOutputWithCerebras, runGemmaVisionFallback, logVisionFailure, GEMMA_SLIP_PROMPT, gemmaHealth, isGemmaHealthy, recordGemmaResult, callLLM, callLLMResult, callGemini, callOpenAI, AdapterError, FALLBACK_ELIGIBLE };
