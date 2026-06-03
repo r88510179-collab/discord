@@ -192,26 +192,29 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 > Phase-1 gates block was inserted near the top (L18–162), shifting everything
 > below by ~+155. The gates: the LLM grades legs only; **code** owns aggregation
 > (Gate 1), idempotency (Gate 2), and quote enforcement (Gate 3).
+> Refreshed again 2026-06-03 (PR `gate3-shadow-mode`): the Gate 3 helper block
+> grew by +64 lines (tri-state mode resolver + `applyGate3`), so everything
+> below `validateEvidenceQuote` shifted by +64.
 
 | What | Line(s) |
 | --- | --- |
-| **Gate 1** `reduceParlayResult` (pure parlay reducer — keystone; LOSS>PENDING>WIN) | 114 (fn); `normalizeLegStatus` 107 |
+| **Gate 1** `reduceParlayResult` (pure parlay reducer — keystone; LOSS>PENDING>WIN) | 178 (fn); `normalizeLegStatus` 171 |
 | **Gate 2** `GRADER_VERSION` / `computeEvidenceHash` / `decideFinalGradeWrite` | 20 / 25 / 45 |
-| **Gate 3** `validateEvidenceQuote` (exact-substring quote; UNVERIFIED_QUOTE→PENDING) | 75 (fn); `normalizeQuoteWhitespace` 71 |
-| `looksLikePlayerProp` | 166 (fn); structured gate → `tryStructured` 2021 (call L2024) |
-| `canFinalizeBet` | 437 |
-| `scheduleRecheckAfterDenial` | 511 |
-| `calcProfit` | 891 |
-| `gradeFromCelebration` | 1168 |
-| `buildGraderSearchQuery` (description-only; doc-comment above) | 1295 |
-| `searchBing` (BROKEN — returns 200 OK with garbage HTML) | 1507 |
-| `gradePropWithAI` (dispatch: parlay→gradeParlay, else gradeSingleBet) | 1641 |
-| `isTrustedLossLeg` (Bug A Part 1, v438) | 1707 |
-| `aggregateParlayLegResults` (now downgrades untrusted-LOSS→PENDING, then delegates precedence to Gate 1 reducer) | 1762 (fn); reducer call 1798; "Parlay LOSS — leg N" emit 1809 |
-| `gradeParlay` | 1828 |
-| `gradeSingleBet` | 1865; structured pre-check 2021; **Gate 3** quote check 2219; grader waterfall 2102–2124 (groq-llama4-scout 2103 → cerebras-gpt-oss → groq-qwen → openrouter → groq-gpt-oss → mistral → ollama → groq-llama8b 2124) |
-| `finalizeBetGrading` | 2353 (also exported as `gradeBet` ~L2472); **Gate 2** idempotency check 2357; atomic write stamps `grader_version`+`evidence_hash` via `gradeBetRecord` |
-| `resolvePlayerProp` | REMOVED (v459) — replaced by `tryStructured()` from services/sportsdata, called at L2024 |
+| **Gate 3** quote-bound grading — tri-state `QUOTE_BOUND_GRADING` (`off`/`shadow`(default)/`enforce`); shadow logs `[GATE3 would-fire]` and leaves the grade, enforce forces PENDING (`UNVERIFIED_QUOTE`); unknown/legacy → shadow | `normalizeQuoteWhitespace` 76 (now folds curly quotes + en/em-dash); `validateEvidenceQuote` 89; `resolveGate3Mode` 115; `applyGate3` 129 |
+| `looksLikePlayerProp` | 230 (fn); structured gate → `tryStructured` 2087 (call L2088) |
+| `canFinalizeBet` | 501 |
+| `scheduleRecheckAfterDenial` | 575 |
+| `calcProfit` | 955 |
+| `gradeFromCelebration` | 1232 |
+| `buildGraderSearchQuery` (description-only; doc-comment above) | 1359 |
+| `searchBing` (BROKEN — returns 200 OK with garbage HTML) | 1571 |
+| `gradePropWithAI` (dispatch: parlay→gradeParlay, else gradeSingleBet) | 1705 |
+| `isTrustedLossLeg` (Bug A Part 1, v438) | 1771 |
+| `aggregateParlayLegResults` (now downgrades untrusted-LOSS→PENDING, then delegates precedence to Gate 1 reducer) | 1826 (fn); reducer call 1863; "Parlay LOSS — leg N" emit 1873 |
+| `gradeParlay` | 1892 |
+| `gradeSingleBet` | 1929; structured pre-check 2085; **Gate 3** quote check 2283 (`applyGate3` call 2290); grader waterfall 2166–2188 (groq-llama4-scout 2167 → cerebras-gpt-oss → groq-qwen → openrouter → groq-gpt-oss → mistral → ollama → groq-llama8b 2188) |
+| `finalizeBetGrading` | 2421 (also exported as `gradeBet` ~L2543); **Gate 2** idempotency check 2433; atomic write stamps `grader_version`+`evidence_hash` via `gradeBetRecord` |
+| `resolvePlayerProp` | REMOVED (v459) — replaced by `tryStructured()` from services/sportsdata, called at L2088 |
 
 ### services/sportsdata/ (Phase 1 structured grading, v459)
 | File | Purpose |

@@ -63,10 +63,24 @@ function decideFinalGradeWrite(existing, { evidenceHash, graderVersion, adminOve
 
 // ── Gate 3: quote-bound grading (code-enforced anti-hallucination) ──
 // For any non-PENDING result, the model must return an evidence_quote that is
-// an EXACT substring (whitespace-normalized) of the evidence it was given.
-// This is a string check, not a trust call — it works with a small model.
+// an EXACT substring (normalized) of the evidence it was given. This is a
+// string check, not a trust call — it works with a small model.
+//
+// Normalization (applied IDENTICALLY to both the model quote and the evidence
+// before the substring test — see validateEvidenceQuote): fold cosmetic
+// punctuation that the model commonly rewrites, then collapse whitespace, trim,
+// lowercase. Curly quotes → ASCII; en/em-dash → hyphen. This stays EXACT (no
+// fuzzy matching) — it only removes representational noise that would otherwise
+// cause avoidable UNVERIFIED_QUOTE false-PENDINGs (e.g. model "118–112" vs
+// evidence "118-112", or a curly apostrophe in a player's name).
 function normalizeQuoteWhitespace(s) {
-  return String(s == null ? '' : s).replace(/\s+/g, ' ').trim().toLowerCase();
+  return String(s == null ? '' : s)
+    .replace(/[‘’]/g, "'")  // curly single quotes ‘ ’ → ASCII '
+    .replace(/[“”]/g, '"')  // curly double quotes “ ” → ASCII "
+    .replace(/[–—]/g, '-')  // en/em-dash – — → ASCII -
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
 }
 
 // Returns { ok: boolean, reason: string, detail?: string }.
@@ -86,6 +100,56 @@ function validateEvidenceQuote(parsed, evidenceText) {
     return { ok: false, reason: 'UNVERIFIED_QUOTE', detail: 'evidence_quote is not an exact substring of the evidence' };
   }
   return { ok: true, reason: 'verified' };
+}
+
+// ── Gate 3 mode (tri-state, mirrors OCR_FIRST_MODE off|shadow|cutover) ──
+// QUOTE_BOUND_GRADING selects how a failed quote check is handled:
+//   off     — skip validation entirely (no call, no log, grade unchanged).
+//   shadow  — validate; on failure emit one [GATE3 would-fire] line and leave
+//             the grade unchanged (measure the would-be false-PENDING rate in
+//             prod before flipping to enforce).
+//   enforce — validate; on failure force the result to PENDING (UNVERIFIED_QUOTE).
+// DEFAULT = shadow. Unknown/legacy values fail safe to shadow — NEVER silently
+// enforce, so a stale/typo'd env value cannot start forcing PENDINGs unannounced.
+const GATE3_MODES = new Set(['off', 'shadow', 'enforce']);
+function resolveGate3Mode(raw) {
+  const m = String(raw == null ? '' : raw).trim().toLowerCase();
+  return GATE3_MODES.has(m) ? m : 'shadow';
+}
+
+// Apply Gate 3 over a parsed grade. Pure (no logging, no env read, no DB) so it
+// is unit-testable; the CALLER does the console.warn(logLine) + earlyReturn.
+// Returns { mode, validated, ok, wouldFire, forcePending, logLine, reason, detail }:
+//   off     → validated:false, never fires, logLine:null (grade untouched).
+//   shadow  → validates; on failure wouldFire:true, forcePending:false.
+//   enforce → validates; on failure wouldFire:true, forcePending:true.
+// logLine (failure only) is the single bounded, greppable would-fire line; the
+// quote is whitespace-collapsed and capped at 80 chars so the full evidence blob
+// is never logged and the line never wraps. One line per failed leg/result.
+function applyGate3(parsed, evidenceText, { mode, betId, legIndex } = {}) {
+  const resolved = resolveGate3Mode(mode);
+  if (resolved === 'off') {
+    return { mode: resolved, validated: false, ok: true, wouldFire: false, forcePending: false, logLine: null };
+  }
+  const qv = validateEvidenceQuote(parsed, evidenceText);
+  if (qv.ok) {
+    return { mode: resolved, validated: true, ok: true, wouldFire: false, forcePending: false, logLine: null };
+  }
+  const claimed = String(parsed && parsed.status != null ? parsed.status : '').toUpperCase();
+  const leg = legIndex == null ? 'n/a' : legIndex;
+  const quoteSnippet = String(parsed && parsed.evidence_quote != null ? parsed.evidence_quote : '')
+    .replace(/\s+/g, ' ').trim().slice(0, 80);
+  const logLine = `[GATE3 would-fire] bet=${betId == null ? 'unknown' : betId} leg=${leg} claimed=${claimed} reason=${qv.reason} quote="${quoteSnippet}"`;
+  return {
+    mode: resolved,
+    validated: true,
+    ok: false,
+    wouldFire: true,
+    forcePending: resolved === 'enforce',
+    logLine,
+    reason: qv.reason,
+    detail: qv.detail,
+  };
 }
 
 // ── Gate 1: deterministic parlay reducer (keystone) ──
@@ -2218,21 +2282,25 @@ CRITICAL RULES:
 
   // ── GATE 3: Quote-bound grading (code-enforced anti-hallucination) ──
   // Any non-PENDING result must carry an evidence_quote that is an exact
-  // substring of the evidence given to the model. On failure, force PENDING
-  // (UNVERIFIED_QUOTE). Applies to WIN/LOSS/PUSH/VOID — broader than G5–G9,
-  // which only gate WIN/LOSS. Kill-switch: QUOTE_BOUND_GRADING=off.
-  if ((process.env.QUOTE_BOUND_GRADING || 'enforce') !== 'off') {
-    const qv = validateEvidenceQuote(parsed, evidenceForModel);
-    if (!qv.ok) {
-      console.warn(`[AI Grader] GATE3 FAIL: ${bet.id?.slice(0, 8)} | ${qv.reason} (${qv.detail}) | model claimed ${parsed.status}`);
-      audit.guards_failed.push('GATE3:unverified_quote');
-      return earlyReturn({
-        status: 'PENDING',
-        evidence: `UNVERIFIED_QUOTE: ${qv.detail} — forced PENDING (model claimed ${parsed.status}). Original: ${String(parsed.evidence || '').slice(0, 100)}`,
-      });
-    }
-    guardsLog.push('GATE3:quote_ok');
+  // substring of the evidence given to the model. Applies to WIN/LOSS/PUSH/VOID
+  // — broader than G5–G9, which only gate WIN/LOSS. Tri-state via
+  // QUOTE_BOUND_GRADING (off | shadow | enforce); DEFAULT = shadow. shadow logs
+  // one [GATE3 would-fire] line and leaves the grade unchanged; enforce forces
+  // PENDING (UNVERIFIED_QUOTE). See resolveGate3Mode/applyGate3.
+  const g3 = applyGate3(parsed, evidenceForModel, {
+    mode: process.env.QUOTE_BOUND_GRADING,
+    betId: bet.id,
+    legIndex: audit.leg_index,
+  });
+  if (g3.logLine) console.warn(g3.logLine);
+  if (g3.forcePending) {
+    audit.guards_failed.push('GATE3:unverified_quote');
+    return earlyReturn({
+      status: 'PENDING',
+      evidence: `UNVERIFIED_QUOTE: ${g3.detail} — forced PENDING (model claimed ${parsed.status}). Original: ${String(parsed.evidence || '').slice(0, 100)}`,
+    });
   }
+  if (g3.validated && g3.ok) guardsLog.push('GATE3:quote_ok');
 
   if (parsed.status === 'WIN' || parsed.status === 'LOSS') {
     // ── GUARD 5: Score hallucination — fabricated scores ──
@@ -2490,7 +2558,7 @@ module.exports = {
     // Phase-1 grading gates:
     reduceParlayResult, normalizeLegStatus,            // Gate 1
     computeEvidenceHash, decideFinalGradeWrite, GRADER_VERSION, // Gate 2
-    validateEvidenceQuote, normalizeQuoteWhitespace,   // Gate 3
+    validateEvidenceQuote, normalizeQuoteWhitespace, resolveGate3Mode, applyGate3,   // Gate 3
   },
   // Exported for tests + observability — these are called from
   // gradePropWithAI internally; importers MUST NOT mutate.

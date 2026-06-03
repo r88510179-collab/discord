@@ -19,7 +19,7 @@ process.env.DB_PATH = dbFile;
 
 const grading = require('../services/grading');
 const database = require('../services/database');
-const { validateEvidenceQuote } = grading._internal;
+const { validateEvidenceQuote, resolveGate3Mode, applyGate3 } = grading._internal;
 
 let pass = 0;
 let fail = 0;
@@ -84,6 +84,101 @@ try {
   check('WIN against empty evidence text fails',
     validateEvidenceQuote({ status: 'WIN', evidence: 'x', evidence_quote: 'anything' }, '').ok,
     false);
+
+  // ── A3: punctuation normalization (still EXACT — folds cosmetic chars only) ──
+  // model en-dash "118–112" matches evidence hyphen "118-112"
+  check('en-dash quote matches hyphen evidence',
+    validateEvidenceQuote({ status: 'WIN', evidence: 'x', evidence_quote: '118–112' }, 'Final: 118-112 (ESPN)').ok,
+    true);
+  // model em-dash "118—112" matches evidence hyphen "118-112"
+  check('em-dash quote matches hyphen evidence',
+    validateEvidenceQuote({ status: 'WIN', evidence: 'x', evidence_quote: '118—112' }, 'Final: 118-112 (ESPN)').ok,
+    true);
+  // model curly apostrophe matches evidence straight apostrophe
+  check('curly single-quote matches straight apostrophe',
+    validateEvidenceQuote({ status: 'WIN', evidence: 'x', evidence_quote: 'Shai’s 40 points' }, "Shai's 40 points sealed it").ok,
+    true);
+  // and the reverse: evidence curly, model straight (normalization is symmetric)
+  check('straight apostrophe matches curly evidence',
+    validateEvidenceQuote({ status: 'WIN', evidence: 'x', evidence_quote: "Shai's 40 points" }, 'Shai’s 40 points sealed it').ok,
+    true);
+  // curly double quotes fold to ASCII on both sides
+  check('curly double-quotes match straight double-quotes',
+    validateEvidenceQuote({ status: 'WIN', evidence: 'x', evidence_quote: '“walk-off”' }, 'a "walk-off" homer').ok,
+    true);
+  // NOT fuzzy: a genuinely different number still fails after folding
+  check('en-dash folding does not make 118–110 match 118-112',
+    validateEvidenceQuote({ status: 'WIN', evidence: 'x', evidence_quote: '118–110' }, 'Final: 118-112 (ESPN)').ok,
+    false);
+
+  // ── A1: resolveGate3Mode — default + unknown/legacy fail safe to shadow ──
+  check('mode "off" resolves off', resolveGate3Mode('off'), 'off');
+  check('mode "shadow" resolves shadow', resolveGate3Mode('shadow'), 'shadow');
+  check('mode "enforce" resolves enforce', resolveGate3Mode('enforce'), 'enforce');
+  check('mode undefined (no env) → shadow', resolveGate3Mode(undefined), 'shadow');
+  check('mode "" → shadow', resolveGate3Mode(''), 'shadow');
+  check('mode unknown "garbage" → shadow (never silent enforce)', resolveGate3Mode('garbage'), 'shadow');
+  check('mode "ENFORCE" (case/space) → enforce', resolveGate3Mode('  ENFORCE '), 'enforce');
+  check('legacy boolean "true" → shadow (not enforce)', resolveGate3Mode('true'), 'shadow');
+
+  // ── A1/A2: applyGate3 tri-state behavior ──
+  const FAILING = { status: 'WIN', evidence: 'Celtics won', evidence_quote: 'Celtics beat the Knicks by six' }; // paraphrase → fails
+  const PASSING = { status: 'WIN', evidence: 'x', evidence_quote: 'Boston Celtics 118' };
+
+  // off: no validation, no log, grade unchanged.
+  const off = applyGate3(FAILING, EVIDENCE, { mode: 'off', betId: 'bet-off', legIndex: null });
+  check('off: not validated', off.validated, false);
+  check('off: no would-fire', off.wouldFire, false);
+  check('off: no force-pending', off.forcePending, false);
+  check('off: no log line', off.logLine, null);
+
+  // shadow: failing quote → would-fire logged, grade unchanged (no force-pending).
+  const shadow = applyGate3(FAILING, EVIDENCE, { mode: 'shadow', betId: 'bet-shadow', legIndex: null });
+  check('shadow: validated', shadow.validated, true);
+  check('shadow: would-fire true', shadow.wouldFire, true);
+  check('shadow: does NOT force pending (grade unchanged)', shadow.forcePending, false);
+  check('shadow: emits a log line', typeof shadow.logLine === 'string' && shadow.logLine.length > 0, true);
+
+  // enforce: same failing quote → force PENDING with UNVERIFIED_QUOTE.
+  const enforce = applyGate3(FAILING, EVIDENCE, { mode: 'enforce', betId: 'bet-enforce', legIndex: null });
+  check('enforce: would-fire true', enforce.wouldFire, true);
+  check('enforce: forces pending', enforce.forcePending, true);
+  check('enforce: reason UNVERIFIED_QUOTE', enforce.reason, 'UNVERIFIED_QUOTE');
+
+  // default (no mode passed) behaves as shadow.
+  const dflt = applyGate3(FAILING, EVIDENCE, { betId: 'bet-default', legIndex: null });
+  check('default mode is shadow', dflt.mode, 'shadow');
+  check('default: would-fire but does NOT force pending', dflt.wouldFire && !dflt.forcePending, true);
+
+  // passing quote: ok in every active mode, never fires, never logs.
+  const passShadow = applyGate3(PASSING, EVIDENCE, { mode: 'shadow', betId: 'b', legIndex: null });
+  check('passing quote (shadow): ok', passShadow.ok, true);
+  check('passing quote (shadow): no would-fire', passShadow.wouldFire, false);
+  check('passing quote (shadow): no log', passShadow.logLine, null);
+  const passEnforce = applyGate3(PASSING, EVIDENCE, { mode: 'enforce', betId: 'b', legIndex: null });
+  check('passing quote (enforce): does not force pending', passEnforce.forcePending, false);
+
+  // ── A2: would-fire log line format (bounded, greppable, one line) ──
+  const line = shadow.logLine;
+  check('log line starts with [GATE3 would-fire]', line.startsWith('[GATE3 would-fire] '), true);
+  check('log line carries bet id', line.includes('bet=bet-shadow'), true);
+  check('log line carries claimed status', line.includes('claimed=WIN'), true);
+  check('log line carries reason', line.includes('reason=UNVERIFIED_QUOTE'), true);
+  check('log line carries quoted snippet', line.includes('quote="'), true);
+  check('log line is a single line (no newline)', line.includes('\n'), false);
+
+  // leg index: null → n/a; a real (incl. zero) index is shown verbatim.
+  check('leg=n/a when legIndex null', line.includes('leg=n/a'), true);
+  const legLine = applyGate3(FAILING, EVIDENCE, { mode: 'shadow', betId: 'b', legIndex: 2 }).logLine;
+  check('leg=2 when legIndex 2', legLine.includes('leg=2'), true);
+  const leg0Line = applyGate3(FAILING, EVIDENCE, { mode: 'shadow', betId: 'b', legIndex: 0 }).logLine;
+  check('leg=0 when legIndex 0 (not n/a)', leg0Line.includes('leg=0') && !leg0Line.includes('leg=n/a'), true);
+
+  // quote snippet bounded to ~80 chars + whitespace collapsed (no full blob, no wrap).
+  const longQuote = 'x'.repeat(200);
+  const longLine = applyGate3({ status: 'LOSS', evidence_quote: longQuote }, EVIDENCE, { mode: 'shadow', betId: 'b', legIndex: null }).logLine;
+  const snippet = longLine.match(/quote="([^"]*)"/)[1];
+  check('quote snippet capped at 80 chars', snippet.length, 80);
 
   console.log(`\n${pass} passed / ${fail} failed`);
   if (fail > 0) process.exit(1);
