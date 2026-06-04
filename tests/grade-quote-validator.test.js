@@ -19,7 +19,7 @@ process.env.DB_PATH = dbFile;
 
 const grading = require('../services/grading');
 const database = require('../services/database');
-const { validateEvidenceQuote, resolveGate3Mode, applyGate3 } = grading._internal;
+const { validateEvidenceQuote, resolveGate3Mode, applyGate3, buildGate3WouldFireMarker } = grading._internal;
 
 let pass = 0;
 let fail = 0;
@@ -179,6 +179,37 @@ try {
   const longLine = applyGate3({ status: 'LOSS', evidence_quote: longQuote }, EVIDENCE, { mode: 'shadow', betId: 'b', legIndex: null }).logLine;
   const snippet = longLine.match(/quote="([^"]*)"/)[1];
   check('quote snippet capped at 80 chars', snippet.length, 80);
+
+  // ── B0: buildGate3WouldFireMarker — the persisted would-fire audit token ──
+  // applyGate3 now carries the model's claimed status so the marker can record it.
+  check('applyGate3 carries claimed status on would-fire', shadow.claimed, 'WIN');
+
+  const GAME_LINE = { description: 'Lakers ML -110', bet_type: 'straight' };
+  const PROP_LINE = { description: 'OVER 14.5 POINTS SCOOT HENDERSON', bet_type: 'straight' };
+
+  // No would-fire → no marker (off mode, or a quote that verified).
+  check('off mode → no marker (null)', buildGate3WouldFireMarker(off, GAME_LINE), null);
+  check('passing quote → no marker (null)', buildGate3WouldFireMarker(passShadow, GAME_LINE), null);
+  check('missing g3 → no marker (null)', buildGate3WouldFireMarker(null, GAME_LINE), null);
+
+  // shadow + failing quote → distinctive, single-line, SELECT-able marker.
+  const mShadow = buildGate3WouldFireMarker(shadow, GAME_LINE);
+  check('shadow marker is a string', typeof mShadow === 'string' && mShadow.length > 0, true);
+  check('shadow marker has GATE3_WOULD_FIRE prefix (queryable)', mShadow.startsWith('GATE3_WOULD_FIRE'), true);
+  check('shadow marker carries mode=shadow', mShadow.includes('mode=shadow'), true);
+  check('shadow marker carries claimed=WIN', mShadow.includes('claimed=WIN'), true);
+  check('shadow marker carries reason=UNVERIFIED_QUOTE', mShadow.includes('reason=UNVERIFIED_QUOTE'), true);
+  check('shadow marker is single-line (no newline)', mShadow.includes('\n'), false);
+
+  // enforce + failing quote → same marker, mode=enforce.
+  const mEnforce = buildGate3WouldFireMarker(enforce, GAME_LINE);
+  check('enforce marker has GATE3_WOULD_FIRE prefix', mEnforce.startsWith('GATE3_WOULD_FIRE'), true);
+  check('enforce marker carries mode=enforce', mEnforce.includes('mode=enforce'), true);
+
+  // prop vs game-line split (the metric the audit is for).
+  check('game-line bet → prop=0', buildGate3WouldFireMarker(shadow, GAME_LINE).includes('prop=0'), true);
+  check('player-prop description → prop=1', buildGate3WouldFireMarker(shadow, PROP_LINE).includes('prop=1'), true);
+  check('bet_type=prop → prop=1 (explicit type)', buildGate3WouldFireMarker(shadow, { description: 'x', bet_type: 'prop' }).includes('prop=1'), true);
 
   console.log(`\n${pass} passed / ${fail} failed`);
   if (fail > 0) process.exit(1);
