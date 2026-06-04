@@ -149,7 +149,38 @@ function applyGate3(parsed, evidenceText, { mode, betId, legIndex } = {}) {
     logLine,
     reason: qv.reason,
     detail: qv.detail,
+    claimed,           // model's claimed status (uppercased) — carried into the B0 audit marker
   };
+}
+
+// ── B0: Gate 3 would-fire audit marker ──
+// Persists each would-fire event so the would-be false-PENDING rate (the metric
+// that gates the off→shadow→enforce flip) is queryable by SQL over any window —
+// Fly stdout rolls off, so the [GATE3 would-fire] log line alone can't be
+// measured. MEASUREMENT ONLY: the caller pushes this token onto the EXISTING
+// attempt's `audit.guards_failed` array (earlyReturn never clobbers it; it is
+// never read to gate grading — display-only at commands/admin.js), so it rides
+// the single grading_audit row the attempt already writes and adds ZERO rows.
+// That is what keeps it non-mutating: a dedicated extra row would land in
+// shouldAutoVoidNoData's recent-5 window and the daily-cap count, both of which
+// gate grading. Returns null when the gate did not would-fire (off mode, or the
+// quote verified) → caller pushes nothing.
+//
+// One self-contained, greppable token packs the event + its splits:
+//   GATE3_WOULD_FIRE|mode=<shadow|enforce>|claimed=<STATUS>|prop=<0|1>|reason=<R>
+// Query with: WHERE guards_failed LIKE '%GATE3_WOULD_FIRE%'  (+ '%mode=enforce%',
+// '%prop=0%' etc. for the splits). prop is a HEURISTIC, not a stored flag:
+// isPlayerPropDescription is sport-agnostic but description-based, and parlay
+// legs reach here with bet_type forced to 'straight' (see gradeParlay), so the
+// description heuristic is the only per-leg prop cue available.
+const GATE3_WOULD_FIRE_MARKER = 'GATE3_WOULD_FIRE';
+function buildGate3WouldFireMarker(g3, bet) {
+  if (!g3 || !g3.wouldFire) return null;
+  const isProp = isPlayerPropDescription(bet && bet.description)
+    || String((bet && bet.bet_type) || '').toLowerCase() === 'prop';
+  const claimed = String(g3.claimed || '').toUpperCase() || 'UNKNOWN';
+  const reason = g3.reason || 'UNVERIFIED_QUOTE';
+  return `${GATE3_WOULD_FIRE_MARKER}|mode=${g3.mode}|claimed=${claimed}|prop=${isProp ? 1 : 0}|reason=${reason}`;
 }
 
 // ── Gate 1: deterministic parlay reducer (keystone) ──
@@ -1925,6 +1956,31 @@ async function gradeParlay(parlayBet, legs) {
   return aggregateParlayLegResults(legResults, legs, parlayBet);
 }
 
+// Module-level audit writer (extracted from the gradeSingleBet writeAudit
+// closure, behavior-preserving). One row per grading attempt. attempt_num is
+// derived from the live COUNT for this bet_id; timestamp is epoch MILLIS
+// (Date.now()), matching the daily-cap query. Fire-and-forget: a write failure
+// is logged but never breaks grading.
+function writeGradingAudit(audit) {
+  try {
+    console.log(`[GradeAudit] Writing audit for bet=${audit.bet_id?.slice(0, 12)} status=${audit.final_status} provider=${audit.provider_used}`);
+    const uid = require('crypto').randomBytes(8).toString('hex');
+    const attemptNum = db.prepare('SELECT COUNT(*) as c FROM grading_audit WHERE bet_id = ?').get(audit.bet_id)?.c || 0;
+    db.prepare(`INSERT INTO grading_audit (id, bet_id, attempt_num, timestamp, sport_in, sport_out, reclassified, is_parlay, leg_index, leg_count, search_backend, search_query, search_hits, search_duration_ms, provider_used, raw_response, guards_passed, guards_failed, final_status, final_evidence) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(
+        uid, audit.bet_id, attemptNum + 1, Date.now(),
+        audit.sport_in || null, audit.sport_out || null, audit.reclassified || 0,
+        audit.is_parlay || 0, audit.leg_index ?? null, audit.leg_count ?? null,
+        audit.search_backend || null, audit.search_query || null,
+        audit.search_hits || 0, audit.search_duration_ms || 0,
+        audit.provider_used || null, (audit.raw_response || '').slice(0, 1000),
+        JSON.stringify(audit.guards_passed || []), JSON.stringify(audit.guards_failed || []),
+        audit.final_status || null, (audit.final_evidence || '').slice(0, 500)
+      );
+    console.log(`[GradeAudit] Written successfully: attempt ${attemptNum + 1}`);
+  } catch (e) { console.error(`[GradeAudit] Write FAILED: ${e.message}`); }
+}
+
 // ── Single-bet grader — ANTI-HALLUCINATION HARDENED ────────────
 async function gradeSingleBet(bet, _auditCtx = {}) {
   const today = new Date().toISOString().split('T')[0];
@@ -1951,25 +2007,10 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
     final_evidence: null,
   };
 
-  function writeAudit() {
-    try {
-      console.log(`[GradeAudit] Writing audit for bet=${audit.bet_id?.slice(0, 12)} status=${audit.final_status} provider=${audit.provider_used}`);
-      const uid = require('crypto').randomBytes(8).toString('hex');
-      const attemptNum = db.prepare('SELECT COUNT(*) as c FROM grading_audit WHERE bet_id = ?').get(audit.bet_id)?.c || 0;
-      db.prepare(`INSERT INTO grading_audit (id, bet_id, attempt_num, timestamp, sport_in, sport_out, reclassified, is_parlay, leg_index, leg_count, search_backend, search_query, search_hits, search_duration_ms, provider_used, raw_response, guards_passed, guards_failed, final_status, final_evidence) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .run(
-          uid, audit.bet_id, attemptNum + 1, Date.now(),
-          audit.sport_in || null, audit.sport_out || null, audit.reclassified || 0,
-          audit.is_parlay || 0, audit.leg_index ?? null, audit.leg_count ?? null,
-          audit.search_backend || null, audit.search_query || null,
-          audit.search_hits || 0, audit.search_duration_ms || 0,
-          audit.provider_used || null, (audit.raw_response || '').slice(0, 1000),
-          JSON.stringify(audit.guards_passed || []), JSON.stringify(audit.guards_failed || []),
-          audit.final_status || null, (audit.final_evidence || '').slice(0, 500)
-        );
-      console.log(`[GradeAudit] Written successfully: attempt ${attemptNum + 1}`);
-    } catch (e) { console.error(`[GradeAudit] Write FAILED: ${e.message}`); }
-  }
+  // Persist this attempt's audit row. Delegates to the module-level
+  // writeGradingAudit so the INSERT is reusable + unit-testable (B0 DB tests
+  // exercise the real write path rather than a copy of the column mapping).
+  function writeAudit() { writeGradingAudit(audit); }
 
   function earlyReturn(result, opts = {}) {
     // Auto-record PENDING drops to pipeline_events.
@@ -2293,8 +2334,14 @@ CRITICAL RULES:
     legIndex: audit.leg_index,
   });
   if (g3.logLine) console.warn(g3.logLine);
+  // B0: persist the would-fire event (shadow AND enforce) by marking THIS
+  // attempt's audit row — adds ZERO rows, leaves the grade untouched in shadow.
+  // off → buildGate3WouldFireMarker returns null → no-op. The single
+  // GATE3_WOULD_FIRE token subsumes the prior 'GATE3:unverified_quote' marker
+  // (enforce's force-pending implies would-fire, so it is marked here too).
+  const g3Marker = buildGate3WouldFireMarker(g3, bet);
+  if (g3Marker) audit.guards_failed.push(g3Marker);
   if (g3.forcePending) {
-    audit.guards_failed.push('GATE3:unverified_quote');
     return earlyReturn({
       status: 'PENDING',
       evidence: `UNVERIFIED_QUOTE: ${g3.detail} — forced PENDING (model claimed ${parsed.status}). Original: ${String(parsed.evidence || '').slice(0, 100)}`,
@@ -2559,6 +2606,7 @@ module.exports = {
     reduceParlayResult, normalizeLegStatus,            // Gate 1
     computeEvidenceHash, decideFinalGradeWrite, GRADER_VERSION, // Gate 2
     validateEvidenceQuote, normalizeQuoteWhitespace, resolveGate3Mode, applyGate3,   // Gate 3
+    buildGate3WouldFireMarker, writeGradingAudit,      // Gate 3 — B0 would-fire audit persistence
   },
   // Exported for tests + observability — these are called from
   // gradePropWithAI internally; importers MUST NOT mutate.

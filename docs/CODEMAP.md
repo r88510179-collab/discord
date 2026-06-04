@@ -106,7 +106,7 @@ PK is `id` (TEXT, hex hash — **NOT** `bet_id`, common memory error).
 
 ### `grading_audit`
 
-Every grader attempt logged. Cols: `bet_id, attempt_num, timestamp INTEGER, sport_in/out, reclassified, is_parlay, leg_index, leg_count, search_backend, search_query, search_hits, search_duration_ms, provider_used, raw_response, guards_passed, guards_failed, final_status, final_evidence`.
+Every grader attempt logged. Cols: `bet_id, attempt_num, timestamp INTEGER, sport_in/out, reclassified, is_parlay, leg_index, leg_count, search_backend, search_query, search_hits, search_duration_ms, provider_used, raw_response, guards_passed, guards_failed, final_status, final_evidence`. Created via `CREATE TABLE IF NOT EXISTS` in `services/database.js:97` (NOT a numbered migration). `timestamp` is epoch **MILLIS** (`Date.now()`) — window filters use `timestamp >= (unixepoch()-N)*1000` (see the daily cap at `grading.js:~1105`), not `datetime('now',…)`. `guards_passed`/`guards_failed` are JSON-array TEXT. **B0 (2026-06-04):** Gate-3 would-fire events ride `guards_failed` as a `GATE3_WOULD_FIRE|mode=|claimed=|prop=|reason=` token (`SELECT … WHERE guards_failed LIKE '%GATE3_WOULD_FIRE%'`); `guards_failed` is display-only (`commands/admin.js:439`) and never gates grading.
 
 ### `regrade_results`, `regrade_batches`, `bet_grade_history` (mig 022)
 
@@ -195,26 +195,34 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 > Refreshed again 2026-06-03 (PR `gate3-shadow-mode`): the Gate 3 helper block
 > grew by +64 lines (tri-state mode resolver + `applyGate3`), so everything
 > below `validateEvidenceQuote` shifted by +64.
+> Refreshed again 2026-06-04 (PR `gate3-would-fire-audit`, B0): added
+> `buildGate3WouldFireMarker` after `applyGate3` (+31 below it) and extracted
+> `writeGradingAudit` before `gradeSingleBet` (+25 more below it). Net shift:
+> +31 from `reduceParlayResult` down, +56 from `gradeSingleBet` down. The Gate-3
+> would-fire event now persists to `grading_audit.guards_failed` as a
+> `GATE3_WOULD_FIRE|…` marker on the attempt's existing row (zero extra rows).
 
 | What | Line(s) |
 | --- | --- |
-| **Gate 1** `reduceParlayResult` (pure parlay reducer — keystone; LOSS>PENDING>WIN) | 178 (fn); `normalizeLegStatus` 171 |
+| **Gate 1** `reduceParlayResult` (pure parlay reducer — keystone; LOSS>PENDING>WIN) | 209 (fn); `normalizeLegStatus` 202 |
 | **Gate 2** `GRADER_VERSION` / `computeEvidenceHash` / `decideFinalGradeWrite` | 20 / 25 / 45 |
-| **Gate 3** quote-bound grading — tri-state `QUOTE_BOUND_GRADING` (`off`/`shadow`(default)/`enforce`); shadow logs `[GATE3 would-fire]` and leaves the grade, enforce forces PENDING (`UNVERIFIED_QUOTE`); unknown/legacy → shadow | `normalizeQuoteWhitespace` 76 (now folds curly quotes + en/em-dash); `validateEvidenceQuote` 89; `resolveGate3Mode` 115; `applyGate3` 129 |
-| `looksLikePlayerProp` | 230 (fn); structured gate → `tryStructured` 2087 (call L2088) |
-| `canFinalizeBet` | 501 |
-| `scheduleRecheckAfterDenial` | 575 |
-| `calcProfit` | 955 |
-| `gradeFromCelebration` | 1232 |
-| `buildGraderSearchQuery` (description-only; doc-comment above) | 1359 |
-| `searchBing` (BROKEN — returns 200 OK with garbage HTML) | 1571 |
-| `gradePropWithAI` (dispatch: parlay→gradeParlay, else gradeSingleBet) | 1705 |
-| `isTrustedLossLeg` (Bug A Part 1, v438) | 1771 |
-| `aggregateParlayLegResults` (now downgrades untrusted-LOSS→PENDING, then delegates precedence to Gate 1 reducer) | 1826 (fn); reducer call 1863; "Parlay LOSS — leg N" emit 1873 |
-| `gradeParlay` | 1892 |
-| `gradeSingleBet` | 1929; structured pre-check 2085; **Gate 3** quote check 2283 (`applyGate3` call 2290); grader waterfall 2166–2188 (groq-llama4-scout 2167 → cerebras-gpt-oss → groq-qwen → openrouter → groq-gpt-oss → mistral → ollama → groq-llama8b 2188) |
-| `finalizeBetGrading` | 2421 (also exported as `gradeBet` ~L2543); **Gate 2** idempotency check 2433; atomic write stamps `grader_version`+`evidence_hash` via `gradeBetRecord` |
-| `resolvePlayerProp` | REMOVED (v459) — replaced by `tryStructured()` from services/sportsdata, called at L2088 |
+| **Gate 3** quote-bound grading — tri-state `QUOTE_BOUND_GRADING` (`off`/`shadow`(default)/`enforce`); shadow logs `[GATE3 would-fire]` and leaves the grade, enforce forces PENDING (`UNVERIFIED_QUOTE`); unknown/legacy → shadow | `normalizeQuoteWhitespace` 76; `validateEvidenceQuote` 89; `resolveGate3Mode` 115; `applyGate3` 129 (returns `claimed` for the marker) |
+| **Gate 3 (B0)** `buildGate3WouldFireMarker` — pure; returns `GATE3_WOULD_FIRE\|mode=\|claimed=\|prop=\|reason=` token or `null` (off / quote ok). Caller pushes it onto `audit.guards_failed` (display-only; never gates grading) so the event rides the attempt's existing `grading_audit` row — **zero extra rows** (a dedicated row would perturb `shouldAutoVoidNoData`'s recent-5 + the daily cap). Query: `WHERE guards_failed LIKE '%GATE3_WOULD_FIRE%'` | 177 (fn); marker const 176 |
+| `looksLikePlayerProp` | 261 (fn); structured gate → `tryStructured` 2128 (call L2129) |
+| `canFinalizeBet` | 532 |
+| `scheduleRecheckAfterDenial` | 606 |
+| `calcProfit` | 986 |
+| `gradeFromCelebration` | 1263 |
+| `buildGraderSearchQuery` (description-only; doc-comment above) | 1390 |
+| `searchBing` (BROKEN — returns 200 OK with garbage HTML) | 1602 |
+| `gradePropWithAI` (dispatch: parlay→gradeParlay, else gradeSingleBet) | 1736 |
+| `isTrustedLossLeg` (Bug A Part 1, v438) | 1802 |
+| `aggregateParlayLegResults` (now downgrades untrusted-LOSS→PENDING, then delegates precedence to Gate 1 reducer) | 1857 (fn); reducer call 1894; "Parlay LOSS — leg N" emit 1904 |
+| `gradeParlay` (builds per-leg `legBet` with `bet_type:'straight'` — legs have no stored prop flag) | 1923 |
+| `writeGradingAudit` (module-level; extracted from the `gradeSingleBet` `writeAudit` closure, B0) — one `grading_audit` row per attempt; `timestamp` is epoch MILLIS | 1964 |
+| `gradeSingleBet` | 1985; structured pre-check 2129; **Gate 3** quote check 2324 (`applyGate3` call 2331; B0 would-fire marker push 2342–2343); grader waterfall 2207–2229 (groq-llama4-scout 2208 → cerebras-gpt-oss → groq-qwen → openrouter → groq-gpt-oss → mistral → ollama → groq-llama8b 2229) |
+| `finalizeBetGrading` | 2468 (also exported as `gradeBet`); **Gate 2** idempotency check 2472; atomic write stamps `grader_version`+`evidence_hash` via `gradeBetRecord` |
+| `resolvePlayerProp` | REMOVED (v459) — replaced by `tryStructured()` from services/sportsdata, called at L2129 |
 
 ### services/sportsdata/ (Phase 1 structured grading, v459)
 | File | Purpose |
