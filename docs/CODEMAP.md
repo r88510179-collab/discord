@@ -185,6 +185,8 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 | LLM waterfall start | 241 (`callLLMResult` dispatch); `PROVIDERS` L18, `getProviders` L68, `callLLM` L333 |
 | `slice(0, 250)` → bet_type-aware cap (v451) | 428 (`descCap = isParlay ? 2000 : 250`), in `normalizeBet` L421 |
 | MAG7/sheet detector emit per-sport straights (v423) | 984 (prompt-level SHEET-vs-PARLAY rule in `GEMMA_SLIP_PROMPT` — model emits per-sport straights; no separate JS detector) |
+| `disambiguateAmbiguousTeam(text)` (P1 sport-disambiguation, PR #36) — returns the sport for a contiguous `"<city> <nickname>"` ambiguous-team phrase; abstains (returns `null`) when the string matches 0 or >1 distinct franchises, so multi-franchise strings are never force-classified | 549 (fn); export L1984; called from `detectSport` L582, `reclassifySport` L1639, `inferLegSport` L1674 |
+| `AMBIGUOUS_TEAMS` — table of the 6 shared nicknames (cardinals, giants, rangers, kings, panthers, jets) mapping each city → its sport | 530 |
 
 ### services/grading.js
 
@@ -291,6 +293,7 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 | regrade-export.js | Pull batches of 25 pending bets for parallel Claude/ChatGPT grading |
 | test-dedup-normalization.js | Validates parlay leg dedup normalizer |
 | backfill-hold-embeds.js | v447 hold-embed backfill (PR #29) |
+| test-team-disambiguation.js | Regression harness for `normalizeDescription` bare-city injection (Bug 1) + shared-nickname sport disambiguation (Bug 2) (PR #36). Run: `node scripts/test-team-disambiguation.js` |
 
 ## Migrations
 
