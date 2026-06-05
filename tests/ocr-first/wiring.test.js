@@ -93,6 +93,49 @@ function spyStage() {
 }
 const IMG = 'https://cdn.discordapp.com/attachments/1/2/slip.webp';
 
+// ── PR 2a SGP would-hold fixtures ─────────────────────────────────────────────
+// Verbatim OCR + the Groq parses Groq actually returns, mirroring the real
+// spot-check slips inlined in sgp-gate.test.js (reports/sgp-content-spotcheck.json
+// slip-10 PASS / slip-12 phantom FAIL). The shadow seam injects a FALLBACK_GEMINI/
+// OCR_SGP_GATE decision (extractViaOcr's pre-Groq SGP bail) carrying this ocrText,
+// plus a deps.callGroqParse that returns the parse the live path never runs.
+const SGP_SLIP10_OCR = 'Hard Rock\nBET\nSGPMAX\n2-Bet Parlay\n+1435\nSGP\nAngels vs Athletics\nO0ver0.5\nLAWRENCE BUTLER -TO RECORD 1+HITS\nO0ver0.5\nZACH NETO -HITS';
+const SGP_SLIP10_GROQ = { bet_type: 'sgpmax', total_odds: '+1435', legs: [
+  { matchup: 'Angels vs Athletics', player: 'Lawrence Butler', market: '', selection: 'TO RECORD 1+ HITS', odds: '+110' },
+  { matchup: 'Angels vs Athletics', player: 'Zach Neto', market: '', selection: 'HITS', odds: null },
+] };
+const SGP_SLIP12_OCR = 'Hard Rock\nBET\nSGPMAX\n3-Bet Parlay\n+162\n-118\nSGP\nPirates vs Cubs\nOver 0.5\nBRYAN REYNOLDS - HITS\nOver 0.5\nNICK GONZALES - HITS\nOver 0.5\n-240\nTAYLOR WARD -HITS\nOrioles vs Blue Jays';
+const SGP_SLIP12_GROQ = { bet_type: 'sgpmax', legs: [
+  { matchup: 'Pirates vs Cubs', player: 'Bryan Reynolds', market: 'HITS', selection: 'Over 0.5', odds: null },
+  { matchup: 'Pirates vs Cubs', player: 'Nick Gonzales', market: 'HITS', selection: 'Over 0.5', odds: null },
+  { matchup: 'Pirates vs Cubs', player: 'Taylor Ward', market: 'HITS', selection: 'Over 0.5', odds: '-240' },
+  { matchup: 'Orioles vs Blue Jays', player: null, market: '', selection: '', odds: '-118' }, // phantom game-odds leg
+] };
+
+// deps whose extractViaOcr returns the pre-Groq SGP bail decision (carrying ocrText)
+// and whose callGroqParse returns the would-hold parse. `throwGroq` exercises the swallow.
+function makeSgpDeps({ ocrText, groqParsed, throwGroq = false, groqOk = true }) {
+  const calls = { fetch: 0, extract: 0, groq: 0 };
+  return {
+    calls,
+    fetchImageBytes: async () => { calls.fetch++; return { ok: true, base64: 'b64', mediaType: 'image/webp' }; },
+    extractViaOcr: async () => {
+      calls.extract++;
+      return {
+        action: 'FALLBACK_GEMINI', reason: 'OCR_SGP_GATE', parsedBet: null,
+        ocrText, validationErrors: [],
+        evidence: { sgpToken: 'SGPMAX', headerLegCount: null, parsedLegCount: null, ocrChars: ocrText.length },
+        timingsMs: { ocr: 60, parse: 0, validate: 0, total: 61 }, imageHash: null,
+      };
+    },
+    callGroqParse: async () => {
+      calls.groq++;
+      if (throwGroq) throw new Error('boom-groq');
+      return groqOk ? { ok: true, parsed: groqParsed, raw: JSON.stringify(groqParsed) } : { ok: false, parsed: null, raw: null };
+    },
+  };
+}
+
 async function main() {
   console.log('OCR-first wiring (services/ocrFirstWiring.js):');
 
@@ -224,6 +267,119 @@ async function main() {
     assert.strictEqual(rec.events.length, 1);
     assert.strictEqual(rec.events[0].payload.reason, WiringReason.NO_IMAGE_BYTES);
     assert.strictEqual(rec.events[0].payload.agreement, false);
+  });
+
+  // ── PR 2a: SGP would-hold measurement (shadow-only; additive) ─────────────
+  await run('shadow + SGP slip-10 (market-in-selection) → ocr_sgp_would_hold PASS; staged bet untouched', async () => {
+    const live = makeLiveParsed();
+    const baseline = JSON.parse(JSON.stringify(live));
+    const d = makeSgpDeps({ ocrText: SGP_SLIP10_OCR, groqParsed: SGP_SLIP10_GROQ });
+    const rec = spyStage();
+    const res = await applyOcrFirst({ parsed: live, imageUrl: IMG, imageCount: 1, requestId: 'req-sgp-pass', sourceRef: 'm-sgp', mode: 'shadow', deps: d, recordStageFn: rec.fn });
+
+    assert.strictEqual(res.parsed, live, 'shadow must NOT replace the staged bet for an SGP slip');
+    await res.shadowPromise;
+    assert.deepStrictEqual(res.parsed, baseline, 'staged bet identical after the SGP would-hold runs');
+
+    // The pre-Groq SGP bail still emits its FALLBACK_GEMINI shadow_decision …
+    const sd = rec.events.find((e) => e.eventType === 'ocr_shadow_decision');
+    assert.ok(sd && sd.payload.action === 'FALLBACK_GEMINI' && sd.payload.reason === 'OCR_SGP_GATE');
+    // … and the would-hold rides alongside it.
+    const wh = rec.events.find((e) => e.eventType === 'ocr_sgp_would_hold');
+    assert.ok(wh, 'ocr_sgp_would_hold must be emitted for an SGP slip');
+    assert.strictEqual(wh.stage, 'OCR_FIRST');
+    assert.strictEqual(wh.ingestId, 'req-sgp-pass');
+    assert.strictEqual(wh.payload.pass, true, `expected PASS, got ${wh.payload.reason}`);
+    assert.strictEqual(wh.payload.reason, 'SGP_PASS');
+    assert.strictEqual(wh.payload.declaredLegCount, 2, 'declared from the 2-Bet header');
+    assert.strictEqual(wh.payload.parsedLegCount, 2);
+    assert.strictEqual(wh.payload.scope, 'single');
+    assert.strictEqual(wh.payload.ocrMs, 61, 'ocrMs mirrors decision.timingsMs.total');
+    assert.strictEqual(d.calls.groq, 1, 'exactly one shadow-only Groq parse');
+  });
+
+  await run('shadow + SGP slip-12 (phantom leg) → ocr_sgp_would_hold FAIL count mismatch', async () => {
+    const live = makeLiveParsed();
+    const d = makeSgpDeps({ ocrText: SGP_SLIP12_OCR, groqParsed: SGP_SLIP12_GROQ });
+    const rec = spyStage();
+    const res = await applyOcrFirst({ parsed: live, imageUrl: IMG, imageCount: 1, requestId: 'req-sgp-fail', mode: 'shadow', deps: d, recordStageFn: rec.fn });
+    await res.shadowPromise;
+    const wh = rec.events.find((e) => e.eventType === 'ocr_sgp_would_hold');
+    assert.ok(wh, 'ocr_sgp_would_hold emitted');
+    assert.strictEqual(wh.payload.pass, false);
+    assert.strictEqual(wh.payload.reason, 'SGP_COUNT_MISMATCH');
+    assert.strictEqual(wh.payload.declaredLegCount, 3, 'declared from the 3-Bet header');
+    assert.strictEqual(wh.payload.parsedLegCount, 4, 'phantom game-odds leg inflates the raw parse count');
+  });
+
+  await run('shadow + SGP slip with NO N-Bet header → would-hold pass:false SGP_NO_DECLARED_COUNT (parse still recorded)', async () => {
+    const live = makeLiveParsed();
+    const ocrText = 'Hard Rock\nBET\nSGPMAX\nAngels vs Athletics\nLAWRENCE BUTLER -HITS\nOver 0.5'; // no "N-Bet" header
+    const groqParsed = { bet_type: 'sgpmax', legs: [{ matchup: 'Angels vs Athletics', player: 'Lawrence Butler', market: 'HITS', selection: 'Over 0.5', odds: null }] };
+    const d = makeSgpDeps({ ocrText, groqParsed });
+    const rec = spyStage();
+    const res = await applyOcrFirst({ parsed: live, imageUrl: IMG, imageCount: 1, requestId: 'req-sgp-nohdr', mode: 'shadow', deps: d, recordStageFn: rec.fn });
+    await res.shadowPromise;
+    const wh = rec.events.find((e) => e.eventType === 'ocr_sgp_would_hold');
+    assert.ok(wh);
+    assert.strictEqual(wh.payload.pass, false);
+    assert.strictEqual(wh.payload.reason, 'SGP_NO_DECLARED_COUNT');
+    assert.strictEqual(wh.payload.declaredLegCount, null);
+    assert.strictEqual(wh.payload.parsedLegCount, 1, 'parse recorded even without a declared count');
+  });
+
+  await run('shadow + SGP slip, Groq soft-fail (ok:false) → would-hold pass:false SGP_NO_LEGS', async () => {
+    const live = makeLiveParsed();
+    const d = makeSgpDeps({ ocrText: SGP_SLIP10_OCR, groqParsed: null, groqOk: false });
+    const rec = spyStage();
+    const res = await applyOcrFirst({ parsed: live, imageUrl: IMG, imageCount: 1, requestId: 'req-sgp-softfail', mode: 'shadow', deps: d, recordStageFn: rec.fn });
+    await res.shadowPromise;
+    const wh = rec.events.find((e) => e.eventType === 'ocr_sgp_would_hold');
+    assert.ok(wh, 'a Groq soft-fail is data, not an error — still emits');
+    assert.strictEqual(wh.payload.pass, false);
+    assert.strictEqual(wh.payload.reason, 'SGP_NO_LEGS');
+    assert.strictEqual(wh.payload.parsedLegCount, null);
+  });
+
+  await run('shadow + non-SGP decision → NO ocr_sgp_would_hold (only the shadow_decision)', async () => {
+    const live = makeLiveParsed();
+    const d = makeDeps({ decision: useOcrDecision }); // reason OCR_PARSE_OK, not SGP
+    const rec = spyStage();
+    const res = await applyOcrFirst({ parsed: live, imageUrl: IMG, imageCount: 1, requestId: 'req-nonsgp', mode: 'shadow', deps: d, recordStageFn: rec.fn });
+    await res.shadowPromise;
+    assert.strictEqual(rec.events.length, 1, 'exactly one event for a non-SGP slip');
+    assert.ok(!rec.events.find((e) => e.eventType === 'ocr_sgp_would_hold'), 'no would-hold for a non-SGP decision');
+  });
+
+  await run('shadow + SGP slip, would-hold Groq throws → swallowed; live path intact, shadow_decision still emitted', async () => {
+    const live = makeLiveParsed();
+    const baseline = JSON.parse(JSON.stringify(live));
+    const d = makeSgpDeps({ ocrText: SGP_SLIP10_OCR, groqParsed: SGP_SLIP10_GROQ, throwGroq: true });
+    const rec = spyStage();
+    let threw = false; let res;
+    try {
+      res = await applyOcrFirst({ parsed: live, imageUrl: IMG, imageCount: 1, requestId: 'req-sgp-throw', mode: 'shadow', deps: d, recordStageFn: rec.fn });
+    } catch (_) { threw = true; }
+    assert.strictEqual(threw, false, 'applyOcrFirst must not throw when the would-hold chain throws');
+    assert.strictEqual(res.parsed, live);
+    assert.deepStrictEqual(res.parsed, baseline, 'staged bet identical despite the swallowed would-hold error');
+    let bgRejected = false;
+    await res.shadowPromise.catch(() => { bgRejected = true; });
+    assert.strictEqual(bgRejected, false, 'shadow bg promise must not reject on a would-hold error');
+    assert.ok(rec.events.find((e) => e.eventType === 'ocr_shadow_decision'), 'shadow_decision still emitted (it precedes the would-hold)');
+    assert.ok(!rec.events.find((e) => e.eventType === 'ocr_sgp_would_hold'), 'no would-hold event when the chain throws (swallowed)');
+  });
+
+  await run('cutover + SGP decision → NO ocr_sgp_would_hold (measurement is shadow-only)', async () => {
+    const live = makeLiveParsed();
+    const d = makeSgpDeps({ ocrText: SGP_SLIP10_OCR, groqParsed: SGP_SLIP10_GROQ });
+    const rec = spyStage();
+    const res = await applyOcrFirst({ parsed: live, imageUrl: IMG, imageCount: 1, requestId: 'req-cut-sgp', mode: 'cutover', deps: d, recordStageFn: rec.fn });
+    assert.strictEqual(res.parsed, live, 'cutover SGP fallback keeps the live parse');
+    assert.strictEqual(d.calls.groq, 0, 'cutover must NOT run the shadow-only would-hold Groq parse');
+    assert.ok(!rec.events.find((e) => e.eventType === 'ocr_sgp_would_hold'), 'would-hold is shadow-only');
+    const fb = rec.events.find((e) => e.eventType === 'ocr_fallback');
+    assert.ok(fb && fb.payload.reason === 'OCR_SGP_GATE', 'cutover still emits its ocr_fallback unchanged');
   });
 
   // ── mode = cutover (dormant; eligibility-guarded) ────────

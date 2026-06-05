@@ -30,7 +30,8 @@
 
 'use strict';
 
-const { extractViaOcr } = require('./ocrFirst');
+const { extractViaOcr, callGroqParse, extractHeaderLegCount, ReasonCode } = require('./ocrFirst');
+const { evaluateSgpGate } = require('./sgpGate');
 
 // ── Mode (read at module load; prod reads env once at boot) ──
 const VALID_MODES = new Set(['off', 'shadow', 'cutover']);
@@ -373,6 +374,53 @@ function emit(recordStageFn, eventType, requestId, sourceRef, payload) {
 }
 
 /**
+ * SGP would-hold MEASUREMENT (PR 2a — shadow-only, NO behavior change). à la the
+ * Gate-3 B0 would-fire pattern (#37): emit one trace event, act on nothing.
+ *
+ * extractViaOcr bails SGP/SGPMAX slips to FALLBACK_GEMINI *before* Groq runs
+ * (services/ocrFirst.js "SGP gate — BEFORE Groq"), so SGP slips get no parse and
+ * the gate has never run on real traffic. This re-uses the OCR text that bail
+ * already produced to run the skipped chain — Groq parse → declaredLegCount
+ * (N-Bet header) → evaluateSgpGate — and emits ONE `ocr_sgp_would_hold` event so
+ * we can confirm on live traffic that the gate PASSes rescuable SGP slips and
+ * FAILs junk, BEFORE PR 2b flips drop→hold on a PASS.
+ *
+ * PURE OBSERVABILITY: the caller's returned decision stays FALLBACK_GEMINI; this
+ * never mutates the staged bet, never awaits on the request path, and SWALLOWS
+ * every error (one warn, never throws). The added Groq call is shadow-only. A
+ * missing N-Bet header → evaluateSgpGate returns pass:false SGP_NO_DECLARED_COUNT
+ * (no rescue, recorded) — same fail-safe spirit as the gate guardrail.
+ *
+ * @param {object} args
+ * @param {object} args.decision  the FALLBACK_GEMINI/OCR_SGP_GATE decision (carries ocrText + timingsMs)
+ * @param {string} args.scope     'single' | 'image[0]_of_multi' (carried for analysis)
+ */
+async function runSgpWouldHold({ decision, scope, requestId, sourceRef, recordStageFn, deps }) {
+  try {
+    const ocrText = decision && typeof decision.ocrText === 'string' ? decision.ocrText : '';
+    const groqParse = (deps && deps.callGroqParse) || callGroqParse;
+    const parseRes = await groqParse(ocrText, requestId);
+    const parsedBet = parseRes && parseRes.ok === true && parseRes.parsed ? parseRes.parsed : null;
+    const parsedLegCount = parsedBet && Array.isArray(parsedBet.legs) ? parsedBet.legs.length : null;
+    // Runtime declared-count source: the advisory "N-Bet Parlay" header (null when absent).
+    const declaredLegCount = extractHeaderLegCount(ocrText);
+    const gate = evaluateSgpGate({ declaredLegCount, parsedBet, ocrText });
+    emit(recordStageFn, 'ocr_sgp_would_hold', requestId, sourceRef, {
+      pass: gate.pass,
+      reason: gate.reason,
+      declaredLegCount: declaredLegCount != null ? declaredLegCount : null,
+      parsedLegCount,
+      scope,
+      // ocrMs mirrors ocr_shadow_decision (timingsMs.total) so one query reads both events.
+      ocrMs: decision && decision.timingsMs ? decision.timingsMs.total : null,
+    });
+  } catch (err) {
+    // Measurement must NEVER affect ingest — swallow EVERYTHING (incl. the emit path).
+    try { console.warn(`[ocrFirst/shadow] sgp would-hold swallowed: ${err && err.message}`); } catch (_) { /* noop */ }
+  }
+}
+
+/**
  * SHADOW — fire-and-forget. Returns the background promise (for tests to await),
  * but PRODUCTION CALLERS MUST NOT AWAIT IT. Never rejects; never touches the
  * staged bet. Emits exactly one `ocr_shadow_decision` per invocation.
@@ -414,6 +462,14 @@ function runShadow({ imageUrl, mediaType, requestId, sourceRef, liveParsed, deps
         scope,
         validationErrors: decision.validationErrors && decision.validationErrors.length ? decision.validationErrors : undefined,
       });
+      // PR 2a — SGP would-hold measurement (additive). When the live path bailed an
+      // SGP/SGPMAX slip to FALLBACK_GEMINI *before* Groq, run the skipped parse+gate
+      // on the same OCR text and emit a second `ocr_sgp_would_hold` trace. The
+      // returned decision is untouched (still FALLBACK_GEMINI); this only observes.
+      // runSgpWouldHold is self-swallowing so it can never break the shadow path.
+      if (decision && decision.reason === ReasonCode.SGP_GATE) {
+        await runSgpWouldHold({ decision, scope, requestId, sourceRef, recordStageFn, deps });
+      }
     })
     .catch((err) => {
       // Shadow must NEVER affect ingest — swallow EVERYTHING (incl. the emit path).
@@ -548,6 +604,7 @@ module.exports = {
   resolveMode,
   applyOcrFirst,
   runShadow,
+  runSgpWouldHold,
   runCutover,
   ocrBetToInternalBets,
   compareToLive,

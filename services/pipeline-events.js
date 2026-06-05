@@ -34,6 +34,7 @@ const EVENT_TYPES = [
   // OCR-first wiring event types (stage 'OCR_FIRST'). Additive/observational —
   // recordStage does not enforce the enum at the write boundary (see CODEMAP F-17).
   'ocr_shadow_decision', // shadow: one per slip — OCR decision compared to the live vision parse
+  'ocr_sgp_would_hold',  // shadow (PR 2a): SGP/SGPMAX would-fire measurement — Groq parse + evaluateSgpGate run on the OCR text the SGP bail produced; measurement-only, NOT in EXPECTED_STAGES, never gates behavior (PR 2b acts on a PASS)
   'ocr_used',            // cutover (dormant): OCR parse accepted, staged in place of Gemini
   'ocr_fallback',        // cutover (dormant): degraded to the live Gemini path
 ];
