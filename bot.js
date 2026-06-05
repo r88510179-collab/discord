@@ -773,6 +773,14 @@ client.once(Events.ClientReady, async (c) => {
 
   console.log('[Config] Grader path: runAutoGrade → gradePropWithAI(reclassify + parlay dispatch) → gradeSingleBet/gradeParlay → finalizeBetGrading');
   console.log(`[Config] /api/mobile-ingest: ${process.env.MOBILE_SCRAPER_SECRET ? 'ENABLED' : 'DISABLED (no MOBILE_SCRAPER_SECRET)'}`);
+  try {
+    const { db: scraperDb } = require('./services/database');
+    const total = scraperDb.prepare('SELECT COUNT(*) AS n FROM scraper_handles').get().n;
+    const enabled = scraperDb.prepare('SELECT COUNT(*) AS n FROM scraper_handles WHERE enabled = 1').get().n;
+    console.log(`[ScraperHandles] route mounted (GET /api/scraper-handles); ${total} handles seeded, ${enabled} enabled`);
+  } catch (err) {
+    console.error('[ScraperHandles] boot log failed:', err.message);
+  }
   console.log('🚀 Bot is ready!\n');
 });
 
