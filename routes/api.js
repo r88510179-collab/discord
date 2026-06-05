@@ -59,4 +59,30 @@ router.post('/mobile-ingest', async (req, res) => {
   }
 });
 
+// ── Scraper Handles (read) ────────────────────────────────────
+// DB-driven account list for the Surface Pro Twitter scraper to
+// poll each cycle (replaces the scraper's hardcoded handle const).
+// Source of truth: scraper_handles table (migration 027).
+// Security: x-mobile-secret header must match MOBILE_SCRAPER_SECRET
+// — identical to /mobile-ingest above.
+router.get('/scraper-handles', (req, res) => {
+  // ── Security check (mirrors /mobile-ingest exactly) ──
+  const secret = req.headers['x-mobile-secret'];
+  if (!process.env.MOBILE_SCRAPER_SECRET || secret !== process.env.MOBILE_SCRAPER_SECRET) {
+    console.warn('[API] Unauthorized scraper-handles attempt');
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    const { db } = require('../services/database');
+    const rows = db
+      .prepare('SELECT handle FROM scraper_handles WHERE enabled = 1 ORDER BY handle ASC')
+      .all();
+    return res.status(200).json({ handles: rows.map(r => r.handle) });
+  } catch (err) {
+    console.error('[API] scraper-handles query error:', err.message);
+    return res.status(500).json({ error: 'Internal error' });
+  }
+});
+
 module.exports = router;
