@@ -153,6 +153,33 @@ function isSupportedSport(sport) {
 }
 
 /**
+ * True slip-image count for multi-image eligibility (and the shadow `scope`
+ * label). HRB-style share posts arrive as 1 real slip attachment + 1 Discord
+ * share-embed THUMBNAIL; counting the embed inflates the count to 2, so cutover
+ * would skip the slip (`OCR_CUTOVER_SKIP_MULTI_IMAGE`) and shadow would force
+ * `scope=image[0]_of_multi` + `agreement=false`, making the OCR-vs-vision signal
+ * unreadable. The rescue replay confirmed real attachment count = 1 on all 25
+ * HRB failures — the "2nd image" lives in `message.embeds[]`, not attachments.
+ *
+ * Counts only REAL slip attachments: image objects tagged `origin:'attachment'`
+ * by handlers/messageHandler.js `getImageAttachments` (direct `message.attachments[]`
+ * uploads + forwarded snapshot attachments). Share-embed / link-preview
+ * thumbnails are tagged `origin:'embed'` and excluded, so the slip+embed artifact
+ * collapses to 1 while a genuine 2-attachment post still counts as 2.
+ *
+ * Fail-safe — NEVER wrongly collapse a real multi-image slip: when no image is
+ * tagged as a real attachment (an untagged/legacy list, or a slip that arrived
+ * purely as embed images), fall back to the TOTAL image count (the prior
+ * behavior). The returned count is therefore always ≤ the total, so this can
+ * only ever flip multi→single, never single→multi.
+ */
+function eligibleImageCount(images) {
+  const list = Array.isArray(images) ? images : [];
+  const attachments = list.reduce((n, img) => n + (img && img.origin === 'attachment' ? 1 : 0), 0);
+  return attachments >= 1 ? attachments : list.length;
+}
+
+/**
  * Convert a Groq OCR parsedBet (docs/specs/ocr-first.md §4 schema) into the
  * internal bet shape consumed by the existing staging pipeline
  * (createBetWithLegs). Returns an ARRAY (one slip = one bet w/ legs) so a
@@ -527,6 +554,7 @@ module.exports = {
   fetchImageBytes,
   isNonNewBet,
   isSupportedSport,
+  eligibleImageCount,
   inferSportFromLegs,
   WiringReason,
   ALLOWED_IMAGE_HOSTS,
