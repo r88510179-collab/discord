@@ -24,7 +24,7 @@ const port = process.env.PORT || 8080;
 app.listen(port, '0.0.0.0', () => console.log(`[SYSTEM] Health check server listening on 0.0.0.0:${port}`));
 
 const { handleMessage } = require('./handlers/messageHandler');
-const { handleWarRoomInteraction } = require('./services/warRoom');
+const { handleWarRoomInteraction, openEditModal } = require('./services/warRoom');
 const { handleGradeInteraction } = require('./handlers/gradeButtons');
 const { handleAdminButtonInteraction } = require('./handlers/adminButtons');
 const { handleHoldInteraction } = require('./services/holdReview');
@@ -64,11 +64,9 @@ async function handleSlipFeedInteraction(interaction) {
   }
 
   if (action === 'edit') {
-    // Reuse War Room edit modal
-    await handleWarRoomInteraction({
-      ...interaction,
-      customId: `war_edit:${betId}`,
-    });
+    // Reuse the War Room edit modal. Pass the ORIGINAL interaction (never a
+    // spread/plain copy — that drops prototype methods like showModal()).
+    await openEditModal(interaction, betId);
     return;
   }
 }

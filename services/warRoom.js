@@ -217,6 +217,76 @@ async function sendStagingEmbed(client, bet, capperName, sourceUrl) {
 }
 
 /**
+ * Open the "Edit Bet Details" modal for a bet, pre-filled from the DB.
+ * Shared by the War Room war_edit button and the #slip-feed edit button.
+ *
+ * IMPORTANT: `interaction` must be the ORIGINAL discord.js interaction object
+ * (a class instance), never a spread/plain copy — showModal() is a prototype
+ * method and is lost when the interaction is shallow-cloned.
+ *
+ * @param {import('discord.js').ButtonInteraction} interaction
+ * @param {string} betId
+ */
+async function openEditModal(interaction, betId) {
+  // Fetch current bet data to pre-fill the modal
+  const currentBet = db.prepare('SELECT * FROM bets WHERE id = ?').get(betId);
+
+  const modal = new ModalBuilder()
+    .setCustomId(`war_modal:${betId}`)
+    .setTitle('Edit Bet Details');
+
+  const sportInput = new TextInputBuilder()
+    .setCustomId('sport')
+    .setLabel('Sport')
+    .setStyle(TextInputStyle.Short)
+    .setValue(currentBet?.sport || '')
+    .setRequired(true);
+
+  // Fetch capper name for pre-fill
+  const capperRow = currentBet?.capper_id
+    ? db.prepare('SELECT display_name FROM cappers WHERE id = ?').get(currentBet.capper_id)
+    : null;
+
+  const capperInput = new TextInputBuilder()
+    .setCustomId('capper_name')
+    .setLabel('Capper Name')
+    .setStyle(TextInputStyle.Short)
+    .setValue(capperRow?.display_name || '')
+    .setRequired(true);
+
+  const descInput = new TextInputBuilder()
+    .setCustomId('description')
+    .setLabel('Pick / Description')
+    .setStyle(TextInputStyle.Paragraph)
+    .setValue(currentBet?.description || '')
+    .setRequired(true);
+
+  const oddsInput = new TextInputBuilder()
+    .setCustomId('odds')
+    .setLabel('Odds (e.g., -110, +150)')
+    .setStyle(TextInputStyle.Short)
+    .setValue(currentBet?.odds != null ? String(currentBet.odds) : '')
+    .setRequired(true);
+
+  const unitsInput = new TextInputBuilder()
+    .setCustomId('units')
+    .setLabel('Units Risked (e.g., 1, 2.5)')
+    .setStyle(TextInputStyle.Short)
+    .setValue(currentBet?.units != null ? String(currentBet.units) : '1')
+    .setRequired(true);
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(capperInput),
+    new ActionRowBuilder().addComponents(sportInput),
+    new ActionRowBuilder().addComponents(descInput),
+    new ActionRowBuilder().addComponents(oddsInput),
+    new ActionRowBuilder().addComponents(unitsInput),
+  );
+
+  await interaction.showModal(modal);
+}
+
+/**
  * Handle button interactions from staging embeds.
  * Call this from your interactionCreate event handler.
  *
@@ -287,62 +357,7 @@ async function handleWarRoomInteraction(interaction) {
     }
 
     if (action === 'war_edit') {
-      // Fetch current bet data to pre-fill the modal
-      const currentBet = db.prepare('SELECT * FROM bets WHERE id = ?').get(betId);
-
-      const modal = new ModalBuilder()
-        .setCustomId(`war_modal:${betId}`)
-        .setTitle('Edit Bet Details');
-
-      const sportInput = new TextInputBuilder()
-        .setCustomId('sport')
-        .setLabel('Sport')
-        .setStyle(TextInputStyle.Short)
-        .setValue(currentBet?.sport || '')
-        .setRequired(true);
-
-      // Fetch capper name for pre-fill
-      const capperRow = currentBet?.capper_id
-        ? db.prepare('SELECT display_name FROM cappers WHERE id = ?').get(currentBet.capper_id)
-        : null;
-
-      const capperInput = new TextInputBuilder()
-        .setCustomId('capper_name')
-        .setLabel('Capper Name')
-        .setStyle(TextInputStyle.Short)
-        .setValue(capperRow?.display_name || '')
-        .setRequired(true);
-
-      const descInput = new TextInputBuilder()
-        .setCustomId('description')
-        .setLabel('Pick / Description')
-        .setStyle(TextInputStyle.Paragraph)
-        .setValue(currentBet?.description || '')
-        .setRequired(true);
-
-      const oddsInput = new TextInputBuilder()
-        .setCustomId('odds')
-        .setLabel('Odds (e.g., -110, +150)')
-        .setStyle(TextInputStyle.Short)
-        .setValue(currentBet?.odds != null ? String(currentBet.odds) : '')
-        .setRequired(true);
-
-      const unitsInput = new TextInputBuilder()
-        .setCustomId('units')
-        .setLabel('Units Risked (e.g., 1, 2.5)')
-        .setStyle(TextInputStyle.Short)
-        .setValue(currentBet?.units != null ? String(currentBet.units) : '1')
-        .setRequired(true);
-
-      modal.addComponents(
-        new ActionRowBuilder().addComponents(capperInput),
-        new ActionRowBuilder().addComponents(sportInput),
-        new ActionRowBuilder().addComponents(descInput),
-        new ActionRowBuilder().addComponents(oddsInput),
-        new ActionRowBuilder().addComponents(unitsInput),
-      );
-
-      await interaction.showModal(modal);
+      await openEditModal(interaction, betId);
       return true;
     }
 
@@ -790,4 +805,4 @@ async function sendLadderEmbed(client, ladderBets, capperName, sourceUrl, sport)
   console.log(`[WarRoom] Ladder embed sent: ${ladderBets.length} steps from ${capperName}`);
 }
 
-module.exports = { sendStagingEmbed, handleWarRoomInteraction, sendUntrackedWinEmbed, sendLadderEmbed };
+module.exports = { sendStagingEmbed, handleWarRoomInteraction, openEditModal, sendUntrackedWinEmbed, sendLadderEmbed };
