@@ -66,7 +66,9 @@ async function handleSlipFeedInteraction(interaction) {
   if (action === 'edit') {
     // Reuse the War Room edit modal. Pass the ORIGINAL interaction (never a
     // spread/plain copy — that drops prototype methods like showModal()).
-    await openEditModal(interaction, betId);
+    // source='slipfeed' makes submit update THIS public embed in place
+    // (war_sfedit:) instead of replacing it with a War Room staging embed.
+    await openEditModal(interaction, betId, 'slipfeed');
     return;
   }
 }

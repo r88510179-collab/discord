@@ -13,15 +13,11 @@ function formatPropsLine(props) {
 
 const fmtOdds = (o) => o == null ? 'N/A' : (o > 0 ? `+${o}` : `${o}`);
 
-// ═══════════════════════════════════════════════════════════════
-// CHANNEL 1: #slip-feed — New picks with interactive buttons
-// ═══════════════════════════════════════════════════════════════
-async function postNewPick(client, bet, capperName, sourceUrl) {
-  const chId = process.env.SLIP_FEED_CHANNEL_ID;
-  if (!chId) return;
-  const ch = await client.channels.fetch(chId).catch(() => null);
-  if (!ch) return;
-
+// Build the #slip-feed embed + interactive component rows for a pick.
+// Shared by postNewPick (initial post) and the slip-feed edit handler, so an
+// in-place edit renders byte-for-byte the same message a fresh post would.
+// Returns { embeds, components } ready to pass straight to send()/update().
+function renderSlipFeedMessage(bet, capperName, sourceUrl) {
   // Fall back to bet.source_url if caller didn't pass sourceUrl explicitly
   const resolvedSourceUrl = sourceUrl || bet.source_url;
 
@@ -77,9 +73,23 @@ async function postNewPick(client, bet, capperName, sourceUrl) {
   }
   const mgmtRow = new ActionRowBuilder().addComponents(mgmtButtons);
 
+  return { embeds: [embed], components: [communityRow, mgmtRow] };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// CHANNEL 1: #slip-feed — New picks with interactive buttons
+// ═══════════════════════════════════════════════════════════════
+async function postNewPick(client, bet, capperName, sourceUrl) {
+  const chId = process.env.SLIP_FEED_CHANNEL_ID;
+  if (!chId) return;
+  const ch = await client.channels.fetch(chId).catch(() => null);
+  if (!ch) return;
+
+  const { embeds, components } = renderSlipFeedMessage(bet, capperName, sourceUrl);
+
   try {
     console.log(`[BetPost] Bet ${bet.id?.slice(0, 8)} → #slip-feed (${chId})`);
-    const sent = await ch.send({ embeds: [embed], components: [communityRow, mgmtRow] });
+    const sent = await ch.send({ embeds, components });
     db.prepare('UPDATE bets SET slipfeed_message_id = ? WHERE id = ?').run(sent.id, bet.id);
   } catch (e) {
     console.error('[SlipFeed] Post error:', e.message);
@@ -282,4 +292,4 @@ async function postBetGraded(client, bet, result, profitUnits, grade) { await po
 async function postGradeSummary() {}
 async function postDailyLeaderboard(client) { await updateScoreboard(client, { force: true }); }
 
-module.exports = { postNewPick, postGradedResult, updateScoreboard, postPickTracked, postBetGraded, postGradeSummary, postDailyLeaderboard };
+module.exports = { renderSlipFeedMessage, postNewPick, postGradedResult, updateScoreboard, postPickTracked, postBetGraded, postGradeSummary, postDailyLeaderboard };

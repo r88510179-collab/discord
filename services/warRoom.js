@@ -9,7 +9,7 @@ const {
   ModalBuilder, TextInputBuilder, TextInputStyle,
 } = require('discord.js');
 const { approveBet, rejectBet, updateBetFields, getBetLegs, getBetProps, getCapperStats, getBankroll, db, createBet, updateBankroll, upsertUserBet, getSentimentCounts, gradeBet: gradeBetRecord } = require('./database');
-const { postNewPick } = require('./dashboard');
+const { postNewPick, renderSlipFeedMessage, updateScoreboard } = require('./dashboard');
 const { shopLine, formatLineShop, extractTeamFromDescription } = require('./odds');
 const { calculateOptimalBet } = require('./bankroll');
 const { canFinalizeBet } = require('./grading');
@@ -226,13 +226,16 @@ async function sendStagingEmbed(client, bet, capperName, sourceUrl) {
  *
  * @param {import('discord.js').ButtonInteraction} interaction
  * @param {string} betId
+ * @param {string} [source='warroom'] — 'slipfeed' tags the modal customId
+ *   `war_sfedit:` so submit updates the public slip-feed embed in place;
+ *   anything else keeps the War Room staging flow (`war_modal:`).
  */
-async function openEditModal(interaction, betId) {
+async function openEditModal(interaction, betId, source = 'warroom') {
   // Fetch current bet data to pre-fill the modal
   const currentBet = db.prepare('SELECT * FROM bets WHERE id = ?').get(betId);
 
   const modal = new ModalBuilder()
-    .setCustomId(`war_modal:${betId}`)
+    .setCustomId(source === 'slipfeed' ? `war_sfedit:${betId}` : `war_modal:${betId}`)
     .setTitle('Edit Bet Details');
 
   const sportInput = new TextInputBuilder()
@@ -284,6 +287,63 @@ async function openEditModal(interaction, betId) {
   );
 
   await interaction.showModal(modal);
+}
+
+/**
+ * Apply an edit-modal submission to a bet: parse the modal fields, resolve the
+ * capper strictly (no auto-create, no rename), and update the editable fields.
+ * Shared by the War Room (war_modal:) and slip-feed (war_sfedit:) submit paths;
+ * the caller owns rendering the response so each surface updates its own message.
+ *
+ * @param {import('discord.js').ModalSubmitInteraction} interaction
+ * @param {string} betId
+ * @returns {Promise<{acknowledged: true} | {updated: true, bet: object} | {updated: false}>}
+ *   - { acknowledged: true } — an unknown-capper error reply was already sent
+ *   - { updated: true, bet } — bet is the refreshed row joined to capper_name
+ *   - { updated: false }     — nothing changed
+ */
+async function applyBetEdit(interaction, betId) {
+  const newCapper = interaction.fields.getTextInputValue('capper_name').trim();
+  const newSport = interaction.fields.getTextInputValue('sport').trim();
+  const newDesc = interaction.fields.getTextInputValue('description').trim();
+  const oddsStr = interaction.fields.getTextInputValue('odds').trim();
+  const unitsStr = interaction.fields.getTextInputValue('units').trim();
+  const newOdds = oddsStr ? parseInt(oddsStr, 10) : null;
+  const newUnits = unitsStr ? parseFloat(unitsStr) : null;
+
+  // Resolve capper attribution (strict — no auto-create, no rename).
+  // Run BEFORE field updates so a bad capper name rejects early.
+  let capperChanged = false;
+  if (newCapper) {
+    const existing = db.prepare('SELECT id, display_name FROM cappers WHERE LOWER(display_name) = LOWER(?) LIMIT 1').get(newCapper);
+    if (!existing) {
+      const allCappers = db.prepare('SELECT display_name FROM cappers ORDER BY display_name').all().map(c => c.display_name).join(', ');
+      await interaction.reply({
+        content: `❌ No capper named **"${newCapper}"** exists.\n\nValid cappers: ${allCappers}`,
+        ephemeral: true,
+      });
+      return { acknowledged: true };
+    }
+    db.prepare('UPDATE bets SET capper_id = ? WHERE id = ?').run(existing.id, betId);
+    console.log(`[applyBetEdit] reattributed bet ${betId.slice(0, 8)} to capper "${existing.display_name}" → ${existing.id.slice(0, 8)}`);
+    capperChanged = true;
+  }
+
+  // Update other editable fields and refresh the row if anything changed
+  if (newDesc || newOdds || capperChanged) {
+    if (newDesc || newOdds) {
+      db.prepare('UPDATE bets SET sport = ?, description = ?, odds = COALESCE(?, odds), units = COALESCE(?, units) WHERE id = ?')
+        .run(newSport || 'Unknown', newDesc, newOdds, newUnits, betId);
+    }
+
+    const current = db.prepare('SELECT b.*, c.display_name AS capper_name FROM bets b LEFT JOIN cappers c ON b.capper_id = c.id WHERE b.id = ?').get(betId);
+
+    if (current) {
+      return { updated: true, bet: current };
+    }
+  }
+
+  return { updated: false };
 }
 
 /**
@@ -614,76 +674,63 @@ async function handleWarRoomInteraction(interaction) {
     return true;
   }
 
-  // Handle edit modal submission
+  // Handle War Room edit modal submission — keeps the staging flow
   if (interaction.isModalSubmit() && interaction.customId.startsWith('war_modal:')) {
     const betId = interaction.customId.split(':')[1];
-    const newCapper = interaction.fields.getTextInputValue('capper_name').trim();
-    const newSport = interaction.fields.getTextInputValue('sport').trim();
-    const newDesc = interaction.fields.getTextInputValue('description').trim();
-    const oddsStr = interaction.fields.getTextInputValue('odds').trim();
-    const unitsStr = interaction.fields.getTextInputValue('units').trim();
-    const newOdds = oddsStr ? parseInt(oddsStr, 10) : null;
-    const newUnits = unitsStr ? parseFloat(unitsStr) : null;
+    const result = await applyBetEdit(interaction, betId);
+    if (result.acknowledged) return true;
 
-    // Resolve capper attribution (strict — no auto-create, no rename).
-    // Run BEFORE field updates so a bad capper name rejects early.
-    let capperChanged = false;
-    if (newCapper) {
-      const existing = db.prepare('SELECT id, display_name FROM cappers WHERE LOWER(display_name) = LOWER(?) LIMIT 1').get(newCapper);
-      if (!existing) {
-        const allCappers = db.prepare('SELECT display_name FROM cappers ORDER BY display_name').all().map(c => c.display_name).join(', ');
-        return interaction.reply({
-          content: `❌ No capper named **"${newCapper}"** exists.\n\nValid cappers: ${allCappers}`,
-          ephemeral: true,
-        });
-      }
-      db.prepare('UPDATE bets SET capper_id = ? WHERE id = ?').run(existing.id, betId);
-      console.log(`[war_modal] Edit: reattributed bet ${betId.slice(0, 8)} to capper "${existing.display_name}" → ${existing.id.slice(0, 8)}`);
-      capperChanged = true;
+    if (result.updated) {
+      const current = result.bet;
+      const refreshedEmbed = new EmbedBuilder()
+        .setTitle('Bet Pending Review (Edited)')
+        .setColor(COLORS.info)
+        .addFields(
+          { name: 'Capper', value: current.capper_name || 'Unknown', inline: true },
+          { name: 'Sport', value: current.sport || 'Unknown', inline: true },
+          { name: 'Type', value: (current.bet_type || 'straight').toUpperCase(), inline: true },
+          { name: 'Odds', value: String(current.odds ?? 'N/A'), inline: true },
+          { name: 'Description', value: current.description || 'N/A' },
+          { name: 'Units', value: String(current.units ?? 1), inline: true },
+          { name: 'Bet ID', value: `\`${current.id}\``, inline: false },
+        )
+        .setTimestamp();
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`war_approve:${betId}`)
+          .setLabel('Approve')
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId(`war_edit:${betId}`)
+          .setLabel('Edit')
+          .setStyle(ButtonStyle.Primary),
+        new ButtonBuilder()
+          .setCustomId(`war_reject:${betId}`)
+          .setLabel('Reject')
+          .setStyle(ButtonStyle.Danger),
+      );
+
+      await interaction.update({ embeds: [refreshedEmbed], components: [row] });
+      return true;
     }
 
-    // Update other editable fields and refresh the embed if anything changed
-    if (newDesc || newOdds || capperChanged) {
-      if (newDesc || newOdds) {
-        db.prepare('UPDATE bets SET sport = ?, description = ?, odds = COALESCE(?, odds), units = COALESCE(?, units) WHERE id = ?')
-          .run(newSport || 'Unknown', newDesc, newOdds, newUnits, betId);
-      }
+    await interaction.reply({ content: 'No changes made.', ephemeral: true });
+    return true;
+  }
 
-      const current = db.prepare('SELECT b.*, c.display_name AS capper_name FROM bets b LEFT JOIN cappers c ON b.capper_id = c.id WHERE b.id = ?').get(betId);
+  // Handle slip-feed edit modal submission — update the PUBLIC embed in place
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('war_sfedit:')) {
+    const betId = interaction.customId.split(':')[1];
+    const result = await applyBetEdit(interaction, betId);
+    if (result.acknowledged) return true;
 
-      if (current) {
-        const refreshedEmbed = new EmbedBuilder()
-          .setTitle('Bet Pending Review (Edited)')
-          .setColor(COLORS.info)
-          .addFields(
-            { name: 'Capper', value: current.capper_name || 'Unknown', inline: true },
-            { name: 'Sport', value: current.sport || 'Unknown', inline: true },
-            { name: 'Type', value: (current.bet_type || 'straight').toUpperCase(), inline: true },
-            { name: 'Odds', value: String(current.odds ?? 'N/A'), inline: true },
-            { name: 'Description', value: current.description || 'N/A' },
-            { name: 'Units', value: String(current.units ?? 1), inline: true },
-            { name: 'Bet ID', value: `\`${current.id}\``, inline: false },
-          )
-          .setTimestamp();
-
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId(`war_approve:${betId}`)
-            .setLabel('Approve')
-            .setStyle(ButtonStyle.Success),
-          new ButtonBuilder()
-            .setCustomId(`war_edit:${betId}`)
-            .setLabel('Edit')
-            .setStyle(ButtonStyle.Primary),
-          new ButtonBuilder()
-            .setCustomId(`war_reject:${betId}`)
-            .setLabel('Reject')
-            .setStyle(ButtonStyle.Danger),
-        );
-
-        await interaction.update({ embeds: [refreshedEmbed], components: [row] });
-        return true;
-      }
+    if (result.updated) {
+      const { bet } = result;
+      const { embeds, components } = renderSlipFeedMessage(bet, bet.capper_name, bet.source_url);
+      await interaction.update({ embeds, components });
+      updateScoreboard(interaction.client).catch(() => {});
+      return true;
     }
 
     await interaction.reply({ content: 'No changes made.', ephemeral: true });
