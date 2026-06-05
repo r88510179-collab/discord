@@ -71,6 +71,14 @@ See that repo's docs/CODEMAP.md for env vars, config.json shape, and gotchas.
 - pipeline_events instrumentation (migrations 018 + 021): verified healthy 2026-05-13 — 1102 rows/24h, GRADE_* drop reasons stamping, zero synthetic `bet_%` ingest_ids, zero orphan-class drops.
 
 
+### OCR-first SGP gate — would-hold measurement (PR 2a shadow) → drop→hold (PR 2b)
+
+**PR 2a — measurement only, shadow-path, NO behavior change.** SGP/SGPMAX slips bail to `FALLBACK_GEMINI` *before* Groq runs (`services/ocrFirst.js` "SGP gate — BEFORE Groq"), so the deterministic gate from #41 (`services/sgpGate.js evaluateSgpGate`) had never run on live traffic. In `OCR_FIRST_MODE=shadow`, `ocrFirstWiring.runSgpWouldHold` now re-uses the OCR text that bail already produced to run the skipped chain — Groq parse → `extractHeaderLegCount` (declared "N-Bet" count) → `evaluateSgpGate` — and emits one fire-and-forget `pipeline_events` event **`ocr_sgp_would_hold`** (stage `OCR_FIRST`, additive; NOT in `pipelineHealth.EXPECTED_STAGES`) with `{ pass, reason, declaredLegCount, parsedLegCount, scope, ocrMs }`. à la the Gate-3 B0 would-fire pattern (#37). The returned decision stays `FALLBACK_GEMINI` — nothing about what any slip does today changes; the extra Groq call is shadow-only and self-swallowing. Read the split after deploy:
+  `SELECT json_extract(payload,'$.pass') pass, count(*) c FROM pipeline_events WHERE event_type='ocr_sgp_would_hold' AND created_at > strftime('%s','now','-7 day') GROUP BY 1` (also `GROUP BY json_extract(payload,'$.reason')`, filtered to `scope='single'`).
+
+**PR 2b (next — the only behavior change), gated on the shadow split looking right** (PASS on rescuable SGP, FAIL on phantom/junk): flip drop→hold on a gate PASS (signed-off design D2) and extend the `MANUAL_REVIEW_HOLD` payload + modal to carry the OCR legs (#41 discovery finding #2).
+
+
 ### Retry storm: ai_pending_legs denial bypasses attempt cap
 
 **Symptom**: Parlay bets with pending legs hit `canFinalizeBet()` P0 gate, which calls `scheduleRecheckAfterDenial(ai_pending_legs_N, 30)`. That schedule flips `grading_state` back to `'ready'`, not `'backoff'`. Grader picks it up 30s later, same pending legs, same denial, same 30s requeue. Normal bets cap at ~20 attempts via state machine escalation to backoff, but this path bypasses that cap. Observed 162-163 `grading_attempts` on 2 NBA parlays over 6-7 days.
