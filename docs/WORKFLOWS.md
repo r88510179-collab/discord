@@ -26,3 +26,9 @@ merges/deploys manually). Code-tab prompt files live in
 ## zonetracker-dubclub  (DubClub email->Discord bridge — Surface Pro, PM2)   [VERIFY paths]
 - Mac clone: `~/Documents/zonetracker-dubclub`  (remote: r88510179-collab/zonetracker-dubclub)
 - Runtime: Surface Pro `~/zonetracker-dubclub`, PM2.
+- Edit: Code tab on Mac clone -> push -> Surface Pro `git pull` -> `pm2 restart`.
+
+## zonetracker-stats  (NBA stats DB — Surface Pro)   [TODO confirm]
+- Mac clone path: TBD
+- Runtime: Surface Pro; nightly cron refresh ~2 AM ET.
+- Edit/deploy: confirm and fill in.
