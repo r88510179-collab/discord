@@ -103,6 +103,8 @@ The output must show "main -> main" or similar success line. If it shows "403", 
 
 ### 5. Fly deploy ran and succeeded
 
+**Before deploying, confirm the merge is local:** `git checkout main && git pull` MUST show main advancing (e.g. `05400f3..db52a8c`). If it says **"Already up to date"** and you just merged a PR, the merge isn't on your local main — **stop and re-pull/merge**. `fly deploy` builds from local `main`, so deploying here ships the *prior* state. After deploy, verify the change is actually in the running image (`fly ssh console -C 'ls /app/<changed-file>'` or `grep -c <new-symbol> /app/<file>`) before trusting it.
+
 Deploys are **manual**. There is no GitHub Action or git-push hook on this repo. After committing and pushing, run:
 
 ```bash
@@ -262,3 +264,4 @@ This has been the silent killer twice (v281, v289) — code is in the repo, push
 - **Earlier yesterday's "migration 013 applied"** — Migration file existed but was never run, so columns did not exist. Step 3 (schema check) would have caught it.
 - **The day before's "Bug 3 deployed"** — Three message-handler gates needed to be updated; only one was. Step 2 (grep across all gate files) would have caught it.
 - **2026-05-18 Cat D dedup deploy (v454, a42ced7)** — Initial session memory wrongly assumed Fly auto-deploys on push to main. `.github/workflows/ci.yml` only runs `npm check` + tests; `fly.toml` has no `[deploy]` section. Pushing the commit alone would not have shipped the change. Step 5 (manual `flydeploy` + `fly releases` version check) caught this — landing v454 required running `flydeploy` explicitly after the push.
+- **2026-06-05 deploy-before-merge (twice, #40 and #44)** — `fly deploy` ran before the GitHub PR was merged. `git pull` showed "Already up to date" (main never advanced), so the build shipped the pre-PR code. Caught by checking `git log --oneline origin/main` (PR squash absent) and `fly ssh ... ls /app/<file>` (new file missing). Fix: merge on GitHub first, confirm `git pull` advances main, then deploy.
