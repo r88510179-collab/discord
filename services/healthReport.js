@@ -6,6 +6,8 @@
 
 const { EmbedBuilder } = require('discord.js');
 const { db } = require('./database');
+// THROWAWAY (remove with SGP PR 2b): SGP would-hold pulse section. See services/sgpWouldHoldPulse.js.
+const { buildSgpWouldHoldSection } = require('./sgpWouldHoldPulse');
 const path = require('path');
 const fs = require('fs');
 const v8 = require('v8');
@@ -289,7 +291,8 @@ function sectionAlerts() {
 // ── Build full report as embeds ─────────────────────────────
 function buildReport(type = 'full', hours = 24) {
   const sections = type === 'pulse'
-    ? [sectionTwitter(1), sectionBetPipeline(1), sectionGrader(1), sectionSystem(), sectionAlerts()]
+    // buildSgpWouldHoldSection returns null on any error (fail-soft) — filter it out so the pulse never breaks. THROWAWAY: drop with SGP PR 2b.
+    ? [sectionTwitter(1), sectionBetPipeline(1), sectionGrader(1), buildSgpWouldHoldSection(db), sectionSystem(), sectionAlerts()].filter(Boolean)
     : [sectionTwitter(hours), sectionBetPipeline(hours), sectionAI(), sectionGrader(hours), sectionDatabase(), sectionCrons(), sectionCappers(), sectionEngagement(hours), sectionSystem(), sectionAlerts()];
 
   const embeds = sections.map(s => {
