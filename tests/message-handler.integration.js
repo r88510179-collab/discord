@@ -364,7 +364,43 @@ async function testEmptyPureSlipUnchanged() {
   assert.strictEqual(countStage(events, 'MANUAL_REVIEW_HOLD'), 1, 'empty PURE_SLIP_CHANNEL_IDS must leave MANUAL_REVIEW_HOLD staging unchanged');
 }
 
+// getImageAttachments tags origin so OCR-first multi-image eligibility counts
+// REAL slip attachments and ignores share-embed thumbnails. This guards the
+// contract end-to-end: the HRB shape (1 slip attachment + 1 share-embed
+// thumbnail) must tag origins correctly so eligibleImageCount collapses it to 1.
+async function testGetImageAttachmentsTagsOrigin() {
+  const { getImageAttachments } = loadHandlerWithMocks({
+    parseBetText: async () => ({ is_bet: false }),
+    parseBetSlipImage: async () => ({ bets: [] }),
+    createBetWithLegs: dedupeWriter(),
+    sendStagingEmbed: async () => {},
+  });
+  const { eligibleImageCount } = require('../services/ocrFirstWiring');
+
+  // HRB shape: one real slip attachment + one Discord share-embed thumbnail.
+  const atts = new Map();
+  atts.set('a1', { contentType: 'image/webp', url: 'https://cdn.discordapp.com/attachments/1/2/slip.webp' });
+  const hrb = {
+    attachments: atts,
+    embeds: [{ image: { url: 'https://media.discordapp.net/external/abc/share-card.png' } }],
+  };
+  const imgs = getImageAttachments(hrb);
+  assert.strictEqual(imgs.length, 2, 'getImageAttachments still surfaces both images');
+  assert.strictEqual(imgs[0].origin, 'attachment', 'direct upload tagged origin=attachment');
+  assert.strictEqual(imgs[1].origin, 'embed', 'share-embed thumbnail tagged origin=embed');
+  assert.strictEqual(eligibleImageCount(imgs), 1, 'HRB slip+embed collapses to 1 (scope=single)');
+
+  // A genuine 2-attachment post must stay multi.
+  const twoAtts = new Map();
+  twoAtts.set('a1', { contentType: 'image/png', url: 'https://cdn.discordapp.com/attachments/1/2/slipA.png' });
+  twoAtts.set('a2', { contentType: 'image/png', url: 'https://cdn.discordapp.com/attachments/1/3/slipB.png' });
+  const multi = getImageAttachments({ attachments: twoAtts, embeds: [] });
+  assert.strictEqual(multi.every((i) => i.origin === 'attachment'), true, 'both real uploads tagged attachment');
+  assert.strictEqual(eligibleImageCount(multi), 2, 'two real attachments stay multi');
+}
+
 (async () => {
+  await testGetImageAttachmentsTagsOrigin();
   await testReplayNoDuplicateSideEffects();
   await testTextAndImageSinglePersistedSet();
   await testNearSimultaneousReplaySingleSideEffects();

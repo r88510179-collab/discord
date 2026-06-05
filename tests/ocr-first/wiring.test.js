@@ -27,7 +27,7 @@ const path = require('path');
 const wiring = require('../../services/ocrFirstWiring');
 const {
   applyOcrFirst, resolveMode, ocrBetToInternalBets, compareToLive, fetchImageBytes,
-  isNonNewBet, isSupportedSport, parseAmericanOdds, parseMoney, WiringReason,
+  isNonNewBet, isSupportedSport, eligibleImageCount, parseAmericanOdds, parseMoney, WiringReason,
 } = wiring;
 
 const FX = path.join(__dirname, 'fixtures');
@@ -466,6 +466,24 @@ async function main() {
     assert.strictEqual(isSupportedSport('Unknown'), false);
     assert.strictEqual(isSupportedSport(''), false);
     assert.strictEqual(isSupportedSport(null), false);
+  });
+
+  await run('eligibleImageCount: slip+embed → 1 (single); true 2-attachment → 2 (multi)', async () => {
+    const ATT = { url: 'a', type: 'image/webp', origin: 'attachment' };
+    const EMBED = { url: 'e', type: 'image/png', origin: 'embed' };
+    // The HRB artifact: 1 real slip attachment + 1 share-embed thumbnail → single.
+    assert.strictEqual(eligibleImageCount([ATT, EMBED]), 1, 'slip+embed must collapse to 1');
+    assert.strictEqual(eligibleImageCount([EMBED, ATT]), 1, 'order-independent — still 1 real attachment');
+    // A genuine multi-image slip (2 real attachments) must stay multi.
+    assert.strictEqual(eligibleImageCount([ATT, ATT]), 2, 'two real attachments → 2 (multi)');
+    assert.strictEqual(eligibleImageCount([ATT]), 1, 'one attachment → 1');
+    // Fail-safe: no real attachment tagged → fall back to total length (never
+    // wrongly collapse). Untagged/legacy lists behave exactly as before.
+    assert.strictEqual(eligibleImageCount([EMBED, EMBED]), 2, 'pure-embed slip → total (multi), not collapsed');
+    assert.strictEqual(eligibleImageCount([{ url: 'x' }, { url: 'y' }]), 2, 'untagged/legacy → total length');
+    assert.strictEqual(eligibleImageCount([]), 0);
+    assert.strictEqual(eligibleImageCount(null), 0, 'non-array → 0');
+    assert.strictEqual(eligibleImageCount(undefined), 0);
   });
 
   await run('mapBetType: single→straight, single(multi-leg)→parlay, sgp→parlay', async () => {

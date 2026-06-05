@@ -402,20 +402,29 @@ function resolveCapper(message) {
   };
 }
 
+// `origin` tags where each image came from so OCR-first multi-image eligibility
+// can count REAL slip attachments and ignore share-embed thumbnails:
+//   'attachment' — a real slip image (direct message.attachments[] upload OR a
+//                  forwarded snapshot attachment).
+//   'embed'      — a share-card / link-preview thumbnail (message.embeds[].image
+//                  or .thumbnail, incl. snapshot embeds) — NOT a real slip.
+// See services/ocrFirstWiring.js eligibleImageCount. Existing callers read only
+// .url/.type, so the added field is inert for them.
 function getImageAttachments(message) {
   const images = [];
 
-  // 1. Direct uploads — standard message.attachments
+  // 1. Direct uploads — standard message.attachments (REAL slip attachments)
   for (const att of message.attachments.values()) {
     if (att.contentType?.startsWith('image/')) {
-      images.push({ url: att.url, type: att.contentType });
+      images.push({ url: att.url, type: att.contentType, origin: 'attachment' });
     }
   }
 
-  // 2. Embed images (FixTwitter, TweetShift, link previews)
+  // 2. Embed images (FixTwitter, TweetShift, link previews, HRB share-card
+  //    thumbnails) — previews, NOT real slip attachments.
   for (const embed of message.embeds) {
-    if (embed.image?.url) images.push({ url: embed.image.url, type: 'image/png' });
-    if (embed.thumbnail?.url && !embed.image) images.push({ url: embed.thumbnail.url, type: 'image/png' });
+    if (embed.image?.url) images.push({ url: embed.image.url, type: 'image/png', origin: 'embed' });
+    if (embed.thumbnail?.url && !embed.image) images.push({ url: embed.thumbnail.url, type: 'image/png', origin: 'embed' });
   }
 
   // 3. Discord Native Forwards — images live inside messageSnapshots, not attachments
@@ -427,15 +436,15 @@ function getImageAttachments(message) {
       if (snapAtts?.size > 0) {
         for (const att of snapAtts.values()) {
           if (att.contentType?.startsWith('image/')) {
-            images.push({ url: att.url, type: att.contentType });
+            images.push({ url: att.url, type: att.contentType, origin: 'attachment' });
             console.log(`[Forward] Found image in snapshot: ${att.url.slice(0, 60)}...`);
           }
         }
       }
-      // Also check snapshot embeds
+      // Also check snapshot embeds (preview thumbnails, not real slips)
       const snapEmbeds = snapshot?.message?.embeds || snapshot?.embeds || [];
       for (const embed of snapEmbeds) {
-        if (embed.image?.url) images.push({ url: embed.image.url, type: 'image/png' });
+        if (embed.image?.url) images.push({ url: embed.image.url, type: 'image/png', origin: 'embed' });
       }
     });
   }
@@ -1069,7 +1078,10 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
           parsed,
           imageUrl: imageUrls[0],
           mediaType: combinedImages[0]?.type,
-          imageCount: imageUrls.length,
+          // Count REAL slip attachments, not share-embed thumbnails: an HRB
+          // slip+embed collapses to 1 (scope=single) while a true 2-attachment
+          // post stays multi. eligibleImageCount fails safe to imageUrls.length.
+          imageCount: ocrFirstWiring.eligibleImageCount(combinedImages),
           requestId: ingestId,
           sourceRef,
         });
@@ -1410,4 +1422,4 @@ async function reportErrorToAdmin(error, context, client) {
   }
 }
 
-module.exports = { handleMessage, processSlipImage, buildParsedPayload, sendHoldReviewEmbed };
+module.exports = { handleMessage, processSlipImage, buildParsedPayload, sendHoldReviewEmbed, getImageAttachments };

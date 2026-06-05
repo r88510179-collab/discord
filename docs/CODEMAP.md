@@ -163,6 +163,8 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 | MANUAL_REVIEW_HOLD stageAll (ai_indeterminate) | 1177 |
 | sendHoldReviewEmbed call (ai_indeterminate) | 1188 |
 | Multi-image merge | 960 (loop), 995–1020 (merge) |
+| `getImageAttachments` — collects slip images; tags `origin` (`'attachment'` = real `message.attachments[]`/forwarded snapshot upload; `'embed'` = share-card/link-preview thumbnail incl. `message.embeds[].image`/`.thumbnail`). Exported. | 413 |
+| OCR-first slip seam (`processAggregatedMessage`): `imageCount = ocrFirstWiring.eligibleImageCount(combinedImages)` — counts REAL attachments only so an HRB slip+embed = 1 (scope=single), a true 2-attachment post = 2. Fails safe to total. | 1076 (guard), 1077 (call), 1084 (count); helper `services/ocrFirstWiring.js:176` |
 | ADMIN_LOG send (path B) | 1313 (guard L1311) |
 
 **`raw_text` semantics — two ingest paths, inconsistent by history (NOT a bug):**

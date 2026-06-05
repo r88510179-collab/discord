@@ -295,6 +295,17 @@ fall back. (All dormant — `OCR_FIRST_MODE=off` — but enforced + tested.)
 |-------|-------------|-----------|
 | live parse is `result` / `untracked_win` / `ticket_status` winner\|loser | `OCR_CUTOVER_SKIP_NONBET` | never restage a settled recap as a new bet (Fix 2) |
 | `imageCount > 1` | `OCR_CUTOVER_SKIP_MULTI_IMAGE` | OCR sees only `image[0]`; don't clobber the merged multi-image parse (Fix 3) |
+
+> **`imageCount` counts REAL slip attachments, not share-embed thumbnails.** HRB
+> shares post as 1 attachment + 1 Discord share-embed thumbnail; counting the
+> embed inflated `imageCount` to 2, so cutover skipped the slip and shadow forced
+> `scope=image[0]_of_multi` + `agreement=false` (signal unreadable). The seam now
+> derives `imageCount` from `ocrFirstWiring.eligibleImageCount(combinedImages)`,
+> which counts only images tagged `origin:'attachment'` by `getImageAttachments`
+> (direct uploads + forwarded snapshot attachments) and excludes embed thumbnails
+> (`origin:'embed'`). A genuine 2-attachment post still counts as 2; the slip+embed
+> artifact collapses to 1. Fail-safe: with no real attachment tagged it falls back
+> to the total image count, so a real multi-image slip is never wrongly collapsed.
 | OCR-derived sport ∉ {MLB,NBA,NFL,NHL,SOCCER,TENNIS,GOLF,MMA} | `OCR_CUTOVER_SKIP_SPORT` | no Unknown-sport replacements (Fix 4) |
 
 **Image-fetch hardening (Fix 1, holds in shadow AND cutover).** `fetchImageBytes` never
