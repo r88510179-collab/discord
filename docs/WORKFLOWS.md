@@ -32,3 +32,14 @@ merges/deploys manually). Code-tab prompt files live in
 - Mac clone path: TBD
 - Runtime: Surface Pro; nightly cron refresh ~2 AM ET.
 - Edit/deploy: confirm and fill in.
+
+## zonetracker-dashboard
+- Repo: github.com/r88510179-collab/zonetracker-dashboard
+- Mac clone (edits): ~/Documents/zonetracker-dashboard
+- Surface Pro (runtime): ~/zonetracker-dashboard — PM2 `zonetracker-dashboard` (id 4, fork)
+- Surface Pro access: deploy key ~/.ssh/github_dashboard, SSH alias github.com-dashboard
+- Deploy: [MAC] Code-tab edit -> PR -> merge. [SURFACE PRO] git pull && pm2 restart zonetracker-dashboard
+- Secret: ADMIN_API_SECRET in ~/zonetracker-dashboard/.env (gitignored); same value as Fly secret ADMIN_API_SECRET
+- Expose: tailscale serve --bg --https=8444 127.0.0.1:8787 (tailnet-only)
+- URL: https://tracker-surface-pro.tail65f8f0.ts.net:8444
+- Tailscale port map (this host): :443 funnel->11435 ollama-proxy | :8443 funnel->11436 OCR | :8444 serve->8787 dashboard
