@@ -55,16 +55,101 @@ function strippedComponentsKeepLinks(message) {
   return [{ type: 1, components: keptButtons.map(b => b.toJSON ? b.toJSON() : b) }];
 }
 
-async function handleDismiss(interaction, ingestId) {
-  try {
+// ─────────────────────────────────────────────────────────────
+// Transport-agnostic Dismiss core (Phase 2b-1)
+//
+// dismissHold(ingestId, actor) is interaction-free — no Discord objects, no
+// res / editReply / fields. Both the Discord button wrapper (handleDismiss)
+// and the admin API route (routes/adminCommands.js) call it.
+//
+// Mutations (the live Discord dismiss advanced the stage; the CLI path
+// scripts/review-holds.js also writes the durable decision row — this core
+// does BOTH, inside ONE better-sqlite3 transaction, mirroring review-holds.js
+// commitDecision where recordStage runs inside the txn):
+//   1. pipeline_events stage advance → MANUAL_REVIEW_DISMISSED
+//   2. hold_review_decisions row, human_decision='dismissed'
+//
+// Idempotency is enforced HERE, never in the UI. Current state = the most
+// recent of the three terminal stages for this ingest_id:
+//   already dismissed → safe no-op  { ok:true,  status:'already_dismissed' }
+//   already released  → refuse      { ok:false, status:'already_released' }
+//   no hold           → not found   { ok:false, status:'not_found' }
+//   active hold       → dismiss once { ok:true, status:'dismissed' }
+// Never creates or modifies a bet.
+//
+// actor is recorded in hold_review_decisions.reviewed_by (the existing
+// "who decided" column — review-holds.js writes 'review-holds-script:<user>'
+// there) and in the pipeline payload's dismissed_by (matching the live
+// Discord mutation). No schema change was needed.
+function dismissHold(ingestId, actor) {
+  const id = String(ingestId == null ? '' : ingestId).trim();
+  if (!id) return { ok: false, status: 'not_found', ingestId: id };
+
+  const actorStr = (actor == null || String(actor).trim() === '') ? 'unknown' : String(actor);
+
+  return db.transaction(() => {
+    // Current state = the most recent of the three terminal stages. created_at
+    // is epoch seconds and can tie, so the autoincrement id breaks ties.
+    const latest = db.prepare(`
+      SELECT stage FROM pipeline_events
+      WHERE ingest_id = ?
+        AND stage IN ('MANUAL_REVIEW_HOLD', 'MANUAL_REVIEW_RELEASED', 'MANUAL_REVIEW_DISMISSED')
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1
+    `).get(id);
+
+    if (!latest) return { ok: false, status: 'not_found', ingestId: id };
+    if (latest.stage === 'MANUAL_REVIEW_RELEASED') return { ok: false, status: 'already_released', ingestId: id };
+    if (latest.stage === 'MANUAL_REVIEW_DISMISSED') return { ok: true, status: 'already_dismissed', ingestId: id };
+
+    // active hold → dismiss once. hold_payload is an audit-redundant copy of
+    // the hold's payload at hold time (pipeline_events purge on 90d; mig 025).
+    const holdRow = db.prepare(`
+      SELECT payload FROM pipeline_events
+      WHERE ingest_id = ? AND stage = 'MANUAL_REVIEW_HOLD'
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1
+    `).get(id);
+
+    // (1) stage advance — identical row shape to the live handleDismiss mutation.
     recordStage({
-      ingestId,
+      ingestId: id,
       sourceType: 'discord',
-      sourceRef: ingestId.replace(/^disc_/, ''),
+      sourceRef: id.replace(/^disc_/, ''),
       stage: 'MANUAL_REVIEW_DISMISSED',
       eventType: 'STAGE_ENTER',
-      payload: { dismissed_by: interaction.user.tag },
+      payload: { dismissed_by: actorStr },
     });
+
+    // (2) durable decision row — human_decision='dismissed' matches the only
+    // live writer (scripts/review-holds.js); actor → reviewed_by.
+    db.prepare(`
+      INSERT INTO hold_review_decisions
+        (ingest_id, hold_payload, reparse_attempted, reparse_input_source, reparse_input_text,
+         reparse_output, reparse_confidence, human_decision, human_edits, source_label,
+         bet_id, reviewed_by, created_at)
+      VALUES
+        (@ingest_id, @hold_payload, 0, NULL, NULL,
+         NULL, NULL, 'dismissed', NULL, NULL,
+         NULL, @reviewed_by, @created_at)
+    `).run({
+      ingest_id: id,
+      hold_payload: holdRow ? holdRow.payload : null,
+      reviewed_by: actorStr,
+      created_at: Math.floor(Date.now() / 1000),
+    });
+
+    return { ok: true, status: 'dismissed', ingestId: id };
+  })();
+}
+
+// Thin Discord wrapper — derives ingestId exactly as before (from the
+// customId, upstream in handleHoldInteraction), delegates the mutation +
+// idempotency to dismissHold, and preserves the existing reply/edit +
+// button-stripping cleanup. Discord UX is unchanged.
+async function handleDismiss(interaction, ingestId) {
+  try {
+    const result = dismissHold(ingestId, interaction.user.tag);
 
     const updatedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
       .setColor(0x6c757d)
@@ -75,7 +160,7 @@ async function handleDismiss(interaction, ingestId) {
       embeds: [updatedEmbed],
       components: strippedComponentsKeepLinks(interaction.message),
     });
-    console.log(`[HoldReview] Dismissed ${ingestId.slice(0, 16)} by ${interaction.user.tag}`);
+    console.log(`[HoldReview] Dismissed ${ingestId.slice(0, 16)} by ${interaction.user.tag} (status=${result.status})`);
   } catch (err) {
     console.error('[HoldReview] Dismiss error:', err.message);
     try { await interaction.reply({ content: `Dismiss failed: ${err.message}`, ephemeral: true }); } catch (_) {}
@@ -261,4 +346,4 @@ async function handleReleaseModal(interaction, ingestId) {
   }
 }
 
-module.exports = { handleHoldInteraction };
+module.exports = { handleHoldInteraction, dismissHold };
