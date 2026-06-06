@@ -19,6 +19,7 @@ const STAGES = [
   'RECEIVED', 'AUTHORIZED', 'BUFFERED', 'EXTRACTED', 'PARSED', 'VALIDATED', 'STAGED', 'DROPPED',
   'MANUAL_REVIEW_HOLD',  // human-channel slip held for admin review instead of silent drop
   'MANUAL_REVIEW_DISMISSED', // human reviewer dismissed a held slip (services/holdReview.js:64)
+  'MANUAL_REVIEW_RELEASED',  // human reviewer released a held slip back into the pipeline (services/holdReview.js:221) — F-04/F-05 enum-drift registration
   'PURE_SLIP_SKIP_HOLD', // PR #2: pure-slip channel skipped MANUAL_REVIEW_HOLD staging (trace-only marker, NOT a drop; like MANUAL_REVIEW_HOLD it is intentionally absent from pipelineHealth.EXPECTED_STAGES)
   'OCR_FIRST',           // OCR-first wiring observability marker (services/ocrFirstWiring.js): shadow compare + cutover route. Trace-only, NOT a drop; intentionally absent from pipelineHealth.EXPECTED_STAGES.
   // Grading-side stages (added alongside BetService skeleton — migration 020)
@@ -43,11 +44,14 @@ const DROP_REASONS = [
   'AGE_GATE',
   'PRE_FILTER_NO_BET_CONTENT',
   'PRE_FILTER_PROMO',
+  'PRE_FILTER_AI_EMPTY_RESULT', // post-Vision indeterminate branch (handlers/messageHandler.js:1302) — F-04 enum-drift registration
   'BOUNCER_REJECTED',
   'VISION_EXTRACTION_FAILED',
+  'TEXT_EXTRACTION_FAILED',     // parseBetText AI/parse failure (services/ai.js:1154,1173) — F-05 enum-drift registration
   'PARSER_NO_LEGS',
   'VALIDATOR_SPORT_MISMATCH',
   'VALIDATOR_ENTITY_MISMATCH',
+  'VALIDATOR_LEG_SHAPE_INVALID', // leg-shape validator rejection (services/ai.js:1746,1755) — F-05 enum-drift registration
   'CAPPER_UNRESOLVED',
   'CHANNEL_UNAUTHORIZED',
   'EXCEPTION_THROWN',
@@ -102,12 +106,52 @@ function safeJson(payload) {
   }
 }
 
+// ── SOFT enum validation (F-05) ─────────────────────────────
+// A warn-only tripwire at the single write boundary. If a caller
+// emits a stage / event / drop / source value that isn't a
+// registered enum member, log exactly one line per offending field
+// and then write the row ANYWAY. This NEVER throws, NEVER skips the
+// insert, and NEVER changes a caller's return value or the
+// pipeline's control flow — registration (the lists above) is the
+// real fix; this just surfaces the NEXT drift instead of letting it
+// vanish into an unqueryable value. Mirrors the grading-side warn in
+// services/bets.js transitionTo().
+const ENUM_FIELDS = [
+  ['sourceType', SOURCE_TYPES],
+  ['stage', STAGES],
+  ['eventType', EVENT_TYPES],
+  ['dropReason', DROP_REASONS],
+];
+
+function warnUnknownEnums({ sourceType, stage, eventType, dropReason }, payload) {
+  // Caller marker: most call sites tag payload.where (e.g. 'parseBetText',
+  // 'flushBuffer') — surface it so a drift warn is attributable.
+  const marker = payload && typeof payload === 'object' && typeof payload.where === 'string'
+    ? payload.where
+    : null;
+  const values = { sourceType, stage, eventType, dropReason };
+  for (const [field, list] of ENUM_FIELDS) {
+    const value = values[field];
+    if (value == null) continue;          // null/undefined is allowed (e.g. dropReason on a non-drop)
+    if (list.includes(value)) continue;   // registered — stay quiet
+    console.warn(
+      `[PipelineEvents] enum drift: ${field}="${value}" not registered${marker ? ` (caller: ${marker})` : ''} — row written anyway; add it to services/pipeline-events.js`,
+    );
+  }
+}
+
 function writeRow({ ingestId, betId, sourceType, sourceRef, stage, eventType, dropReason, payload }) {
   try {
     // Grading-side writes don't have an ingest_id (bets enter grading
     // long after the original ingest flow completed). Ingest-side
     // callers still MUST supply ingestId — enforced by category check.
     if (!ingestId && sourceType !== 'grading') return;
+    // SOFT validation (F-05): warn on enum drift, then fall through to
+    // the insert. Isolated in its own try so a validation error can
+    // never skip the write below.
+    try {
+      warnUnknownEnums({ sourceType, stage, eventType, dropReason }, payload);
+    } catch (_) { /* validation must never affect the write */ }
     const stmt = getInsertStmt();
     stmt.run(
       ingestId != null ? String(ingestId) : null,
