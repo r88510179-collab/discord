@@ -42,6 +42,53 @@ function extractImageUrls(tweet) {
   return urls;
 }
 
+// ── F-12: content-window repost dedup ───────────────────────
+// One source account (bobby__tracker) re-posts the SAME pick across
+// multiple separate tweets the same day — each a DISTINCT real tweet id,
+// gaps observed 6s–3.25h. The fingerprint dedup in createBetWithLegs hashes
+// the per-message id into the key, so same-content/different-tweet reposts
+// hash differently and BOTH get saved. This gate ignores the tweet id and
+// collapses reposts inside a 12h window.
+//
+// GUARDRAIL: the same pick TEXT legitimately recurs across DIFFERENT days
+// for different matches (e.g. "cerundolo s1 ml" 23 days apart). Observed dup
+// gaps are all <= 3.25h; legit repeats are >= 2 days — so a 12h window keeps
+// the legit repeats while collapsing the reposts.
+//
+// Normalize for comparison: lowercase, collapse every run of non-alphanumeric
+// chars to a single space, trim. This matches the forensic grouping that
+// identified the dups — NOT a whitespace-only collapse.
+function normalizeForDedup(description) {
+  return String(description || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+// Returns a prior bet row { id, description, odds } if an equivalent twitter
+// bet from the same capper exists inside the 12h window, else null. Odds match
+// is null-aware (null matches null; `|| null` mirrors createBet's storage, so
+// 0/NaN collapse to null exactly as stored). bets.created_at is the schema
+// default datetime('now') string (YYYY-MM-DD HH:MM:SS), so the window filter
+// is the comparable datetime('now','-12 hours') — verified against migrations/
+// 001_initial_schema.sql (createBet never sets created_at explicitly).
+function findRecentRepost({ capperId, description, odds, betType }) {
+  const norm = normalizeForDedup(description);
+  if (!capperId || !norm) return null;
+  const wantOdds = odds || null;
+  const candidates = db.prepare(`
+    SELECT id, description, odds
+    FROM bets
+    WHERE capper_id = ?
+      AND bet_type = ?
+      AND source IN ('twitter_text', 'twitter_vision')
+      AND created_at >= datetime('now', '-12 hours')
+  `).all(capperId, betType || 'straight');
+  for (const row of candidates) {
+    if (normalizeForDedup(row.description) !== norm) continue;
+    if ((row.odds || null) !== wantOdds) continue;
+    return row;
+  }
+  return null;
+}
+
 async function handleTwitterWebhookPayload(payload, client) {
   const { handle, tweets } = payload;
   if (!handle || !Array.isArray(tweets) || tweets.length === 0) {
@@ -229,7 +276,15 @@ async function handleTwitterWebhookPayload(payload, client) {
       if (pick.is_ladder && Array.isArray(pick.ladder_steps) && pick.ladder_steps.length > 1) {
         const ladderBets = [];
         for (const step of pick.ladder_steps) {
-          const saved = createBetWithLegs({ capper_id: capper.id, sport: pick.sport || 'Unknown', bet_type: 'straight', description: step.description, odds: step.odds ? parseInt(step.odds, 10) : null, units: step.units || 1, source: betSource, source_url: sourceUrl, source_tweet_id: tweetId, source_tweet_handle: cleanHandle, raw_text: text.slice(0, 500), review_status: 'needs_review', is_ladder: 1, ladder_step: step.ladder_step || 0 }, []);
+          // F-12: per-step content-window dedup (ladder steps save as straights)
+          const stepOdds = step.odds ? parseInt(step.odds, 10) : null;
+          const priorStep = findRecentRepost({ capperId: capper.id, description: step.description, odds: stepOdds, betType: 'straight' });
+          if (priorStep) {
+            logTweetAudit({ ...auditBase, stage: 'deduped', reason: `Repost (12h) — ladder step matches bet ${priorStep.id}` });
+            recordDrop({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'DROPPED', dropReason: 'DUPLICATE_REPOST', payload: { window: '12h', handle: cleanHandle, prior_bet_id: priorStep.id, ladder_step: step.ladder_step || 0 } });
+            continue;
+          }
+          const saved = createBetWithLegs({ capper_id: capper.id, sport: pick.sport || 'Unknown', bet_type: 'straight', description: step.description, odds: stepOdds, units: step.units || 1, source: betSource, source_url: sourceUrl, source_tweet_id: tweetId, source_tweet_handle: cleanHandle, raw_text: text.slice(0, 500), review_status: 'needs_review', is_ladder: 1, ladder_step: step.ladder_step || 0 }, []);
           if (saved && !saved._deduped) ladderBets.push(saved);
         }
         if (ladderBets.length > 0 && client) {
@@ -247,8 +302,20 @@ async function handleTwitterWebhookPayload(payload, client) {
         continue;
       }
 
+      // F-12: content-window repost dedup (ignores tweet id) — drop a same-capper
+      // same-content/same-odds repost inside 12h; legit >= 2-day repeats fall
+      // outside the window and still save. Mirrors the per-step ladder gate above.
+      const normalOdds = pick.odds ? parseInt(pick.odds, 10) : null;
+      const priorRepost = findRecentRepost({ capperId: capper.id, description: pick.description, odds: normalOdds, betType: pick.type || 'straight' });
+      if (priorRepost) {
+        logTweetAudit({ ...auditBase, stage: 'deduped', reason: `Repost (12h) — matches bet ${priorRepost.id}` });
+        recordDrop({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'DROPPED', dropReason: 'DUPLICATE_REPOST', payload: { window: '12h', handle: cleanHandle, prior_bet_id: priorRepost.id } });
+        updateLastTweetId(cleanHandle, tweetId);
+        continue;
+      }
+
       // Normal bet
-      const saved = createBetWithLegs({ capper_id: capper.id, sport: pick.sport || 'Unknown', bet_type: pick.type || 'straight', description: pick.description, odds: pick.odds ? parseInt(pick.odds, 10) : null, units: pick.units || 1, source: betSource, source_url: sourceUrl, source_tweet_id: tweetId, source_tweet_handle: cleanHandle, raw_text: text.slice(0, 500), review_status: 'needs_review', is_ladder: pick.is_ladder || false, ladder_step: pick.ladder_step || 0 }, legs);
+      const saved = createBetWithLegs({ capper_id: capper.id, sport: pick.sport || 'Unknown', bet_type: pick.type || 'straight', description: pick.description, odds: normalOdds, units: pick.units || 1, source: betSource, source_url: sourceUrl, source_tweet_id: tweetId, source_tweet_handle: cleanHandle, raw_text: text.slice(0, 500), review_status: 'needs_review', is_ladder: pick.is_ladder || false, ladder_step: pick.ladder_step || 0 }, legs);
 
       if (saved && !saved._deduped) {
         if (client) {
@@ -273,4 +340,4 @@ async function handleTwitterWebhookPayload(payload, client) {
   return { staged, skipped, aiCalls };
 }
 
-module.exports = { handleTwitterWebhookPayload };
+module.exports = { handleTwitterWebhookPayload, normalizeForDedup, findRecentRepost };
