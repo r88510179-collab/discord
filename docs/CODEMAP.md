@@ -237,14 +237,31 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 | nba.js | ESPN NBA public API adapter (`site.api.espn.com`) — unofficial, no auth |
 
 ### services/holdReview.js
+> Line numbers refreshed 2026-06-06 (Phase 2b-1 Dismiss): the transport-agnostic
+> `dismissHold` core (~66 lines) was inserted before `handleDismiss`, shifting
+> everything below it down by ~+92.
+
 | What | Line(s) |
 | --- | --- |
 | `handleHoldInteraction` (button handler) | 21 |
-| Release modal | 95 (`ModalBuilder`, customId `hold:releasemodal:`); `handleReleaseModal` L138 |
-| Dismiss flow | 58 (`handleDismiss`); routed L34 |
-| SELECT WHERE stage='MANUAL_REVIEW_HOLD' query | 44–45 (reads `pipeline_events.payload`) |
-| `createBetWithLegs(source='manual_hold_release')` call | 185 (source field L194) |
-| `postNewPick` call | 213 (import L13) |
+| **`dismissHold(ingestId, actor)`** — exported transport-agnostic Dismiss core (Phase 2b-1). Interaction-free. One `db.transaction`: (1) `recordStage(MANUAL_REVIEW_DISMISSED, {dismissed_by:actor})` + (2) `hold_review_decisions` row `human_decision='dismissed'`, actor→`reviewed_by`. Idempotent via latest-of-3-stages: `not_found`/`already_released`(refuse)/`already_dismissed`(no-op)/`dismissed`. Never touches a bet. Export L349. | 84 |
+| Dismiss flow | 150 (`handleDismiss` — now a thin wrapper calling `dismissHold(ingestId, interaction.user.tag)`); routed L34 |
+| Release modal | 180 (`ModalBuilder`, customId `hold:releasemodal:`); `handleReleaseModal` L223 |
+| SELECT WHERE stage='MANUAL_REVIEW_HOLD' query (`loadHoldEvent`) | 42–47 (reads `pipeline_events.payload`) |
+| `createBetWithLegs(source='manual_hold_release')` call | 270 (source field L279) |
+| `postNewPick` call | 298 (import L13) |
+
+> **Dismiss `human_decision` value:** the live writer is `'dismissed'` (past tense),
+> set by `scripts/review-holds.js:596` and now `holdReview.dismissHold` — NOT
+> `'dismiss'` as the Enums section below states. The column has no CHECK; the only
+> producers agree on `'dismissed'`/`'released'`/`'released_with_edits'`/`'skipped'`.
+
+### routes/ — Admin HTTP API
+| What | Line(s) |
+| --- | --- |
+| `routes/adminAuth.js` | `adminAuth` fail-closed Bearer middleware + `safeEqual` (extracted from admin.js so the Phase 2b write router reuses the identical check). 503 if `ADMIN_API_SECRET` unset, 401 missing header, 403 mismatch. |
+| `routes/admin.js` | READ-ONLY `/api/admin/*` (Phase 2a-1): GET `/holds` L84, `/bets`, `/handles`, `/logs`; catch-all 404. Now imports `adminAuth` from `./adminAuth`. |
+| `routes/adminCommands.js` | WRITE `/api/admin/*` (Phase 2b): `POST /holds/:ingestId/dismiss` → `dismissHold(ingestId, body.actor ?? 'dashboard')`. Status map: 200 dismissed/already_dismissed, 409 already_released, 404 not_found, 400 malformed. `handleDismissRoute` exported for unit tests. **Mounted in bot.js BEFORE the read router** so its catch-all 404 can't intercept the POST. |
 
 ### services/pipeline-events.js
 | What | Line(s) |

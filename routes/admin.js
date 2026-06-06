@@ -30,46 +30,11 @@
 // ═══════════════════════════════════════════════════════════
 
 const express = require('express');
-const crypto = require('crypto');
 const router = express.Router();
 
-// ── Auth ──────────────────────────────────────────────────────
-
-// Timing-safe string compare. crypto.timingSafeEqual throws when the two
-// buffers differ in length, so guard equal length first and treat a length
-// mismatch as a (constant-time-irrelevant) non-match.
-function safeEqual(presented, expected) {
-  const a = Buffer.from(String(presented), 'utf8');
-  const b = Buffer.from(String(expected), 'utf8');
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(a, b);
-}
-
-// Applied to every /api/admin/* route via router.use below.
-function adminAuth(req, res, next) {
-  const secret = process.env.ADMIN_API_SECRET;
-
-  // FAIL CLOSED — never serve when no secret is configured.
-  if (!secret) {
-    console.warn('[AdminAPI] auth fail — ADMIN_API_SECRET unset (fail-closed 503)');
-    return res.status(503).json({ error: 'Admin API unavailable (no secret configured)' });
-  }
-
-  const header = req.get('authorization') || '';
-  const match = /^Bearer\s+(.+)$/.exec(header);
-  if (!match) {
-    console.warn(`[AdminAPI] auth fail — missing/malformed Authorization header (${req.method} ${req.path})`);
-    return res.status(401).json({ error: 'Missing or malformed Authorization header' });
-  }
-
-  if (!safeEqual(match[1], secret)) {
-    // Never log the presented token.
-    console.warn(`[AdminAPI] auth fail — token mismatch (${req.method} ${req.path})`);
-    return res.status(403).json({ error: 'Forbidden' });
-  }
-
-  return next();
-}
+// Auth (fail-closed bearer) is shared with the Phase 2b write router
+// (routes/adminCommands.js) — extracted verbatim into routes/adminAuth.js.
+const { adminAuth } = require('./adminAuth');
 
 router.use(adminAuth);
 
