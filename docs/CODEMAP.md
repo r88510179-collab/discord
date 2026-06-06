@@ -426,3 +426,16 @@ DubClub bridge webhooks post one independent pick per message into split channel
 - Commits: 34ea903 (buffer bypass), ffddb09 (moved above GUARD 5).
 
 Note: looksLikePick (PICK_SIGNALS, ~line 199) has no bare over/under total signal — "O8"/"O212.5" only match the half-point pattern, scoring <2. Latent bug for any non-DubClub total-only pick. Not fixed (DubClub bypasses the gate instead).
+
+## #admin-log event catalog (channel 1486825605105192960)
+Read path: routes/admin.js GET /api/admin/logs tails this channel (dashboard Admin Log tab).
+
+Runtime writers:
+- MANUAL_REVIEW_HOLD alert — embed + Release/Dismiss/View Original buttons. handlers/messageHandler.js (~L12-37 send fn); re-posted by services/replayHolds.js:190; backfilled by scripts/backfill-hold-embeds.js. ACTIONABLE. Durable record: hold row + hold_review_decisions (review-holds path).
+- Strict Mode alert — cooldown-throttled, only when STRICT_MODE=true. handlers/messageHandler.js:797-801. Informational, no durable record.
+- Runtime error report — "[AdminLog] Failed to report error". handlers/messageHandler.js:1412-1421. Informational, no durable record.
+
+NOT in #admin-log:
+- War Room staging embeds (Approve/Edit/Reject) — go to WAR_ROOM_CHANNEL_ID=1485091165308190780 (set in prod). services/warRoom.js falls back to #admin-log only if that var is unset.
+
+Design note: holds already have a durable home, so the dashboard's write actions call the existing review-holds path — no admin_events table. Strict-mode/error are informational only.
