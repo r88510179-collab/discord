@@ -15,12 +15,18 @@ app.get('/health', (req, res) => res.status(200).send('OK'));
 const apiRoutes = require('./routes/api');
 app.use('/api', apiRoutes);
 
+// ── Admin Write-API (Phase 2b) — token-guarded MUTATIONS /api/admin/* ──
+// Mounted BEFORE the read router so the read router's catch-all 404 never
+// intercepts these POSTs. Shares the same fail-closed bearer auth.
+const adminCommandRoutes = require('./routes/adminCommands');
+app.use('/api/admin', adminCommandRoutes);
+
 // ── Admin Read-API (Phase 2a-1) — token-guarded, READ-ONLY /api/admin/* ──
 // Mounted after the general /api router (more-specific path; the /api router
 // next()s on unmatched paths). Auth + fail-closed live inside routes/admin.js.
 const adminRoutes = require('./routes/admin');
 app.use('/api/admin', adminRoutes);
-console.log(`[AdminAPI] /api/admin/* mounted (read-only); auth=${process.env.ADMIN_API_SECRET ? 'ON' : 'FAIL-CLOSED (no secret)'}`);
+console.log(`[AdminAPI] /api/admin/* mounted (read + Phase 2b dismiss); auth=${process.env.ADMIN_API_SECRET ? 'ON' : 'FAIL-CLOSED (no secret)'}`);
 
 // ── Legacy Apify webhook stub (returns 410 Gone) ──
 app.post('/api/webhooks/apify', (req, res) => {
