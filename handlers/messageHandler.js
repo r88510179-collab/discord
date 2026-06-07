@@ -1,5 +1,5 @@
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
-const { parseBetText, parseBetSlipImage, evaluateTweet, validateParsedBet } = require('../services/ai');
+const { parseBetText, evaluateTweet, validateParsedBet } = require('../services/ai');
 const { getOrCreateCapper, createBetWithLegs, isAuditMode, findPendingBetBySubject, gradeBet: gradeBetRecord, getBankroll, updateBankroll, db } = require('../services/database');
 const { betEmbed } = require('../utils/embeds');
 const { postPickTracked } = require('../services/dashboard');
@@ -459,20 +459,6 @@ function getImageAttachments(message) {
   return unique;
 }
 
-// Safe reply — falls back to channel.send if original message was deleted (FixTwitter/TweetShift)
-async function safeReply(message, payload) {
-  try {
-    await message.reply(payload);
-  } catch (err) {
-    if (err.code === 10008 || (err.message && err.message.includes('Unknown Message'))) {
-      console.log('[Pipeline] Original message deleted (FixTwitter/TweetShift). Sending without reference.');
-      await message.channel.send(payload);
-    } else {
-      throw err;
-    }
-  }
-}
-
 // Safe react — silently fails if message was deleted
 async function safeReact(message, emoji) {
   try {
@@ -481,18 +467,6 @@ async function safeReact(message, emoji) {
     if (err.code === 10008 || (err.message && err.message.includes('Unknown Message'))) {
       console.log(`[Pipeline] Cannot react (message deleted). Skipping ${emoji}.`);
     }
-  }
-}
-
-async function scanImage(imageUrl, mediaType) {
-  try {
-    const res = await fetch(imageUrl);
-    if (!res.ok) return null;
-    const buffer = Buffer.from(await res.arrayBuffer());
-    return await parseBetSlipImage(buffer.toString('base64'), mediaType);
-  } catch (err) {
-    console.error('[MessageHandler] Image scan error:', err.message);
-    return null;
   }
 }
 
@@ -698,34 +672,6 @@ async function autoGradeBet(client, outcome, subjects) {
 
   console.log(`[AutoGrade] Graded bet ${bet.id.slice(0, 8)} as ${result} (${profitUnits.toFixed(2)}u)`);
   return bet;
-}
-
-// Handle celebration messages by parsing them for grading signals
-async function handleAutoGrade(message, fullText) {
-  let cleanText = fullText
-    .replace(/https?:\/\/\S+/g, '')
-    .replace(/\$[\d,]+\.?\d*/g, '')
-    .trim();
-
-  if (cleanText.length < 3) return;
-
-  const parsed = await parseBetText(cleanText);
-  if (parsed.type === 'result' && parsed.outcome && parsed.subject?.length > 0) {
-    // Try capper-specific matching first (more accurate)
-    const capperInfo = resolveCapper(message);
-    const capper = await getOrCreateCapper(capperInfo.discordId, capperInfo.name, capperInfo.avatar);
-    const contextResult = await gradeFromCelebration(message.client, capper.id, parsed.outcome, parsed.subject);
-
-    if (contextResult) {
-      console.log(`[ContextGrade] Successfully graded bet from capper ${capperInfo.name}`);
-      return;
-    }
-
-    // Fallback: global search across all cappers
-    await autoGradeBet(message.client, parsed.outcome, parsed.subject);
-  } else {
-    console.log(`[AutoGrade] AI could not extract result from celebration text.`);
-  }
 }
 
 async function handleMessage(message, { isUpdate = false } = {}) {
