@@ -573,6 +573,34 @@ async function processSlipImage(client, imageUrl, capperId, capperName, opts = {
   return { bets: saved };
 }
 
+// ── F-07: slip-feed multi-image selection (pure, exported for unit tests) ──
+// A single slip-feed message can carry multiple REAL slip screenshots; the
+// legacy path processed only images[0] and silently dropped the rest. These
+// helpers decide which images handleSlipFeed processes and derive a per-image
+// ingestId. They MUST NOT feed embed/preview thumbnails (origin:'embed' —
+// FixTwitter/HRB share cards/link previews) to vision; only origin:'attachment'
+// images are real slips. getImageAttachments emits exactly two origin values:
+// 'attachment' (direct uploads AND native-forward snapshot images) and 'embed'.
+const SLIP_IMAGE_CAP = 4;
+
+// Returns the ordered list of images to process:
+// - Any real attachments present → those, in order, capped at `cap`. (The fix.)
+// - No real attachments (e.g. an embed-only HRB share) → [images[0]], i.e. EXACTLY
+//   the legacy single-image behavior. Never multiply-process embed/preview images.
+function selectSlipImages(images, { cap = SLIP_IMAGE_CAP } = {}) {
+  const list = Array.isArray(images) ? images : [];
+  const attachments = list.filter((img) => img && img.origin === 'attachment');
+  if (attachments.length > 0) return attachments.slice(0, cap);
+  return list.length > 0 ? [list[0]] : [];
+}
+
+// The first selected image keeps the base ingestId (so the common single-image
+// path is byte-for-byte unchanged, including its pipeline-events/holds id); each
+// subsequent image gets `${base}-img${i}` (i≥1) to avoid event/hold collisions.
+function slipImageIngestId(baseIngestId, index) {
+  return index === 0 ? baseIngestId : `${baseIngestId}-img${index}`;
+}
+
 // ── OCR Slip Feed — dedicated channel for bet slip images ───
 async function handleSlipFeed(message) {
   const slipChannelId = process.env.SLIP_FEED_CHANNEL_ID;
@@ -595,14 +623,23 @@ async function handleSlipFeed(message) {
     }
     const capper = await getOrCreateCapper(capperInfo.discordId, capperInfo.name, capperInfo.avatar);
 
-    const result = await processSlipImage(message.client, images[0].url, capper.id, capperInfo.name, {
-      channelId: message.channel.id,
-      messageId: message.id,
-      sourceUrl: message.url,
-      ingestId,
-    });
+    // F-07: process every REAL slip attachment, not just images[0]. selectSlipImages
+    // collapses to the legacy single call for N=1 / embed-only (base ingestId), and
+    // returns all real attachments (capped) when a capper posts multiple slips.
+    const selected = selectSlipImages(images);
+    const attachmentCount = images.filter((img) => img && img.origin === 'attachment').length;
+    if (attachmentCount > SLIP_IMAGE_CAP) {
+      console.warn(`[SlipFeed] ${attachmentCount} real slip attachments exceed cap ${SLIP_IMAGE_CAP}; processing first ${SLIP_IMAGE_CAP}, dropping ${attachmentCount - SLIP_IMAGE_CAP}.`);
+    }
 
-    if (!result) return true;
+    for (let i = 0; i < selected.length; i++) {
+      await processSlipImage(message.client, selected[i].url, capper.id, capperInfo.name, {
+        channelId: message.channel.id,
+        messageId: message.id,
+        sourceUrl: message.url,
+        ingestId: slipImageIngestId(ingestId, i),
+      });
+    }
 
     return true;
   } catch (err) {
@@ -1368,4 +1405,4 @@ async function reportErrorToAdmin(error, context, client) {
   }
 }
 
-module.exports = { handleMessage, processSlipImage, buildParsedPayload, sendHoldReviewEmbed, getImageAttachments, resolveCapper };
+module.exports = { handleMessage, processSlipImage, buildParsedPayload, sendHoldReviewEmbed, getImageAttachments, resolveCapper, selectSlipImages, slipImageIngestId };
