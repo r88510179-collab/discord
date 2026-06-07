@@ -45,6 +45,7 @@ const { runAutoGrade, probeBrave } = require('./services/grading');
 // Twitter poller loaded dynamically in ClientReady handler
 const { postGradeSummary, postDailyLeaderboard, updateScoreboard } = require('./services/dashboard');
 const { postReport, checkCriticalAlerts, logCronRun } = require('./services/healthReport');
+const { reportDedupLeaks } = require('./services/dedupLeakCheck');
 
 // ── Slip-feed button handler ──
 async function handleSlipFeedInteraction(interaction) {
@@ -750,6 +751,24 @@ client.once(Events.ClientReady, async (c) => {
     }
   });
   console.log('🌅 Daily recap at 8 AM ET');
+
+  // ── F-12 Dedup Leak Check (9 AM ET / 13:00 UTC) ────────────
+  // Read-only daily safety net: scan the last 24h and alert #admin-log only if
+  // a same-capper Twitter repost slipped past the F-12 ingest-time dedup gate
+  // (services/twitter-handler.js findRecentRepost). 13:00 UTC deliberately
+  // avoids the recap's 12:00 UTC slot; it shares the tick with the health daily
+  // report but is independent and read-only. UTC-cron + ET-comment matches the
+  // recap/health scheduling convention (no node-cron timezone option in use).
+  cron.schedule('0 13 * * *', async () => {
+    const start = Date.now();
+    try {
+      await reportDedupLeaks(client);
+      logCronRun('dedup-leak-check', Date.now() - start);
+    } catch (err) {
+      console.error('[DedupLeak] cron error:', err.message);
+    }
+  });
+  console.log('🔁 F-12 dedup leak check at 9 AM ET');
 
   // ── 90-Day DB Purge (3:30 AM UTC daily) ────────────────────
   cron.schedule('30 3 * * *', () => {
