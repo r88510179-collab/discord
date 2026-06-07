@@ -9,7 +9,7 @@ const {
   EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
   ModalBuilder, TextInputBuilder, TextInputStyle,
 } = require('discord.js');
-const { db, createBetWithLegs } = require('./database');
+const { db, createBetWithLegs, getOrCreateCapper } = require('./database');
 const { postNewPick } = require('./dashboard');
 const { recordStage } = require('./pipeline-events');
 
@@ -141,6 +141,239 @@ function dismissHold(ingestId, actor) {
 
     return { ok: true, status: 'dismissed', ingestId: id };
   })();
+}
+
+// ─────────────────────────────────────────────────────────────
+// Transport-agnostic On-demand Unfurl Recovery core (Phase 2b-2)
+//
+// recoverHold(ingestId, actor) re-fetches a held Discord message and runs the
+// EXISTING vision_slip extraction+create path on it. Built for the
+// grade-before-unfurl race: HRB share-link slips held as `ai_is_bet_false`
+// were graded text-only BEFORE Discord unfurled the slip image. The held
+// message has long since unfurled, so a re-fetch now carries the slip image,
+// and the same vision path that handles won-race unfurls extracts it.
+//
+// It REUSES, never reimplements:
+//   • handlers/messageHandler.processSlipImage — the won-race vision_slip unit
+//     (OCR → vision → validateParsedBet anti-hallucination guard →
+//     createBetWithLegs(source:'vision_slip', review_status:'needs_review') →
+//     war-room staging embed). No raw SQL bet creation; the creation-time
+//     is_bet logic and the MANUAL_REVIEW_HOLD gates (v335 landmine) are NOT
+//     touched — this path has no is_bet gate.
+//   • resolveCapper + getOrCreateCapper — identical capper attribution to the
+//     won-race flow (handlers/messageHandler.js processAggregatedMessage).
+//   • the MANUAL_REVIEW_RELEASED stage advance + a hold_review_decisions row —
+//     the same terminal the Release-modal uses, so the dismiss idempotency
+//     core already treats a recovered hold as resolved.
+//
+// Idempotency lives HERE, keyed on bets.source_message_id (createBetWithLegs's
+// fingerprint also keys on it — a second, lower guard), so re-running creates
+// at most one bet:
+//   no hold for ingest_id                 → { ok:false, status:'not_found' }
+//   a bet already exists for this message → { ok:true,  status:'already_recovered', betId }
+//   hold already released / dismissed     → { ok:false, status:'already_resolved' }
+//   message unreachable / no client       → { ok:false, status:'message_unreachable' }
+//   fetched but not unfurled yet (0 imgs) → { ok:false, status:'no_image_yet' }   (creates nothing)
+//   vision returned no bet                → { ok:false, status:'no_bet_found' }    (leaves the hold)
+//   bet created                           → { ok:true,  status:'recovered', betId }
+//
+// The bet-exists check runs BEFORE the terminal-stage check so a re-run after a
+// successful recover reports `already_recovered` (not `already_resolved`). If a
+// bet exists but the hold is somehow still open (a prior run created the bet
+// then crashed before advancing the stage), the hold is self-healed to
+// RELEASED. A deliberate Dismiss is respected (never self-healed).
+//
+// Discord fetch + vision extraction are injectable via `deps` for tests (the
+// repo has no Discord/vision harness); production passes nothing and the
+// defaults lazy-require messageHandler, which is already cached in the running
+// bot — so this module never eagerly pulls in the heavy handler graph.
+
+// Default Discord fetch: global._discordClient → channels.fetch → messages.fetch
+// (mirrors routes/admin.js:196 + routes/api.js:54).
+async function _defaultFetchMessage(client, channelId, messageId) {
+  if (!client || !channelId || !messageId) return null;
+  const channel = await client.channels.fetch(channelId);
+  if (!channel || !channel.messages || typeof channel.messages.fetch !== 'function') return null;
+  return channel.messages.fetch(messageId);
+}
+
+// Default image collector — the exported, origin-tagging getImageAttachments.
+function _defaultGetImages(message) {
+  return require('../handlers/messageHandler').getImageAttachments(message);
+}
+
+// Default extraction — the exact won-race vision_slip path, per eligible image.
+// Returns { bets: [...createBetWithLegs records] }. Created bets are
+// source:'vision_slip', review_status:'needs_review', and posted to the war
+// room by processSlipImage, identical to a normal slip ingest.
+async function _defaultExtract({ client, message, ingestId, channelId, messageId, messageUrl, images }) {
+  const handler = require('../handlers/messageHandler');
+  const capperInfo = handler.resolveCapper(message);
+  const capper = await getOrCreateCapper(capperInfo.discordId, capperInfo.name, capperInfo.avatar);
+  const bets = [];
+  for (const img of images) {
+    const res = await handler.processSlipImage(client, img.url, capper.id, capperInfo.name, {
+      channelId, messageId, sourceUrl: messageUrl, ingestId,
+    });
+    for (const b of (res && res.bets ? res.bets : [])) bets.push(b);
+  }
+  return { bets };
+}
+
+// channelId from the hold payload (or the messageUrl's middle segment);
+// messageId from the messageUrl's last segment (or the `disc_<id>` tail).
+function _deriveSourceIds(ingestId, payload) {
+  let channelId = payload && payload.channelId != null ? String(payload.channelId) : null;
+  let messageId = null;
+  const url = payload && payload.messageUrl ? String(payload.messageUrl) : '';
+  const m = url.match(/channels\/(\d+)\/(\d+)\/(\d+)/);
+  if (m) { if (!channelId) channelId = m[2]; messageId = m[3]; }
+  if (!messageId) messageId = String(ingestId).replace(/^disc_/, '') || null;
+  return { channelId, messageId };
+}
+
+// Most recent of the three terminal hold stages (same query shape dismissHold
+// uses; created_at is epoch seconds and can tie, so id breaks ties).
+function _latestHoldStage(id) {
+  const row = db.prepare(`
+    SELECT stage FROM pipeline_events
+    WHERE ingest_id = ?
+      AND stage IN ('MANUAL_REVIEW_HOLD', 'MANUAL_REVIEW_RELEASED', 'MANUAL_REVIEW_DISMISSED')
+    ORDER BY created_at DESC, id DESC
+    LIMIT 1
+  `).get(id);
+  return row ? row.stage : null;
+}
+
+// Atomic hold resolution: MANUAL_REVIEW_RELEASED stage advance (same terminal
+// as a manual Release) + a durable hold_review_decisions row recording the
+// actor and the recovered bet(s). One db.transaction, mirroring dismissHold.
+function _resolveRecoveredHold(id, payload, betIds, actorStr) {
+  const betId = betIds[0];
+  db.transaction(() => {
+    recordStage({
+      ingestId: id,
+      betId,
+      sourceType: 'discord',
+      sourceRef: id.replace(/^disc_/, ''),
+      stage: 'MANUAL_REVIEW_RELEASED',
+      eventType: 'STAGE_ENTER',
+      payload: {
+        recovered_by: actorStr,
+        bet_id: betId,
+        bet_ids: betIds,
+        via: 'unfurl_recovery',
+        message_url: payload && payload.messageUrl ? payload.messageUrl : null,
+      },
+    });
+    db.prepare(`
+      INSERT INTO hold_review_decisions
+        (ingest_id, hold_payload, reparse_attempted, reparse_input_source, reparse_input_text,
+         reparse_output, reparse_confidence, human_decision, human_edits, source_label,
+         bet_id, reviewed_by, created_at)
+      VALUES
+        (@ingest_id, @hold_payload, 1, 'image', NULL,
+         @reparse_output, NULL, 'recovered', NULL, 'unfurl_recovery',
+         @bet_id, @reviewed_by, @created_at)
+    `).run({
+      ingest_id: id,
+      hold_payload: payload ? JSON.stringify(payload) : null,
+      reparse_output: JSON.stringify({ betIds }),
+      bet_id: betId,
+      reviewed_by: actorStr,
+      created_at: Math.floor(Date.now() / 1000),
+    });
+  })();
+}
+
+async function recoverHold(ingestId, actor, deps = {}) {
+  const id = String(ingestId == null ? '' : ingestId).trim();
+  if (!id) return { ok: false, status: 'not_found', ingestId: id };
+  const actorStr = (actor == null || String(actor).trim() === '') ? 'unknown' : String(actor);
+
+  const client = ('client' in deps) ? deps.client : global._discordClient;
+  const fetchMessage = deps.fetchMessage || _defaultFetchMessage;
+  const getImages = deps.getImageAttachments || _defaultGetImages;
+  const extract = deps.extract || _defaultExtract;
+
+  // 1. the hold must exist (reuses loadHoldEvent → latest MANUAL_REVIEW_HOLD payload)
+  const payload = loadHoldEvent(id);
+  if (!payload) return { ok: false, status: 'not_found', ingestId: id };
+
+  // 2. derive the source channel + message ids
+  const { channelId, messageId } = _deriveSourceIds(id, payload);
+  const messageUrl = payload.messageUrl || null;
+  const lookupBet = () => (messageId
+    ? db.prepare('SELECT id FROM bets WHERE source_message_id = ? LIMIT 1').get(messageId)
+    : null);
+
+  // 3. idempotency — a bet already exists for this source message
+  const existing = lookupBet();
+  if (existing) {
+    // self-heal a partial run: bet created but the hold was never advanced
+    if (_latestHoldStage(id) === 'MANUAL_REVIEW_HOLD') _resolveRecoveredHold(id, payload, [existing.id], actorStr);
+    return { ok: true, status: 'already_recovered', ingestId: id, betId: existing.id };
+  }
+
+  // 4. hold already terminal (released or dismissed) → refuse
+  const latest = _latestHoldStage(id);
+  if (latest === 'MANUAL_REVIEW_RELEASED' || latest === 'MANUAL_REVIEW_DISMISSED') {
+    return { ok: false, status: 'already_resolved', ingestId: id };
+  }
+
+  // 5. fetch the (now-unfurled) Discord message
+  if (!client) return { ok: false, status: 'message_unreachable', ingestId: id, reason: 'no_client' };
+  let message = null;
+  try {
+    message = await fetchMessage(client, channelId, messageId);
+  } catch (err) {
+    console.log(`[HoldRecover] ${id.slice(0, 16)} fetch failed: ${err.message}`);
+    message = null;
+  }
+  if (!message) return { ok: false, status: 'message_unreachable', ingestId: id };
+
+  // 6. images present yet? Prefer REAL slip attachments (origin:'attachment'),
+  //    fail safe to all images if none are tagged — mirrors
+  //    ocrFirstWiring.eligibleImageCount so a slip+share-embed counts as one slip.
+  const all = (getImages(message) || []).filter(im => im && im.url);
+  const realSlips = all.filter(im => im.origin === 'attachment');
+  const images = realSlips.length ? realSlips : all;
+  console.log(`[HoldRecover] ${id.slice(0, 16)} images total=${all.length} real=${realSlips.length} using=${images.length}${images.length ? ' urls=' + images.map(i => i.url.slice(0, 48)).join(' | ') : ''}`);
+  if (images.length === 0) return { ok: false, status: 'no_image_yet', ingestId: id };
+
+  // 7. run the existing vision_slip extraction + create path
+  let bets = [];
+  try {
+    const out = await extract({ client, message, ingestId: id, channelId, messageId, messageUrl, images });
+    bets = (out && out.bets) ? out.bets : [];
+  } catch (err) {
+    // A bet may have been created before a late throw (e.g. the staging embed
+    // post failed after createBetWithLegs). Recover idempotently.
+    console.error(`[HoldRecover] ${id.slice(0, 16)} extraction threw: ${err.message}`);
+    const after = lookupBet();
+    if (after) {
+      if (_latestHoldStage(id) === 'MANUAL_REVIEW_HOLD') _resolveRecoveredHold(id, payload, [after.id], actorStr);
+      return { ok: true, status: 'already_recovered', ingestId: id, betId: after.id };
+    }
+    return { ok: false, status: 'no_bet_found', ingestId: id, reason: 'extract_error' };
+  }
+  const created = bets.filter(b => b && !b._deduped && b.id);
+  console.log(`[HoldRecover] ${id.slice(0, 16)} vision yielded=${bets.length} created=${created.length}`);
+
+  if (created.length === 0) {
+    // fingerprint dedup may have matched a bet created by a racing recover
+    const after = lookupBet();
+    if (after) {
+      if (_latestHoldStage(id) === 'MANUAL_REVIEW_HOLD') _resolveRecoveredHold(id, payload, [after.id], actorStr);
+      return { ok: true, status: 'already_recovered', ingestId: id, betId: after.id };
+    }
+    return { ok: false, status: 'no_bet_found', ingestId: id }; // leave the hold open
+  }
+
+  // 8. created a bet → resolve the hold (atomic stage advance + decision row)
+  const betIds = created.map(b => b.id);
+  _resolveRecoveredHold(id, payload, betIds, actorStr);
+  return { ok: true, status: 'recovered', ingestId: id, betId: betIds[0], betIds };
 }
 
 // Thin Discord wrapper — derives ingestId exactly as before (from the
@@ -346,4 +579,4 @@ async function handleReleaseModal(interaction, ingestId) {
   }
 }
 
-module.exports = { handleHoldInteraction, dismissHold };
+module.exports = { handleHoldInteraction, dismissHold, recoverHold };

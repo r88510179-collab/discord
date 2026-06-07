@@ -237,19 +237,22 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 | nba.js | ESPN NBA public API adapter (`site.api.espn.com`) — unofficial, no auth |
 
 ### services/holdReview.js
-> Line numbers refreshed 2026-06-06 (Phase 2b-1 Dismiss): the transport-agnostic
-> `dismissHold` core (~66 lines) was inserted before `handleDismiss`, shifting
-> everything below it down by ~+92.
+> Line numbers refreshed 2026-06-07 (Phase 2b-2 Recover): the transport-agnostic
+> `recoverHold` core + helpers (~210 lines) were inserted AFTER `dismissHold`
+> and before `handleDismiss`, shifting everything from `handleDismiss` down by
+> ~+233. (Prior: 2026-06-06 Phase 2b-1 Dismiss inserted `dismissHold` ~+92.)
 
 | What | Line(s) |
 | --- | --- |
 | `handleHoldInteraction` (button handler) | 21 |
-| **`dismissHold(ingestId, actor)`** — exported transport-agnostic Dismiss core (Phase 2b-1). Interaction-free. One `db.transaction`: (1) `recordStage(MANUAL_REVIEW_DISMISSED, {dismissed_by:actor})` + (2) `hold_review_decisions` row `human_decision='dismissed'`, actor→`reviewed_by`. Idempotent via latest-of-3-stages: `not_found`/`already_released`(refuse)/`already_dismissed`(no-op)/`dismissed`. Never touches a bet. Export L349. | 84 |
-| Dismiss flow | 150 (`handleDismiss` — now a thin wrapper calling `dismissHold(ingestId, interaction.user.tag)`); routed L34 |
-| Release modal | 180 (`ModalBuilder`, customId `hold:releasemodal:`); `handleReleaseModal` L223 |
-| SELECT WHERE stage='MANUAL_REVIEW_HOLD' query (`loadHoldEvent`) | 42–47 (reads `pipeline_events.payload`) |
-| `createBetWithLegs(source='manual_hold_release')` call | 270 (source field L279) |
-| `postNewPick` call | 298 (import L13) |
+| **`dismissHold(ingestId, actor)`** — exported transport-agnostic Dismiss core (Phase 2b-1). Interaction-free. One `db.transaction`: (1) `recordStage(MANUAL_REVIEW_DISMISSED, {dismissed_by:actor})` + (2) `hold_review_decisions` row `human_decision='dismissed'`, actor→`reviewed_by`. Idempotent via latest-of-3-stages: `not_found`/`already_released`(refuse)/`already_dismissed`(no-op)/`dismissed`. Never touches a bet. | 84 |
+| **`recoverHold(ingestId, actor, deps)`** — exported transport-agnostic On-demand Unfurl Recovery core (Phase 2b-2). Async, interaction-free. For the grade-before-unfurl race: re-fetches the held (now-unfurled) message and runs the EXISTING vision_slip path (`_defaultExtract` → `resolveCapper`+`getOrCreateCapper` → `messageHandler.processSlipImage` per `origin:'attachment'` image → `createBetWithLegs(source:'vision_slip')`); **no raw bet SQL, creation-time is_bet gates untouched**. Idempotent on `bets.source_message_id` — checked BEFORE the terminal-stage check so a re-run is `already_recovered`, not `already_resolved`; self-heals a bet-created-but-hold-open partial run. Resolves via `MANUAL_REVIEW_RELEASED` + `hold_review_decisions` row (`human_decision='recovered'`, `source_label='unfurl_recovery'`, `reparse_input_source='image'`) in one `db.transaction` (helper `_resolveRecoveredHold` L243). Statuses: `not_found`/`already_recovered`/`already_resolved`/`message_unreachable`/`no_image_yet`/`no_bet_found`/`recovered`. Discord fetch + extraction injectable via `deps` for tests; prod lazy-requires the (already-cached) messageHandler. | 289 |
+| `dismissHold` / `recoverHold` export | 582 |
+| Dismiss flow | 383 (`handleDismiss` — thin wrapper calling `dismissHold(ingestId, interaction.user.tag)`); routed L34 |
+| Release modal | 413 (`ModalBuilder`, customId `hold:releasemodal:`); `handleReleaseModal` L456 |
+| SELECT WHERE stage='MANUAL_REVIEW_HOLD' query (`loadHoldEvent`, reused by `recoverHold`) | 42–47 (reads `pipeline_events.payload`) |
+| `createBetWithLegs(source='manual_hold_release')` call (Release modal) | 503 (source field L512) |
+| `postNewPick` call | 531 (import L13) |
 
 > **Dismiss `human_decision` value:** the live writer is `'dismissed'` (past tense),
 > set by `scripts/review-holds.js:596` and now `holdReview.dismissHold` — NOT
@@ -261,7 +264,7 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 | --- | --- |
 | `routes/adminAuth.js` | `adminAuth` fail-closed Bearer middleware + `safeEqual` (extracted from admin.js so the Phase 2b write router reuses the identical check). 503 if `ADMIN_API_SECRET` unset, 401 missing header, 403 mismatch. |
 | `routes/admin.js` | READ-ONLY `/api/admin/*` (Phase 2a-1): GET `/holds` L84, `/bets`, `/handles`, `/logs`; catch-all 404. Now imports `adminAuth` from `./adminAuth`. |
-| `routes/adminCommands.js` | WRITE `/api/admin/*` (Phase 2b): `POST /holds/:ingestId/dismiss` → `dismissHold(ingestId, body.actor ?? 'dashboard')`. Status map: 200 dismissed/already_dismissed, 409 already_released, 404 not_found, 400 malformed. `handleDismissRoute` exported for unit tests. **Mounted in bot.js BEFORE the read router** so its catch-all 404 can't intercept the POST. |
+| `routes/adminCommands.js` | WRITE `/api/admin/*` (Phase 2b): `POST /holds/:ingestId/dismiss` → `dismissHold` (200 dismissed/already_dismissed, 409 already_released, 404 not_found, 400 malformed); `POST /holds/:ingestId/recover` (Phase 2b-2) → `recoverHold` (200 recovered/already_recovered, 409 already_resolved, 404 not_found, 422 no_image_yet/no_bet_found, 502 message_unreachable, 400 malformed; `handleRecoverRoute(req,res,deps)` — `deps` is a test-only injection seam, prod route passes none); `POST /handles/:handle` → scraper-handle enable toggle. All `handle*Route` fns exported for unit tests. **Mounted in bot.js BEFORE the read router** so its catch-all 404 can't intercept the POSTs. |
 
 ### services/pipeline-events.js
 | What | Line(s) |

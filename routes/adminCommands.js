@@ -15,6 +15,13 @@
 //     200 dismissed | 200 already_dismissed | 409 already_released
 //     404 not_found  | 400 malformed     | 500 internal
 //
+//   POST /holds/:ingestId/recover   body: { actor?: string }   (Phase 2b-2)
+//     → recoverHold(ingestId, actor) — re-fetch the held (now-unfurled)
+//       message and run the existing vision_slip extraction+create path.
+//     200 recovered | 200 already_recovered | 409 already_resolved
+//     404 not_found | 422 no_image_yet | 422 no_bet_found
+//     502 message_unreachable | 400 malformed | 500 internal
+//
 //   POST /handles/:handle           body: { enabled: 0|1, note?: string }
 //     → UPDATE scraper_handles SET enabled, note=COALESCE(note) WHERE handle
 //     200 updated | 404 not_found | 400 malformed | 500 error
@@ -67,6 +74,49 @@ function handleDismissRoute(req, res) {
 }
 
 router.post('/holds/:ingestId/dismiss', adminAuth, handleDismissRoute);
+
+// On-demand Unfurl Recovery (Phase 2b-2). Core status → HTTP status; only the
+// post-core outcomes live in the map. `malformed` (400) and `error` (500) are
+// returned inline at their guard / catch sites, like the dismiss handler.
+const RECOVER_STATUS_CODE = {
+  recovered: 200,
+  already_recovered: 200,
+  already_resolved: 409,
+  not_found: 404,
+  no_image_yet: 422,
+  no_bet_found: 422,
+  message_unreachable: 502,
+};
+
+// Exported for direct unit testing (the repo has no HTTP/supertest harness).
+// `deps` is an injection seam for tests ONLY (Discord fetch + vision
+// extraction); the production route registration below passes nothing, so
+// recoverHold runs against global._discordClient + the real vision_slip path.
+async function handleRecoverRoute(req, res, deps) {
+  const raw = req.params && req.params.ingestId;
+  const ingestId = typeof raw === 'string' ? raw.trim() : '';
+  if (!ingestId) {
+    return res.status(400).json({ ok: false, status: 'malformed', error: 'Missing or malformed ingestId' });
+  }
+
+  const bodyActor = req.body && typeof req.body.actor === 'string' ? req.body.actor.trim() : '';
+  const actor = bodyActor || 'dashboard';
+
+  let result;
+  try {
+    const { recoverHold } = require('../services/holdReview');
+    result = await recoverHold(ingestId, actor, deps || {});
+  } catch (err) {
+    console.error(`[AdminAPI] recover error for ${ingestId}: ${err.message}`);
+    return res.status(500).json({ ok: false, status: 'error', error: 'Internal error' });
+  }
+
+  const code = RECOVER_STATUS_CODE[result.status] || 500;
+  console.log(`[AdminAPI] recover ${ingestId} by "${actor}" → ${result.status} (${code})`);
+  return res.status(code).json(result);
+}
+
+router.post('/holds/:ingestId/recover', adminAuth, (req, res) => handleRecoverRoute(req, res));
 
 // Outcome status → HTTP status for the scraper_handles toggle. Mirrors the
 // dismiss handler's STATUS_CODE: only the post-UPDATE outcomes live in the
@@ -131,4 +181,5 @@ router.post('/handles/:handle', adminAuth, handleSetHandleRoute);
 
 module.exports = router;
 module.exports.handleDismissRoute = handleDismissRoute;
+module.exports.handleRecoverRoute = handleRecoverRoute;
 module.exports.handleSetHandleRoute = handleSetHandleRoute;

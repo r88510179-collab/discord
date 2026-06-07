@@ -1422,4 +1422,4 @@ async function reportErrorToAdmin(error, context, client) {
   }
 }
 
-module.exports = { handleMessage, processSlipImage, buildParsedPayload, sendHoldReviewEmbed, getImageAttachments };
+module.exports = { handleMessage, processSlipImage, buildParsedPayload, sendHoldReviewEmbed, getImageAttachments, resolveCapper };
