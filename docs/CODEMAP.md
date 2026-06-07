@@ -314,6 +314,36 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 | backfill-hold-embeds.js | v447 hold-embed backfill (PR #29) |
 | test-team-disambiguation.js | Regression harness for `normalizeDescription` bare-city injection (Bug 1) + shared-nickname sport disambiguation (Bug 2) (PR #36). Run: `node scripts/test-team-disambiguation.js` |
 
+## Twitter ingest — Surface scraper → /mobile-ingest → F-12 dedup
+
+> Code refs accurate as of `main` post-#53 (commit `3cfc694`, 2026-06-07). This is the **direct HTTP** Twitter path through `services/twitter-handler.js`. It is NOT the **Twitter relay channels** (Dan/Cody/Harry/Gavin) under "Channels — ingestion routing" below: those arrive as Discord *messages* and run the `messageHandler` pipeline, so they never reach the F-12 gate.
+
+**Source.** The live Twitter feed is the Surface Pro scraper (`zonetracker-scraper`, private repo — see its README "Polling & cursor behavior"), which POSTs tweet batches to the Fly Express endpoint `POST /api/mobile-ingest` (`routes/api.js:19`; router mounted at `/api` in `bot.js`). Auth: the `x-mobile-secret` header must equal `MOBILE_SCRAPER_SECRET` (`routes/api.js:21-22`), else 401. The route 200s immediately, then processes async via `handleTwitterWebhookPayload` (`routes/api.js:55`). The scraper pulls its handle list from `GET /api/scraper-handles` (`routes/api.js:68`; `scraper_handles` table, mig 027). Fly's own twitterapi.io poller (`services/twitter.js:90`) feeds the *same* handler but is kill-switched by `TWITTER_POLLER_DISABLED` (paused in prod — see "Env vars that gate behavior"), so the scraper is the sole live source.
+
+**Handler.** `services/twitter-handler.js` → `handleTwitterWebhookPayload(payload, client)` (L92), one iteration per tweet. Stages emitted via `recordStage`:
+
+| Stage | Line | Notes |
+|---|---|---|
+| RECEIVED | 122 | tweet has id + text |
+| AUTHORIZED | 137 | after `processed_tweets` id-dedup + RT/reply/settled pre-filter pass |
+| EXTRACTED | 170 | **images only** — recorded before the Vision AI call |
+| PARSED | 191 / 200 / 207 | vision / text-fallback / text |
+| VALIDATED | 262 | after `validateParsedBet` hallucination guard |
+| STAGED | 298 / 325 | `STAGE_EXIT`, after `createBetWithLegs` |
+
+Pre-filter drops between RECEIVED and PARSED emit DROPPED (not a named stage): `processed_tweets` id-dedup → `DUPLICATE_IMAGE` (L131), retweet/reply → `BOUNCER_REJECTED` (L142 / L149), `evaluateTweet` settled/recap → `PRE_FILTER_NO_BET_CONTENT` (L159 / L166).
+
+**F-12 content-window repost dedup** (the gate). Sits AFTER VALIDATED + capper resolution, BEFORE `createBetWithLegs`. `findRecentRepost({capperId, description, odds, betType})` (L72) returns a prior bet row iff one exists with: same `capper_id`, same `bet_type`, `source IN ('twitter_text','twitter_vision')`, `created_at >= datetime('now','-12 hours')` (SQL L76-83) — then, in JS, equal `normalizeForDedup(description)` (L61: lowercase, every non-alphanumeric run → single space, trim) AND null-aware-equal `odds` (L84-88). Effective match key = **capper + normalized description + odds + bet_type**, restricted to twitter sources, inside 12h.
+
+- **Normal path** (L305-315): on match → `recordDrop({dropReason:'DUPLICATE_REPOST', payload:{window:'12h', prior_bet_id}})` (L312) + `updateLastTweetId` (L313) + `continue` — **no bet created**.
+- **Ladder path** (L276-303): the same gate runs **per step** before each step's `createBetWithLegs` (`findRecentRepost` L281 → `recordDrop DUPLICATE_REPOST` L284 → skip that step, no bet). Note the cursor `updateLastTweetId` here is **tweet-level** — fired once after the ladder loop (L301), not per dropped step (unlike the normal path, which advances it inline on the drop).
+
+`DUPLICATE_REPOST` is registered in `DROP_REASONS` (`services/pipeline-events.js:44`). Module exports: `handleTwitterWebhookPayload`, `normalizeForDedup`, `findRecentRepost` (L343).
+
+**Why id-ignoring is necessary.** `createBetWithLegs` folds the per-message tweet id into its `fingerprint` dedup key, so a same-content repost under a *different* tweet id hashes differently and BOTH would save (that fingerprint hit drops as `DUPLICATE_IMAGE`, L328). F-12 deliberately ignores the tweet id to collapse these. Forensic basis (handler comment L45-63): `bobby__tracker` re-posts the same pick across separate same-day tweets (observed gaps 6s–3.25h), whereas a legit text repeat for a different match recurs ≥2 days later — so a 12h window collapses the reposts and keeps the legit repeats.
+
+**Why the window keys on `bets.created_at` (ingestion time), not the tweet's post time.** `created_at` is the schema default `datetime('now')` stamped at insert — verified: `bets.created_at TEXT DEFAULT (datetime('now'))` (`migrations/001_initial_schema.sql:34`) and the `INSERT INTO bets` column list in `createBetWithLegs` (`services/database.js:183`) omits `created_at`. This is sound because the scraper forwards only a tight recent page per poll (NORMAL mode pulls the 10 most-recent per handle — see the scraper README), so ingestion time tracks post time closely. **Documented edge:** a manual `BACKFILL=true` scraper run against a low-frequency, cursorless NEW handle pulls a deeper page at once, which could collapse a legitimately different-day repeat into a single 12h window — auditable after the fact via `drop_reason='DUPLICATE_REPOST'` in `pipeline_events`.
+
 ## Migrations
 
 | Mig | What it adds |
