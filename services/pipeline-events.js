@@ -41,6 +41,7 @@ const EVENT_TYPES = [
 ];
 const DROP_REASONS = [
   'DUPLICATE_IMAGE',
+  'DUPLICATE_REPOST',           // F-12: twitter content-window repost dedup (same capper/normalized-text/odds within 12h, ignores tweet id) — services/twitter-handler.js
   'AGE_GATE',
   'PRE_FILTER_NO_BET_CONTENT',
   'PRE_FILTER_PROMO',
