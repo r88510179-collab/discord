@@ -1,0 +1,23 @@
+-- ═══════════════════════════════════════════════════════════
+-- Migration 028: bets.sweep_exempt_until
+--
+-- Phase 2b-2 — sweeper grace for recovered bets.
+--
+-- recoverHold (services/holdReview.js) backdates a recovered bet's
+-- created_at to the original slip post time (PR #59). The 7-Day Smart
+-- Sweeper (services/grading.js runAutoGrade) auto-grades any pending
+-- non-prop bet older than SWEEP_DAYS as a LOSS, so a freshly recovered
+-- backlog slip would be swept to a FALSE loss before the grader runs.
+--
+-- sweep_exempt_until is a self-expiring grace marker. recoverHold sets it
+-- to datetime('now','+GRACE_DAYS days') — measured from the RECOVERY moment,
+-- NOT backdated — and the sweeper skips any bet still inside the window.
+-- NULL (the default for every existing row and every normal bet) means
+-- "no grace, sweep normally". Stored as a SQLite datetime string
+-- (UTC 'YYYY-MM-DD HH:MM:SS') so it compares directly against datetime('now').
+--
+-- No index: the sweeper already iterates pending bets and probes this column
+-- by primary key (id), never by sweep_exempt_until alone.
+-- ═══════════════════════════════════════════════════════════
+
+ALTER TABLE bets ADD COLUMN sweep_exempt_until TEXT DEFAULT NULL;

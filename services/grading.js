@@ -1120,6 +1120,48 @@ function determineResult(bet, matchData) {
 // Removed dead `let retries = 3; while(retries>0)` loop — never decremented,
 // effectively always did a single attempt. Backoff now lives in the state
 // machine (grading_state='backoff' + grading_next_attempt_at ladder).
+// ── 7-Day Smart Sweeper policy (Phase 2b-2) ─────────────────
+// SWEEP_DAYS is the long-stale threshold: a pending non-prop bet older than
+// this with no score/confirmation is auto-graded LOSS by runAutoGrade. Value
+// unchanged (7) — hoisted to module scope so the policy helper below and the
+// existing log / grade-reason strings share one definition.
+const SWEEP_DAYS = 7;
+const SWEEP_CUTOFF_MS = SWEEP_DAYS * 24 * 60 * 60 * 1000;
+
+// A recovered bet (services/holdReview.recoverHold) has its created_at
+// backdated to the original slip post time (PR #59), which would make it older
+// than SWEEP_DAYS the instant it lands and sweep it to a FALSE loss before the
+// grader gets a pass. recoverHold stamps bets.sweep_exempt_until = now +
+// GRACE_DAYS (recovery time, NOT backdated); this returns that timestamp while
+// the window is open so the sweeper leaves the bet pending, else null. The
+// comparison runs in SQLite so 'now' uses the same clock + format the marker
+// was written with (datetime('now','+N days') → UTC 'YYYY-MM-DD HH:MM:SS').
+// Reads the column fresh by id, so it does not depend on which SELECT built
+// the `pending` rows.
+function sweepGraceUntil(betId) {
+  const row = db.prepare(
+    "SELECT sweep_exempt_until AS until FROM bets " +
+    "WHERE id = ? AND sweep_exempt_until IS NOT NULL AND datetime('now') < sweep_exempt_until",
+  ).get(betId);
+  return row ? row.until : null;
+}
+
+// Sweep verdict for one pending bet. Returns
+//   { eligible, reason: 'fresh' | 'prop' | 'grace' | 'eligible', graceUntil? }.
+// Encapsulates the age cutoff, the prop exemption, and the Phase 2b-2 recovery
+// grace window so the policy is unit-testable in isolation
+// (tests/sweeper-grace.test.js). `now` is injectable for deterministic tests.
+function evaluateSweep(bet, now = Date.now()) {
+  const age = now - new Date(bet.created_at).getTime();
+  if (age <= SWEEP_CUTOFF_MS) return { eligible: false, reason: 'fresh' };
+  const betType = (bet.bet_type || '').toLowerCase();
+  const desc = (bet.description || '').toLowerCase();
+  if (betType === 'prop' || PROP_KEYWORDS.test(desc)) return { eligible: false, reason: 'prop' };
+  const graceUntil = sweepGraceUntil(bet.id);
+  if (graceUntil) return { eligible: false, reason: 'grace', graceUntil };
+  return { eligible: true, reason: 'eligible' };
+}
+
 async function runAutoGrade(client) {
   if (process.env.AUTOGRADER_DISABLED === 'true') {
     console.log('[AutoGrade] DISABLED via env var — skipping cycle');
@@ -1215,15 +1257,16 @@ async function runAutoGrade(client) {
   }
 
   // ── 7-Day Smart Sweeper ──
-  const SWEEP_DAYS = 7;
-  const sweepCutoff = SWEEP_DAYS * 24 * 60 * 60 * 1000;
+  // Eligibility (age cutoff + prop exemption + Phase 2b-2 recovery grace) lives
+  // in evaluateSweep so it can be unit-tested. SWEEP_DAYS / SWEEP_CUTOFF_MS are
+  // module-level consts now (value unchanged). A recovered bet still inside its
+  // grace window is left pending and logged — see sweepGraceUntil.
   const expiredBets = pending.filter(bet => {
-    const age = Date.now() - new Date(bet.created_at).getTime();
-    if (age <= sweepCutoff) return false;
-    const betType = (bet.bet_type || '').toLowerCase();
-    const desc = (bet.description || '').toLowerCase();
-    if (betType === 'prop' || PROP_KEYWORDS.test(desc)) return false;
-    return true;
+    const verdict = evaluateSweep(bet);
+    if (verdict.reason === 'grace') {
+      console.log(`[Sweeper] Grace skip "${(bet.description || '').slice(0, 40)}" — sweep_exempt_until=${verdict.graceUntil} (recovered bet, not yet sweep-eligible)`);
+    }
+    return verdict.eligible;
   });
 
   for (const bet of expiredBets) {
@@ -2607,6 +2650,7 @@ module.exports = {
     computeEvidenceHash, decideFinalGradeWrite, GRADER_VERSION, // Gate 2
     validateEvidenceQuote, normalizeQuoteWhitespace, resolveGate3Mode, applyGate3,   // Gate 3
     buildGate3WouldFireMarker, writeGradingAudit,      // Gate 3 — B0 would-fire audit persistence
+    evaluateSweep, sweepGraceUntil,                    // Phase 2b-2 — 7-day sweeper grace for recovered bets
   },
   // Exported for tests + observability — these are called from
   // gradePropWithAI internally; importers MUST NOT mutate.
