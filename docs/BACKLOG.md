@@ -10,6 +10,23 @@ posts to per-capper Discord webhook → ingested via existing messageHandler pat
 Live cappers: GuessAndPrayBets (GNP), TeamLockTalk (LockedIn → #lockedin-slips).
 See that repo's docs/CODEMAP.md for env vars, config.json shape, and gotchas.
 
+## ✅ SHIPPED — 2026-06-07/08 (F-12 dedup, F-07 multi-image, F-13 cleanup, scraper-handle mgmt)
+
+### F-12 — Twitter repost content-window dedup (#53, `3cfc694`)
+`services/twitter-handler.js` now drops same-capper / same-content / same-odds Twitter reposts inside a 12h window as `DUPLICATE_REPOST` (new drop reason), after `VALIDATED` and before bet creation. `findRecentRepost` deliberately **ignores the tweet id** (which `buildFingerprint` folds into its key, so id-different reposts otherwise both save). Collapses `bobby__tracker`'s same-day reposts (observed gaps ≤3.25h) while preserving legit different-day repeats (≥2 days) — the headline regression test. Applied to the normal path and per-step to the ladder path. Mapped in docs/CODEMAP.md §Twitter ingest.
+- **F-12 follow-up — dedup leak check (#60, `7fa1bfb`):** `services/dedupLeakCheck.js` — a daily read-only safety net (`reportDedupLeaks`, bot.js cron `0 13 * * *`) that re-derives the exact F-12 match key (imports `normalizeForDedup`, mirrors `findRecentRepost`) and posts one `#admin-log` alert **only if** a repost ever slips past the gate. Never writes. Read-only; not deployed (Fly is manual).
+
+### F-07 — slip-feed multi-image processing (#61, `d0753f1`)
+`handleSlipFeed` processed only `images[0]`; multi-slip messages silently lost bets `[1..n]`. Now loops `selectSlipImages(images)` (pure, exported): all `origin:'attachment'` real slips in order, capped at 4, each with a per-image ingestId (`slipImageIngestId`); embed/preview thumbnails are never multiply-processed. N=1 / embed-only / snapshot-only paths are byte-for-byte unchanged — only N≥2 real attachments changes behavior. Distinct from #40 (which fixed the OCR-first *measurement* count, not the live processing path). Mapped in docs/CODEMAP.md §messageHandler.
+
+### F-13 — dead-function removal (#58, `6ec168e`) — Codex-cleanup F-10 + F-13
+Removed three confirmed def-only, unexported functions from `handlers/messageHandler.js`: `safeReply`, `scanImage`, `handleAutoGrade` (no call sites repo-wide; grep-verified before delete). Deleting `scanImage` orphaned the `parseBetSlipImage` import, so it was also dropped from messageHandler's `require('../services/ai')` — `parseBetSlipImage` itself still lives in and is exported from `services/ai.js`, it just no longer has a caller there.
+- **F-10 — already correct, no change:** the `grading_audit` parlay lookup in `shouldAutoVoidNoData` (`services/grading.js`) was already anchored as `<betId>-leg%` (not the over-matching `<betId>%`); `database.js:160` likewise. Read-and-confirmed; nothing changed.
+- **F-14 — deliberately deferred:** the bootstrap DDL (`CREATE TABLE IF NOT EXISTS …` in `services/database.js`) is **load-bearing and idempotent**, so it was left untouched (out of scope per the cleanup prompt).
+
+### Scraper-handle management + `guess_pray_bets` disabled (#46 `63595cd`, #54 `76e980a`)
+`scraper_handles` (migration 027, seeds 9 handles, `INSERT OR IGNORE` preserves manual edits) is the DB-driven source for the Surface Pro Twitter scraper, read scraper-side via `GET /api/scraper-handles` (`MOBILE_SCRAPER_SECRET`, `enabled=1` only). Operator/dashboard management over the same table: read `GET /api/admin/handles` + write `POST /api/admin/handles/:handle` (`handleSetHandleRoute` — toggles `enabled`/`note` on a seeded row, never inserts; `ADMIN_API_SECRET`). The external dashboard's **Handles tab** is built on these. **Operational note:** `guess_pray_bets` is toggled **disabled** — GNP (GuessAndPrayBets) now arrives via the DubClub bridge (see ✅ Shipped → DubClub split pipeline), not the Twitter scraper. Mapped in docs/CODEMAP.md §routes + §`scraper_handles` management.
+
 ## ✅ SHIPPED - Weekend 1 (Apr 20)
 
 ### MLB StatsAPI Resolver — live in production
@@ -69,6 +86,8 @@ See that repo's docs/CODEMAP.md for env vars, config.json shape, and gotchas.
 **Already shipped (this bug class, partial coverage)**:
 - Fix B (slip-share exemption in `validateParsedBet`, commit `3aadc63`, 2026-05-07): `services/ai.js:1515` defines `slipExempt = slipShape || hasMedia`, gates the entity-mismatch check at `:1573` and the brand checks at `:1598` / `:1608`. Closed the 98-hits/7d `VALIDATOR_ENTITY_MISMATCH` bucket. Fixes the case where Vision DID extract a bet from the image but text-only validator rejected the entities.
 - pipeline_events instrumentation (migrations 018 + 021): verified healthy 2026-05-13 — 1102 rows/24h, GRADE_* drop reasons stamping, zero synthetic `bet_%` ingest_ids, zero orphan-class drops.
+
+**Cross-ref — after-the-fact rescue shipped (Phase 2b-2), does NOT change this drop:** for HRB shares already sitting in the hold queue, on-demand **Recover** (#56, `5da6a49`; `POST /api/admin/holds/:ingestId/recover` → `holdReview.recoverHold`) re-fetches the now-unfurled message and re-runs the existing `vision_slip` extract+create path. Recovered bets are backdated to the slip post time (#59, `705db91`) and given a 3-day `sweep_exempt_until` grace window (#62, `94a973b`) so the 7-Day Sweeper can't false-LOSS them first. **Creation-time `is_bet` gates and `MANUAL_REVIEW_HOLD` staging are untouched** — this rescues holds after they unfurl; it does not alter the `ai_is_bet_false` drop analyzed above. Mechanism mapped in docs/CODEMAP.md (§services/holdReview.js + §7-Day Sweeper + recovery grace).
 
 
 ### OCR-first SGP gate — would-hold measurement (PR 2a shadow) → drop→hold (PR 2b)
