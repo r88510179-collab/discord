@@ -32,7 +32,7 @@ process.env.DB_PATH = DB_FILE;
 
 const { recordStage } = require('../services/pipeline-events');
 const { db, createBetWithLegs, getOrCreateCapper } = require('../services/database');
-const { recoverHold } = require('../services/holdReview');
+const { recoverHold, _recoveredDatesFromTimestamp } = require('../services/holdReview');
 const { handleRecoverRoute } = require('../routes/adminCommands');
 
 // A real capper to satisfy the bets FK (createBetWithLegs enforces it).
@@ -110,10 +110,15 @@ function mockRes() {
 }
 
 // ── injectable seams ─────────────────────────────────────────
-function fakeMessage(images) {
+// A real Discord message exposes `createdTimestamp` (epoch ms == the snowflake's
+// time); recoverHold backdates the recovered bet to it. Default to a fixed past
+// time so happy-path fixtures look like genuinely-old slips.
+const DEFAULT_MSG_TS = Date.parse('2026-06-01T12:00:00.000Z');
+function fakeMessage(images, createdTimestamp) {
   return {
     id: 'm', channel: { id: 'c', name: 'datdude-slips' },
     author: { id: 'u', displayName: 'DatDude', bot: false, displayAvatarURL: () => null },
+    createdTimestamp: createdTimestamp == null ? DEFAULT_MSG_TS : createdTimestamp,
     _images: images || [],
   };
 }
@@ -138,6 +143,17 @@ function depsCreates(rows, images) {
   return {
     client: {},
     fetchMessage: async () => fakeMessage(images || ATTACH_IMG),
+    getImageAttachments: (m) => m._images,
+    extract: extractCreates(rows),
+  };
+}
+
+// Same, but the fetched message carries a specific original post timestamp so
+// the backdating seam can be asserted against a known value.
+function depsCreatesAt(rows, createdTimestamp, images) {
+  return {
+    client: {},
+    fetchMessage: async () => fakeMessage(images || ATTACH_IMG, createdTimestamp),
     getImageAttachments: (m) => m._images,
     extract: extractCreates(rows),
   };
@@ -284,6 +300,70 @@ function depsCreates(rows, images) {
     assert.strictEqual(betsForMessage(f.messageId).length, 1, 'no second bet');
     assert.strictEqual(countStage(f.ingestId, 'MANUAL_REVIEW_RELEASED'), 1, 'hold healed to RELEASED');
     assert.strictEqual(countDecisions(f.ingestId), 1, 'decision row written on self-heal');
+  });
+
+  // ════════════════ DATE BACKDATING (Phase 2b-2 fix) ════════════════
+
+  // ── helper: formats a Discord timestamp into UTC bet date columns ──
+  await run('_recoveredDatesFromTimestamp: UTC YYYY-MM-DD HH:MM:SS + date; null on bad input', async () => {
+    const d = _recoveredDatesFromTimestamp(Date.parse('2026-06-01T18:45:45.123Z'));
+    assert.strictEqual(d.createdAt, '2026-06-01 18:45:45', 'created_at is UTC datetime, drops millis');
+    assert.strictEqual(d.eventDate, '2026-06-01', 'event_date is the UTC date');
+    // invalid / missing → null so recovery still proceeds
+    assert.strictEqual(_recoveredDatesFromTimestamp(undefined), null);
+    assert.strictEqual(_recoveredDatesFromTimestamp(null), null);
+    assert.strictEqual(_recoveredDatesFromTimestamp(0), null);
+    assert.strictEqual(_recoveredDatesFromTimestamp(NaN), null);
+    assert.strictEqual(_recoveredDatesFromTimestamp('not-a-number'), null);
+  });
+
+  // ── CORE: recovered bet carries the ORIGINAL slip post time, not now ──
+  await run('recover backdates created_at + event_date to the original message timestamp', async () => {
+    const f = holdFixture();
+    seedHold(f);
+    const TS = Date.parse('2026-06-01T18:45:45.000Z');
+    const r = await recoverHold(f.ingestId, 'dashboard', depsCreatesAt([{ description: 'Backdate Lakers ML' }], TS));
+    assert.strictEqual(r.status, 'recovered');
+
+    const row = db.prepare('SELECT created_at, event_date FROM bets WHERE id = ?').get(r.betId);
+    assert.strictEqual(row.created_at, '2026-06-01 18:45:45', 'created_at = original post time (UTC), not now');
+    assert.strictEqual(row.event_date, '2026-06-01', 'event_date = date of original timestamp, not NULL');
+  });
+
+  // ── REGRESSION: the hot create path is untouched (created_at=now, event_date=NULL) ──
+  await run('hot-path createBetWithLegs still defaults created_at=now, event_date=NULL', async () => {
+    const before = Date.now();
+    const bet = createBetWithLegs({
+      capper_id: CAPPER_ID, sport: 'NBA', bet_type: 'straight', description: 'Hot path default leg',
+      odds: -110, units: 1, source: 'vision_slip',
+      source_channel_id: 'c_hotpath', source_message_id: `hotpath_${Date.now()}`,
+      review_status: 'needs_review',
+    }, []);
+    const row = db.prepare('SELECT created_at, event_date FROM bets WHERE id = ?').get(bet.id);
+
+    assert.strictEqual(row.event_date, null, 'hot path leaves event_date NULL');
+    assert.ok(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(row.created_at), 'created_at is SQLite datetime shape');
+    const skew = new Date(row.created_at.replace(' ', 'T') + 'Z').getTime() - before;
+    assert.ok(skew >= -2000 && skew <= 60000, `created_at defaults to ~now (skew=${skew}ms), not backdated`);
+  });
+
+  // ── IDEMPOTENCY: a re-run does NOT re-stamp the bet's dates ──
+  await run('re-run recover leaves the original backdated created_at untouched', async () => {
+    const f = holdFixture();
+    seedHold(f);
+    const TS1 = Date.parse('2026-06-01T12:00:00.000Z');
+    const r1 = await recoverHold(f.ingestId, 'dashboard', depsCreatesAt([{ description: 'Restamp Suns ML' }], TS1));
+    assert.strictEqual(r1.status, 'recovered');
+
+    // re-run with a DIFFERENT message timestamp — must be ignored (already_recovered)
+    const TS2 = Date.parse('2026-06-05T23:59:59.000Z');
+    const r2 = await recoverHold(f.ingestId, 'dashboard', depsCreatesAt([{ description: 'Restamp Suns ML' }], TS2));
+    assert.strictEqual(r2.status, 'already_recovered');
+    assert.strictEqual(r2.betId, r1.betId);
+
+    const row = db.prepare('SELECT created_at, event_date FROM bets WHERE id = ?').get(r1.betId);
+    assert.strictEqual(row.created_at, '2026-06-01 12:00:00', 're-run keeps the first post time');
+    assert.strictEqual(row.event_date, '2026-06-01');
   });
 
   // ════════════════ ROUTE: status → HTTP code mapping ════════════════

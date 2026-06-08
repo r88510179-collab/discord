@@ -286,6 +286,57 @@ function _resolveRecoveredHold(id, payload, betIds, actorStr) {
   })();
 }
 
+// Backdating seam (Phase 2b-2 fix). A recovered bet is created days after its
+// slip was posted, so createBet's default created_at=now / event_date=NULL would
+// anchor grading on the RECOVERY date — the AI grader (event_date || created_at)
+// and sportsdata getBetDate (created_at || event_date) then read a date in the
+// future relative to the game and stall on "too soon to grade". Stamp BOTH from
+// the original Discord post time so every grader family anchors correctly.
+//
+// Format mirrors SQLite datetime('now') — UTC 'YYYY-MM-DD HH:MM:SS' — so it
+// matches stored created_at exactly (getBetDate slices [0,10]; the won-race path
+// stores created_at UTC). Returns null for a missing/invalid timestamp so
+// recovery still proceeds (the bet just keeps created_at=now, logged as a warn).
+function _recoveredDatesFromTimestamp(createdTimestamp) {
+  const ms = Number(createdTimestamp);
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  const iso = new Date(ms).toISOString(); // e.g. 2026-06-01T18:45:45.123Z
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(iso)) return null;
+  return {
+    createdAt: `${iso.slice(0, 10)} ${iso.slice(11, 19)}`, // 2026-06-01 18:45:45 (UTC)
+    eventDate: iso.slice(0, 10),                            // 2026-06-01
+  };
+}
+
+// Backdate the recovered bet(s) to the original slip post time. Recover-path
+// ONLY — the hot won-race create path never calls this and still defaults
+// created_at=now / event_date=NULL.
+function _backdateRecoveredBets(id, betIds, message) {
+  const dates = _recoveredDatesFromTimestamp(message && message.createdTimestamp);
+  if (!dates) {
+    console.log(`[HoldRecover] ${id.slice(0, 16)} WARN no valid message.createdTimestamp (${message && message.createdTimestamp}) — bet keeps created_at=now`);
+    return null;
+  }
+  const upd = db.prepare('UPDATE bets SET created_at = ?, event_date = ? WHERE id = ?');
+  db.transaction(() => { for (const bid of betIds) upd.run(dates.createdAt, dates.eventDate, bid); })();
+  console.log(`[HoldRecover] ${id.slice(0, 16)} backdated ${betIds.length} bet(s) created_at=${dates.createdAt} event_date=${dates.eventDate} (msg ts=${message.createdTimestamp})`);
+  return dates;
+}
+
+// Phase 2b-2: recovered bets are backdated to the original slip time (#59),
+// which would trip the 7-Day Smart Sweeper (services/grading.js runAutoGrade)
+// immediately and auto-grade them a FALSE loss before the grader runs. Stamp a
+// self-expiring grace marker measured from the RECOVERY moment (NOT backdated)
+// so the sweeper leaves the bet pending for a few real grading cycles. Set on
+// EVERY recovery, independent of whether the backdate succeeded — the column
+// defaults NULL everywhere else, so only recovered bets get the window.
+const GRACE_DAYS = 3;
+function _graceMarkRecoveredBets(id, betIds) {
+  const upd = db.prepare("UPDATE bets SET sweep_exempt_until = datetime('now', ?) WHERE id = ?");
+  db.transaction(() => { for (const bid of betIds) upd.run(`+${GRACE_DAYS} days`, bid); })();
+  console.log(`[HoldRecover] ${id.slice(0, 16)} grace-marked ${betIds.length} bet(s) sweep_exempt_until=now+${GRACE_DAYS}d`);
+}
+
 async function recoverHold(ingestId, actor, deps = {}) {
   const id = String(ingestId == null ? '' : ingestId).trim();
   if (!id) return { ok: false, status: 'not_found', ingestId: id };
@@ -370,8 +421,11 @@ async function recoverHold(ingestId, actor, deps = {}) {
     return { ok: false, status: 'no_bet_found', ingestId: id }; // leave the hold open
   }
 
-  // 8. created a bet → resolve the hold (atomic stage advance + decision row)
+  // 8. backdate the recovered bet(s) to the original slip post time, THEN
+  //    resolve the hold (atomic stage advance + decision row).
   const betIds = created.map(b => b.id);
+  _backdateRecoveredBets(id, betIds, message);
+  _graceMarkRecoveredBets(id, betIds); // Phase 2b-2: self-expiring sweeper-grace window
   _resolveRecoveredHold(id, payload, betIds, actorStr);
   return { ok: true, status: 'recovered', ingestId: id, betId: betIds[0], betIds };
 }
@@ -579,4 +633,4 @@ async function handleReleaseModal(interaction, ingestId) {
   }
 }
 
-module.exports = { handleHoldInteraction, dismissHold, recoverHold };
+module.exports = { handleHoldInteraction, dismissHold, recoverHold, _recoveredDatesFromTimestamp, _graceMarkRecoveredBets, GRACE_DAYS };
