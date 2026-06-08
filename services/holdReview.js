@@ -323,6 +323,20 @@ function _backdateRecoveredBets(id, betIds, message) {
   return dates;
 }
 
+// Phase 2b-2: recovered bets are backdated to the original slip time (#59),
+// which would trip the 7-Day Smart Sweeper (services/grading.js runAutoGrade)
+// immediately and auto-grade them a FALSE loss before the grader runs. Stamp a
+// self-expiring grace marker measured from the RECOVERY moment (NOT backdated)
+// so the sweeper leaves the bet pending for a few real grading cycles. Set on
+// EVERY recovery, independent of whether the backdate succeeded — the column
+// defaults NULL everywhere else, so only recovered bets get the window.
+const GRACE_DAYS = 3;
+function _graceMarkRecoveredBets(id, betIds) {
+  const upd = db.prepare("UPDATE bets SET sweep_exempt_until = datetime('now', ?) WHERE id = ?");
+  db.transaction(() => { for (const bid of betIds) upd.run(`+${GRACE_DAYS} days`, bid); })();
+  console.log(`[HoldRecover] ${id.slice(0, 16)} grace-marked ${betIds.length} bet(s) sweep_exempt_until=now+${GRACE_DAYS}d`);
+}
+
 async function recoverHold(ingestId, actor, deps = {}) {
   const id = String(ingestId == null ? '' : ingestId).trim();
   if (!id) return { ok: false, status: 'not_found', ingestId: id };
@@ -411,6 +425,7 @@ async function recoverHold(ingestId, actor, deps = {}) {
   //    resolve the hold (atomic stage advance + decision row).
   const betIds = created.map(b => b.id);
   _backdateRecoveredBets(id, betIds, message);
+  _graceMarkRecoveredBets(id, betIds); // Phase 2b-2: self-expiring sweeper-grace window
   _resolveRecoveredHold(id, payload, betIds, actorStr);
   return { ok: true, status: 'recovered', ingestId: id, betId: betIds[0], betIds };
 }
@@ -618,4 +633,4 @@ async function handleReleaseModal(interaction, ingestId) {
   }
 }
 
-module.exports = { handleHoldInteraction, dismissHold, recoverHold, _recoveredDatesFromTimestamp };
+module.exports = { handleHoldInteraction, dismissHold, recoverHold, _recoveredDatesFromTimestamp, _graceMarkRecoveredBets, GRACE_DAYS };
