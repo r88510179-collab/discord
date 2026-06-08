@@ -10,7 +10,7 @@ posts to per-capper Discord webhook → ingested via existing messageHandler pat
 Live cappers: GuessAndPrayBets (GNP), TeamLockTalk (LockedIn → #lockedin-slips).
 See that repo's docs/CODEMAP.md for env vars, config.json shape, and gotchas.
 
-## ✅ SHIPPED — 2026-06-07/08 (F-12 dedup, F-07 multi-image, F-13 cleanup, scraper-handle mgmt)
+## ✅ SHIPPED — 2026-06-07/08 (F-12 dedup, F-07 multi-image, F-13 cleanup, scraper-handle mgmt, Phase 2b-2 recover+grace)
 
 ### F-12 — Twitter repost content-window dedup (#53, `3cfc694`)
 `services/twitter-handler.js` now drops same-capper / same-content / same-odds Twitter reposts inside a 12h window as `DUPLICATE_REPOST` (new drop reason), after `VALIDATED` and before bet creation. `findRecentRepost` deliberately **ignores the tweet id** (which `buildFingerprint` folds into its key, so id-different reposts otherwise both save). Collapses `bobby__tracker`'s same-day reposts (observed gaps ≤3.25h) while preserving legit different-day repeats (≥2 days) — the headline regression test. Applied to the normal path and per-step to the ladder path. Mapped in docs/CODEMAP.md §Twitter ingest.
@@ -26,6 +26,13 @@ Removed three confirmed def-only, unexported functions from `handlers/messageHan
 
 ### Scraper-handle management + `guess_pray_bets` disabled (#46 `63595cd`, #54 `76e980a`)
 `scraper_handles` (migration 027, seeds 9 handles, `INSERT OR IGNORE` preserves manual edits) is the DB-driven source for the Surface Pro Twitter scraper, read scraper-side via `GET /api/scraper-handles` (`MOBILE_SCRAPER_SECRET`, `enabled=1` only). Operator/dashboard management over the same table: read `GET /api/admin/handles` + write `POST /api/admin/handles/:handle` (`handleSetHandleRoute` — toggles `enabled`/`note` on a seeded row, never inserts; `ADMIN_API_SECRET`). The external dashboard's **Handles tab** is built on these. **Operational note:** `guess_pray_bets` is toggled **disabled** — GNP (GuessAndPrayBets) now arrives via the DubClub bridge (see ✅ Shipped → DubClub split pipeline), not the Twitter scraper. Mapped in docs/CODEMAP.md §routes + §`scraper_handles` management.
+
+### Phase 2b-2 — on-demand hold Recover + backdate + sweeper-grace (#56 `5da6a49`, #59 `705db91`, #62 `94a973b`)
+On-demand **Recover** for slip holds that were posted before their share-card unfurled (the HRB grade-before-unfurl race): `POST /api/admin/holds/:ingestId/recover` → `holdReview.recoverHold` re-fetches the now-unfurled message and re-runs the existing `vision_slip` extract+create path. Idempotent on `bets.source_message_id`; **creation-time `is_bet` gates and the hot won-race create path are untouched** (this rescues holds after they unfurl, it does not change any upstream drop). Two follow-ons make the rescued bet gradeable instead of instantly false-LOSSed:
+- **Backdate (#59):** `recoverHold` backdates the recovered bet's `created_at`+`event_date` to the original slip post time so every grader family anchors the real game date (holdReview-only; the hot create path still defaults `created_at=now`/`event_date=NULL`).
+- **Sweeper-grace (#62, migration 028):** because that backdate would make the bet instantly older than `SWEEP_DAYS` (7), `recoverHold` also stamps `bets.sweep_exempt_until = datetime('now','+3 days')` (the **recovery** moment, NOT backdated). The 7-Day Smart Sweeper (`grading.js runAutoGrade` → `evaluateSweep`) leaves any pending bet still inside its window pending (logged `[Sweeper] Grace skip …`) instead of auto-LOSS; past the window it sweeps normally. `sweep_exempt_until` defaults NULL for every normal bet (`evaluateSweep` reason `fresh`/`prop`/`grace`/`eligible`).
+
+Mapped in docs/CODEMAP.md §services/holdReview.js + §7-Day Sweeper + recovery grace + §routes. The P1 HRB item above cross-refs why this rescues already-held slips without changing the upstream `ai_is_bet_false` drop.
 
 ## ✅ SHIPPED - Weekend 1 (Apr 20)
 
@@ -938,6 +945,8 @@ The-odds-api.com free tier exhausted 2026-05-14 (498/500 credits used, returning
 
 ### Bing scraper returns generic news (not just 402)
 Memory #30. `services/grading.js:1369-1404` parses `class="b_algo"` which Microsoft changed. Returns HTTP 200 with MLB.com/ESPN homepage HTML, not game recaps. Phase 1 (commit 9a19ba6) mitigates for MLB/NBA/NHL. Soccer/golf/tennis/MMA still affected. Fix: defensive multi-selector parsing + generic-news detector that returns "no reliable evidence" → PENDING instead of forcing a bad parse.
+
+**Symptom ↔ cause — "bets stuck pending / everything voids":** this is a **search-layer** symptom, not a grader bug. When the backends here return garbage or no usable evidence, the grader correctly emits repeated PENDING, and `shouldAutoVoidNoData` (5+ no-data PENDINGs over 12h, `services/grading.js`) then converts those to VOID — so a broad search degradation reads downstream as mass stuck-pending followed by mass voids. The live driver is the Bing generic-news return above (non-MLB/NBA/NHL sports); Brave-402 is already resolved (see that item above). Lever is the search layer, not the grader. Distinct from the "Unknown-sport straight voids" bucket above, which is missing sport classification rather than backend health.
 
 ### Resolver sidecar orphaned from grading hot path
 After commit 9a19ba6 (Phase 1), `services/resolver.js` no longer called from `gradeSingleBet`. Still required by `/admin snapshot` (commands/admin.js:763) and `/admin resolver-health` (commands/admin.js:999). zonetracker-resolver Fly sidecar app last deployed Apr 20 2026, paying compute for monitoring data that's now meaningless. Cleanup: repoint admin commands at sportsdata adapter health, then delete resolver.js + shut down sidecar.
