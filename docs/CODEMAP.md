@@ -377,6 +377,17 @@ Pre-filter drops between RECEIVED and PARSED emit DROPPED (not a named stage): `
 
 **F-12 dedup leak check — daily read-only safety net (`services/dedupLeakCheck.js`, #60).** Post-hoc detector for reposts that slip PAST the ingest-time F-12 gate. `findDedupLeaks({db, lookbackHours=24, windowHours=12})` (L39) imports `normalizeForDedup` from `twitter-handler.js` and mirrors `findRecentRepost`'s match key **exactly** (same capper + bet_type + `source IN ('twitter_text','twitter_vision')` + normalized desc + null-aware odds, two `created_at` within 12h) so the detector can't drift from the gate. One SELECT over the last lookback+window hours, grouped by `(capper_id, bet_type)`; each recent bet B with an earlier matching A inside the window = one leak (the repost F-12 should have dropped), paired with the nearest A. `reportDedupLeaks(client)` (L123) is **read-only** — logs `[DedupLeak] scan clean` when empty, else posts ONE compact alert to `#admin-log` via `ADMIN_LOG_CHANNEL_ID` (no hardcoded id); self-swallowing so a bad scan can't kill the cron tick. **Never writes to `bets`.** bot.js wiring: import L48; `cron.schedule('0 13 * * *', …)` (9 AM ET, off the recap's 12:00 UTC slot) → `reportDedupLeaks(client)` at L765 (scheduler L762).
 
+### services/dedupLeakCheck.js (F-12 leak-check #60, `7fa1bfb`)
+
+> File/line map for the daily safety net narrated in §Twitter ingest just above. Imports `normalizeForDedup` from `services/twitter-handler.js` (it does **not** re-implement it) so the detector can never drift from `findRecentRepost`. **Read-only — never writes to `bets`.** 10 cases in `tests/dedup-leak-check.test.js`.
+
+| What | Line(s) |
+| --- | --- |
+| `findDedupLeaks({ db, lookbackHours=24, windowHours=12 })` — pure read. One SELECT over `source IN ('twitter_text','twitter_vision')` across the last `lookback+window` hours, grouped by `(capper_id, bet_type)`; flags each recent bet B that has an earlier `normalizeForDedup`-equal / null-aware-equal-odds A inside the 12h window (pairs the nearest A). `db` injectable for tests. Exported. | 39 |
+| `reportDedupLeaks(client)` — daily cron entrypoint. Empty → `console.log('[DedupLeak] scan clean …')`; else ONE compact alert to `#admin-log` via `ADMIN_LOG_CHANNEL_ID` (no hardcoded id), truncated under Discord's 2000-char cap. Self-swallowing, so a bad scan can't kill the cron tick. Exported. | 123 |
+| `module.exports = { findDedupLeaks, reportDedupLeaks }` | 178 |
+| bot.js wiring — `require` L48; `cron.schedule('0 13 * * *', …)` (9 AM ET) L762 → `reportDedupLeaks(client)` L765 (`logCronRun('dedup-leak-check', …)` L766) | `bot.js:48` / 762 / 765 |
+
 ## Migrations
 
 | Mig | What it adds |
