@@ -61,6 +61,7 @@ PK is `id` (TEXT, hex hash — **NOT** `bet_id`, common memory error).
 | drop_reason_set_at | INTEGER | epoch sec |
 | grader_version | TEXT | mig 026 (Gate 2) — code-constant grading-logic version that produced the final grade |
 | evidence_hash | TEXT | mig 026 (Gate 2) — sha256 of canonicalized grade evidence; idempotency key with grader_version |
+| sweep_exempt_until | TEXT | mig 028 (Phase 2b-2) — self-expiring sweeper-grace marker. `datetime('now','+3 days')` stamped by `recoverHold`; NULL for every normal bet. While set + future, the 7-Day Sweeper leaves the bet pending instead of auto-LOSS. See §7-Day Sweeper + recovery grace |
 
 ### `pipeline_events`
 
@@ -164,6 +165,10 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 | sendHoldReviewEmbed call (ai_indeterminate) | 1188 |
 | Multi-image merge | 960 (loop), 995–1020 (merge) |
 | `getImageAttachments` — collects slip images; tags `origin` (`'attachment'` = real `message.attachments[]`/forwarded snapshot upload; `'embed'` = share-card/link-preview thumbnail incl. `message.embeds[].image`/`.thumbnail`). Exported. | 413 |
+| `SLIP_IMAGE_CAP` (= 4) | 584 |
+| `selectSlipImages(images, {cap})` — **F-07 (#61)**: picks which images `handleSlipFeed` feeds to vision. Any `origin:'attachment'` present → those in order, capped at 4 (the fix); else `[images[0]]` (legacy single-image / embed-only behavior, byte-for-byte). Embed/preview thumbnails are never multiply-processed. Pure + exported. | 590 |
+| `slipImageIngestId(base, i)` — first selected image keeps the base ingestId (single-image path unchanged, incl. its pipeline-events/holds id); each subsequent → `${base}-img${i}` (i≥1) to avoid event/hold id collisions. Pure + exported. | 600 |
+| `handleSlipFeed` (gated to `SLIP_FEED_CHANNEL_ID`) — loops `selectSlipImages(images)`, one `processSlipImage` per image with the same other args; overflow past the cap is `console.warn`-only (no new drop enum). Only N≥2 real attachments changes behavior. | 605 (fn); per-image loop 635 |
 | OCR-first slip seam (`processAggregatedMessage`): `imageCount = ocrFirstWiring.eligibleImageCount(combinedImages)` — counts REAL attachments only so an HRB slip+embed = 1 (scope=single), a true 2-attachment post = 2. Fails safe to total. | 1076 (guard), 1077 (call), 1084 (count); helper `services/ocrFirstWiring.js:176` |
 | ADMIN_LOG send (path B) | 1313 (guard L1311) |
 
@@ -237,34 +242,57 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 | nba.js | ESPN NBA public API adapter (`site.api.espn.com`) — unofficial, no auth |
 
 ### services/holdReview.js
-> Line numbers refreshed 2026-06-07 (Phase 2b-2 Recover): the transport-agnostic
-> `recoverHold` core + helpers (~210 lines) were inserted AFTER `dismissHold`
-> and before `handleDismiss`, shifting everything from `handleDismiss` down by
-> ~+233. (Prior: 2026-06-06 Phase 2b-1 Dismiss inserted `dismissHold` ~+92.)
+> Line numbers refreshed 2026-06-08 (Phase 2b-2 #59 backdate + #62 sweeper-grace):
+> `_backdateRecoveredBets` (#59) and `GRACE_DAYS`/`_graceMarkRecoveredBets` (#62)
+> were inserted between `_resolveRecoveredHold` and `recoverHold`, shifting
+> `recoverHold` and everything below it down by ~+51. (Prior: 2026-06-07 Phase 2b-2
+> Recover inserted `recoverHold` core + helpers ~+233; 2026-06-06 Phase 2b-1
+> Dismiss inserted `dismissHold` ~+92.)
 
 | What | Line(s) |
 | --- | --- |
 | `handleHoldInteraction` (button handler) | 21 |
 | **`dismissHold(ingestId, actor)`** — exported transport-agnostic Dismiss core (Phase 2b-1). Interaction-free. One `db.transaction`: (1) `recordStage(MANUAL_REVIEW_DISMISSED, {dismissed_by:actor})` + (2) `hold_review_decisions` row `human_decision='dismissed'`, actor→`reviewed_by`. Idempotent via latest-of-3-stages: `not_found`/`already_released`(refuse)/`already_dismissed`(no-op)/`dismissed`. Never touches a bet. | 84 |
-| **`recoverHold(ingestId, actor, deps)`** — exported transport-agnostic On-demand Unfurl Recovery core (Phase 2b-2). Async, interaction-free. For the grade-before-unfurl race: re-fetches the held (now-unfurled) message and runs the EXISTING vision_slip path (`_defaultExtract` → `resolveCapper`+`getOrCreateCapper` → `messageHandler.processSlipImage` per `origin:'attachment'` image → `createBetWithLegs(source:'vision_slip')`); **no raw bet SQL, creation-time is_bet gates untouched**. Idempotent on `bets.source_message_id` — checked BEFORE the terminal-stage check so a re-run is `already_recovered`, not `already_resolved`; self-heals a bet-created-but-hold-open partial run. Resolves via `MANUAL_REVIEW_RELEASED` + `hold_review_decisions` row (`human_decision='recovered'`, `source_label='unfurl_recovery'`, `reparse_input_source='image'`) in one `db.transaction` (helper `_resolveRecoveredHold` L243). Statuses: `not_found`/`already_recovered`/`already_resolved`/`message_unreachable`/`no_image_yet`/`no_bet_found`/`recovered`. Discord fetch + extraction injectable via `deps` for tests; prod lazy-requires the (already-cached) messageHandler. | 289 |
-| `dismissHold` / `recoverHold` export | 582 |
-| Dismiss flow | 383 (`handleDismiss` — thin wrapper calling `dismissHold(ingestId, interaction.user.tag)`); routed L34 |
-| Release modal | 413 (`ModalBuilder`, customId `hold:releasemodal:`); `handleReleaseModal` L456 |
+| **`recoverHold(ingestId, actor, deps)`** — exported transport-agnostic On-demand Unfurl Recovery core (Phase 2b-2). Async, interaction-free. For the grade-before-unfurl race: re-fetches the held (now-unfurled) message and runs the EXISTING vision_slip path (`_defaultExtract` → `resolveCapper`+`getOrCreateCapper` → `messageHandler.processSlipImage` per `origin:'attachment'` image → `createBetWithLegs(source:'vision_slip')`); **no raw bet SQL, creation-time is_bet gates untouched**. Idempotent on `bets.source_message_id` — checked BEFORE the terminal-stage check so a re-run is `already_recovered`, not `already_resolved`; self-heals a bet-created-but-hold-open partial run. Resolves via `MANUAL_REVIEW_RELEASED` + `hold_review_decisions` row (`human_decision='recovered'`, `source_label='unfurl_recovery'`, `reparse_input_source='image'`) in one `db.transaction` (helper `_resolveRecoveredHold` L251). On success runs `_backdateRecoveredBets` (#59) then `_graceMarkRecoveredBets` (#62) before resolving. Statuses: `not_found`/`already_recovered`/`already_resolved`/`message_unreachable`/`no_image_yet`/`no_bet_found`/`recovered`. Discord fetch + extraction injectable via `deps` for tests; prod lazy-requires the (already-cached) messageHandler. | 340 |
+| `_backdateRecoveredBets(id, betIds, message)` (#59) — backdates the recovered bet's `created_at`+`event_date` to the original slip post time so every grader family anchors the real game date; holdReview-only, hot path untouched. Called from `recoverHold` L427. | 314 |
+| `GRACE_DAYS=3` + `_graceMarkRecoveredBets(id, betIds)` (#62) — `UPDATE bets SET sweep_exempt_until = datetime('now','+3 days')` (recovery moment, NOT backdated) on every recovery, right after the backdate (called L428). Self-expiring 7-Day-Sweeper grace; both exported. See §7-Day Sweeper + recovery grace. | 333 / 334 |
+| `dismissHold` / `recoverHold` / `GRACE_DAYS` / `_graceMarkRecoveredBets` export | 636 |
+| Dismiss flow | 437 (`handleDismiss` — thin wrapper calling `dismissHold(ingestId, interaction.user.tag)`); routed L34 |
+| Release modal | 467 (`ModalBuilder`, customId `hold:releasemodal:`); `handleReleaseModal` L510 |
 | SELECT WHERE stage='MANUAL_REVIEW_HOLD' query (`loadHoldEvent`, reused by `recoverHold`) | 42–47 (reads `pipeline_events.payload`) |
-| `createBetWithLegs(source='manual_hold_release')` call (Release modal) | 503 (source field L512) |
-| `postNewPick` call | 531 (import L13) |
+| `createBetWithLegs(source='manual_hold_release')` call (Release modal, `handleReleaseModal` L510) | source field L566 |
+| `postNewPick` call | 585 (import L13) |
 
 > **Dismiss `human_decision` value:** the live writer is `'dismissed'` (past tense),
 > set by `scripts/review-holds.js:596` and now `holdReview.dismissHold` — NOT
 > `'dismiss'` as the Enums section below states. The column has no CHECK; the only
 > producers agree on `'dismissed'`/`'released'`/`'released_with_edits'`/`'skipped'`.
 
+### 7-Day Sweeper + recovery grace (#62)
+
+The grading cron's **7-Day Smart Sweeper** auto-grades any pending **non-prop** bet older than `SWEEP_DAYS` (7) as a LOSS. `recoverHold` backdates a recovered bet's `created_at` to the slip post time (#59), which would make it instantly sweep-eligible → false LOSS before the grader runs. Migration **028** adds `bets.sweep_exempt_until` (TEXT, NULL default) as a self-expiring grace marker the sweeper honors.
+
+| What | Line(s) |
+| --- | --- |
+| `PROP_KEYWORDS` (prop-exemption regex) | `services/grading.js:735` |
+| `SWEEP_DAYS=7` / `SWEEP_CUTOFF_MS` (hoisted to module scope) | `services/grading.js:1128` / 1129 |
+| `sweepGraceUntil(betId)` — returns `sweep_exempt_until` iff set AND `datetime('now') < sweep_exempt_until` (comparison runs in SQLite, same clock/format the marker was written with), else null; reads the column fresh by id | `services/grading.js:1141` |
+| `evaluateSweep(bet, now)` — pure policy → `{eligible, reason: 'fresh'\|'prop'\|'grace'\|'eligible'}` (age cutoff → prop exemption → grace check); `now` injectable, unit-tested (`tests/sweeper-grace.test.js`) | `services/grading.js:1154` |
+| `runAutoGrade(client)` — calls `evaluateSweep`; a `reason='grace'` bet is left **pending** (skip, never drop/finalize) + logged `[Sweeper] Grace skip …` (L1267). Past the window it sweeps normally. Exports `evaluateSweep`/`sweepGraceUntil` L2653 | `services/grading.js:1165` |
+| `GRACE_DAYS=3` + `_graceMarkRecoveredBets` — stamp `sweep_exempt_until = datetime('now','+3 days')` on every recovery (recovery moment, NOT backdated) | `services/holdReview.js:333` / 334 (see holdReview.js above) |
+
+`migrations/028_add_sweep_exempt_until.sql`: `ALTER TABLE bets ADD COLUMN sweep_exempt_until TEXT DEFAULT NULL;` — no index (the sweeper probes the column by PK). NULL = "no grace, sweep normally" (every existing row + every normal bet). Grace is measured from recovery, so a genuinely un-gradeable recovered bet still sweeps once the 3 days lapse.
+
 ### routes/ — Admin HTTP API
 | What | Line(s) |
 | --- | --- |
 | `routes/adminAuth.js` | `adminAuth` fail-closed Bearer middleware + `safeEqual` (extracted from admin.js so the Phase 2b write router reuses the identical check). 503 if `ADMIN_API_SECRET` unset, 401 missing header, 403 mismatch. |
-| `routes/admin.js` | READ-ONLY `/api/admin/*` (Phase 2a-1): GET `/holds` L84, `/bets`, `/handles`, `/logs`; catch-all 404. Now imports `adminAuth` from `./adminAuth`. |
-| `routes/adminCommands.js` | WRITE `/api/admin/*` (Phase 2b): `POST /holds/:ingestId/dismiss` → `dismissHold` (200 dismissed/already_dismissed, 409 already_released, 404 not_found, 400 malformed); `POST /holds/:ingestId/recover` (Phase 2b-2) → `recoverHold` (200 recovered/already_recovered, 409 already_resolved, 404 not_found, 422 no_image_yet/no_bet_found, 502 message_unreachable, 400 malformed; `handleRecoverRoute(req,res,deps)` — `deps` is a test-only injection seam, prod route passes none); `POST /handles/:handle` → scraper-handle enable toggle. All `handle*Route` fns exported for unit tests. **Mounted in bot.js BEFORE the read router** so its catch-all 404 can't intercept the POSTs. |
+| `routes/admin.js` | READ-ONLY `/api/admin/*` (Phase 2a-1, `ADMIN_API_SECRET` via `adminAuth`): GET `/holds` L49, `/bets` L129, `/handles` L172 (all `scraper_handles` rows → `{count, handles:[{handle,enabled,added_at,note}]}`, ordered by handle), `/logs` L189 (tails `#admin-log`); catch-all 404. Now imports `adminAuth` from `./adminAuth`. Mounted bot.js L28. |
+| `routes/adminCommands.js` | WRITE `/api/admin/*` (Phase 2b, `ADMIN_API_SECRET` via `adminAuth`): `POST /holds/:ingestId/dismiss` → `dismissHold` (200 dismissed/already_dismissed, 409 already_released, 404 not_found, 400 malformed; `handleDismissRoute` L52, route L76); `POST /holds/:ingestId/recover` (Phase 2b-2) → `recoverHold` (200 recovered/already_recovered, 409 already_resolved, 404 not_found, 422 no_image_yet/no_bet_found, 502 message_unreachable, 400 malformed; `handleRecoverRoute(req,res,deps)` L95, route L119 — `deps` is a test-only injection seam, prod route passes none); `POST /handles/:handle` → `handleSetHandleRoute` (L134, route L180): toggles a **seeded** `scraper_handles` row's `enabled` (int `0/1` or bool, required) + optional `note` (`COALESCE`; omitted leaves it); **never inserts** → unknown handle 404; 200 updated / 400 malformed / 500 error. All `handle*Route` fns exported for unit tests. **Mounted in bot.js L22 BEFORE the read router (L28)** so its catch-all 404 can't intercept the POSTs. |
+
+> **`scraper_handles` management (mig 027; #46 table+seed+scraper read, #54 admin write toggle).** One table, two authed surfaces:
+> - **Operator / dashboard** — `ADMIN_API_SECRET`: read `GET /api/admin/handles` (`routes/admin.js:172`, all rows) + write `POST /api/admin/handles/:handle` (`routes/adminCommands.js:134`, toggle `enabled`/`note` on a seeded row). The external dashboard's **Handles tab** is built on these two.
+> - **Scraper-facing** — `MOBILE_SCRAPER_SECRET` (a *separate* secret): read-only `GET /api/scraper-handles` (`routes/api.js:68`) → just the `enabled = 1` handle names; the Surface Pro poller reads it each cycle. Toggling `enabled=0` is how a handle is turned off (e.g. `guess_pray_bets` — GNP now arrives via the DubClub bridge, not the scraper). Seed (`migrations/027_scraper_handles.sql`, 9 handles, `INSERT OR IGNORE`) preserves manual `enabled`/`note` edits across restarts.
 
 ### services/pipeline-events.js
 | What | Line(s) |
@@ -347,6 +375,8 @@ Pre-filter drops between RECEIVED and PARSED emit DROPPED (not a named stage): `
 
 **Why the window keys on `bets.created_at` (ingestion time), not the tweet's post time.** `created_at` is the schema default `datetime('now')` stamped at insert — verified: `bets.created_at TEXT DEFAULT (datetime('now'))` (`migrations/001_initial_schema.sql:34`) and the `INSERT INTO bets` column list in `createBetWithLegs` (`services/database.js:183`) omits `created_at`. This is sound because the scraper forwards only a tight recent page per poll (NORMAL mode pulls the 10 most-recent per handle — see the scraper README), so ingestion time tracks post time closely. **Documented edge:** a manual `BACKFILL=true` scraper run against a low-frequency, cursorless NEW handle pulls a deeper page at once, which could collapse a legitimately different-day repeat into a single 12h window — auditable after the fact via `drop_reason='DUPLICATE_REPOST'` in `pipeline_events`.
 
+**F-12 dedup leak check — daily read-only safety net (`services/dedupLeakCheck.js`, #60).** Post-hoc detector for reposts that slip PAST the ingest-time F-12 gate. `findDedupLeaks({db, lookbackHours=24, windowHours=12})` (L39) imports `normalizeForDedup` from `twitter-handler.js` and mirrors `findRecentRepost`'s match key **exactly** (same capper + bet_type + `source IN ('twitter_text','twitter_vision')` + normalized desc + null-aware odds, two `created_at` within 12h) so the detector can't drift from the gate. One SELECT over the last lookback+window hours, grouped by `(capper_id, bet_type)`; each recent bet B with an earlier matching A inside the window = one leak (the repost F-12 should have dropped), paired with the nearest A. `reportDedupLeaks(client)` (L123) is **read-only** — logs `[DedupLeak] scan clean` when empty, else posts ONE compact alert to `#admin-log` via `ADMIN_LOG_CHANNEL_ID` (no hardcoded id); self-swallowing so a bad scan can't kill the cron tick. **Never writes to `bets`.** bot.js wiring: import L48; `cron.schedule('0 13 * * *', …)` (9 AM ET, off the recap's 12:00 UTC slot) → `reportDedupLeaks(client)` at L765 (scheduler L762).
+
 ## Migrations
 
 | Mig | What it adds |
@@ -359,6 +389,8 @@ Pre-filter drops between RECEIVED and PARSED emit DROPPED (not a named stage): `
 | 024 | parlay_legs_dedup_events |
 | 025 | hold_review_decisions |
 | 026 | bets.grader_version + bets.evidence_hash (Gate 2 idempotency) + idx_bets_grade_idem |
+| 027 | scraper_handles (DB-driven Twitter scraper handle list; seeds 9 handles, `INSERT OR IGNORE`) |
+| 028 | bets.sweep_exempt_until (Phase 2b-2 sweeper-grace for recovered bets) |
 
 ## Database — quirky things
 
