@@ -101,6 +101,19 @@ git push origin <branch>
 
 The output must show "main -> main" or similar success line. If it shows "403", "permission denied", or "rejected", the push failed and nothing landed. Stop and report the error rather than retrying silently.
 
+### 4a. Working tree is `main` and clean (pre-build gate)
+
+`flydeploy` runs `fly deploy --local-only`, which builds the image from the **current working tree** — not from `origin/main` and not from any branch you pushed. So immediately before building, confirm you are actually on `main` with nothing extra in the tree:
+
+```bash
+git branch --show-current   # must print exactly: main
+git status --porcelain      # must print NOTHING (no staged, unstaged, or untracked files)
+```
+
+If `git branch --show-current` prints anything other than `main`, or `git status --porcelain` prints any line, **stop and fix it before deploying.** Otherwise the build ships whatever is in the working tree — a feature branch's code, or a stray uncommitted/untracked file — instead of the merged `main` you intend.
+
+This is distinct from Step 5's "confirm the merge is local" check: that one catches `main` failing to advance after a merge; this one catches the working tree not being `main` at all. **Near-miss this prevents:** a chained `git checkout main && git pull && fly deploy` shipped from `feat/dedup-leak-check` because the `git checkout main` had aborted on an untracked-file conflict — HEAD never moved to `main`, so `--local-only` built the feature branch's tree. A one-line `git branch --show-current` before the build would have caught it.
+
 ### 5. Fly deploy ran and succeeded
 
 **Before deploying, confirm the merge is local:** `git checkout main && git pull` MUST show main advancing (e.g. `05400f3..db52a8c`). If it says **"Already up to date"** and you just merged a PR, the merge isn't on your local main — **stop and re-pull/merge**. `fly deploy` builds from local `main`, so deploying here ships the *prior* state. After deploy, verify the change is actually in the running image (`fly ssh console -C 'ls /app/<changed-file>'` or `grep -c <new-symbol> /app/<file>`) before trusting it.
