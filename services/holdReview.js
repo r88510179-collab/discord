@@ -197,6 +197,45 @@ async function _defaultFetchMessage(client, channelId, messageId) {
   return channel.messages.fetch(messageId);
 }
 
+// Phase 2b-2 (fetch-retry): the recover fetch is the only network hop in this
+// path. A SINGLE transient channels.fetch / messages.fetch miss — a null result
+// OR a thrown error — would otherwise bail the whole recovery with
+// `message_unreachable`, which in a multi-hold drain silently drops slips that a
+// retry a moment later would have recovered. So retry the fetch a few times with
+// a short backoff before giving up. The backoff sits BETWEEN attempts, so
+// FETCH_RETRY_BACKOFF_MS has one fewer entry than FETCH_MAX_ATTEMPTS (the last
+// attempt is not followed by a wait). This wraps ONLY the fetch — the no-client
+// short-circuit, idempotency, backdate, grace and resolution logic are untouched.
+const FETCH_MAX_ATTEMPTS = 3;
+const FETCH_RETRY_BACKOFF_MS = [500, 1500];
+const _sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Fetch the held message through the (injectable) fetchMessage seam, retrying
+// transient misses: BOTH a null return and a thrown error count as a miss and
+// trigger a retry. Returns the message, or null once all attempts are spent (the
+// caller then returns message_unreachable, exactly as the single-shot fetch did).
+// `sleep` is injectable so tests can exercise the retry path with no real delay.
+async function _fetchMessageWithRetry(fetchMessage, client, channelId, messageId, id, sleep) {
+  for (let attempt = 1; attempt <= FETCH_MAX_ATTEMPTS; attempt++) {
+    let message = null;
+    let errMsg = null;
+    try {
+      message = await fetchMessage(client, channelId, messageId);
+    } catch (err) {
+      errMsg = (err && err.message) ? err.message : String(err);
+    }
+    if (message) return message;
+
+    const last = attempt === FETCH_MAX_ATTEMPTS;
+    const why = errMsg ? `threw: ${errMsg}` : 'returned null';
+    console.log(`[HoldRecover] ${id.slice(0, 16)} fetch attempt ${attempt}/${FETCH_MAX_ATTEMPTS} ${why}${last ? ' — giving up' : ', retrying'}`);
+    if (last) return null;
+    const delay = FETCH_RETRY_BACKOFF_MS[attempt - 1] ?? FETCH_RETRY_BACKOFF_MS[FETCH_RETRY_BACKOFF_MS.length - 1];
+    await sleep(delay);
+  }
+  return null;
+}
+
 // Default image collector — the exported, origin-tagging getImageAttachments.
 function _defaultGetImages(message) {
   return require('../handlers/messageHandler').getImageAttachments(message);
@@ -346,6 +385,7 @@ async function recoverHold(ingestId, actor, deps = {}) {
   const fetchMessage = deps.fetchMessage || _defaultFetchMessage;
   const getImages = deps.getImageAttachments || _defaultGetImages;
   const extract = deps.extract || _defaultExtract;
+  const sleep = deps.sleep || _sleep;
 
   // 1. the hold must exist (reuses loadHoldEvent → latest MANUAL_REVIEW_HOLD payload)
   const payload = loadHoldEvent(id);
@@ -372,15 +412,10 @@ async function recoverHold(ingestId, actor, deps = {}) {
     return { ok: false, status: 'already_resolved', ingestId: id };
   }
 
-  // 5. fetch the (now-unfurled) Discord message
+  // 5. fetch the (now-unfurled) Discord message, retrying transient misses. No
+  //    client = nothing to retry against, so that still bails immediately.
   if (!client) return { ok: false, status: 'message_unreachable', ingestId: id, reason: 'no_client' };
-  let message = null;
-  try {
-    message = await fetchMessage(client, channelId, messageId);
-  } catch (err) {
-    console.log(`[HoldRecover] ${id.slice(0, 16)} fetch failed: ${err.message}`);
-    message = null;
-  }
+  const message = await _fetchMessageWithRetry(fetchMessage, client, channelId, messageId, id, sleep);
   if (!message) return { ok: false, status: 'message_unreachable', ingestId: id };
 
   // 6. images present yet? Prefer REAL slip attachments (origin:'attachment'),
@@ -633,4 +668,4 @@ async function handleReleaseModal(interaction, ingestId) {
   }
 }
 
-module.exports = { handleHoldInteraction, dismissHold, recoverHold, _recoveredDatesFromTimestamp, _graceMarkRecoveredBets, GRACE_DAYS };
+module.exports = { handleHoldInteraction, dismissHold, recoverHold, _recoveredDatesFromTimestamp, _graceMarkRecoveredBets, GRACE_DAYS, FETCH_MAX_ATTEMPTS, FETCH_RETRY_BACKOFF_MS };

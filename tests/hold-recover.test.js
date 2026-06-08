@@ -32,7 +32,7 @@ process.env.DB_PATH = DB_FILE;
 
 const { recordStage } = require('../services/pipeline-events');
 const { db, createBetWithLegs, getOrCreateCapper } = require('../services/database');
-const { recoverHold, _recoveredDatesFromTimestamp } = require('../services/holdReview');
+const { recoverHold, _recoveredDatesFromTimestamp, FETCH_MAX_ATTEMPTS, FETCH_RETRY_BACKOFF_MS } = require('../services/holdReview');
 const { handleRecoverRoute } = require('../routes/adminCommands');
 
 // A real capper to satisfy the bets FK (createBetWithLegs enforces it).
@@ -159,6 +159,41 @@ function depsCreatesAt(rows, createdTimestamp, images) {
   };
 }
 
+// ── fetch-retry seams (Phase 2b-2 fetch-retry) ───────────────
+// No-op sleep so retry-exercising tests never wait on the real backoff.
+const noSleep = async () => {};
+
+// A fetchMessage stub driven by a per-call script of behaviors:
+//   'null'           → resolves null   (transient miss)
+//   'throw'          → throws an Error  (transient error)
+//   a message object → resolves it      (success)
+// The last entry repeats if called more often than the script is long, and
+// `.calls` tracks invocations so "no extra calls" / "tried exactly N times" are
+// assertable. Covers BOTH miss modes the retry treats as failures.
+function scriptedFetch(script) {
+  const stub = async () => {
+    const step = script[stub.calls] !== undefined ? script[stub.calls] : script[script.length - 1];
+    stub.calls += 1;
+    if (step === 'null') return null;
+    if (step === 'throw') throw new Error(`transient fetch error (call ${stub.calls})`);
+    return step; // a message object
+  };
+  stub.calls = 0;
+  return stub;
+}
+
+// deps for a retry test: a scripted fetch + a recording sleep (sleepCalls
+// captures the backoff schedule the retry actually waited on).
+function depsScripted(script, rows, sleepCalls, images) {
+  return {
+    client: {},
+    fetchMessage: scriptedFetch(script),
+    getImageAttachments: (m) => m._images,
+    extract: extractCreates(rows),
+    sleep: async (ms) => { sleepCalls.push(ms); },
+  };
+}
+
 (async () => {
   // ── CORE: slip-image message → ONE vision_slip bet + hold resolved ──
   await run('slip-image message → recover creates ONE vision_slip bet + resolves hold', async () => {
@@ -265,7 +300,7 @@ function depsCreatesAt(rows, createdTimestamp, images) {
   await run('message unreachable (fetch null) → message_unreachable, hold untouched', async () => {
     const f = holdFixture();
     seedHold(f);
-    const deps = { client: {}, fetchMessage: async () => null, getImageAttachments: (m) => m._images, extract: extractCreates([{ description: 'x' }]) };
+    const deps = { client: {}, fetchMessage: async () => null, getImageAttachments: (m) => m._images, extract: extractCreates([{ description: 'x' }]), sleep: noSleep };
     const r = await recoverHold(f.ingestId, 'dashboard', deps);
     assert.strictEqual(r.ok, false);
     assert.strictEqual(r.status, 'message_unreachable');
@@ -280,6 +315,62 @@ function depsCreatesAt(rows, createdTimestamp, images) {
     const r = await recoverHold(f.ingestId, 'dashboard', { client: null });
     assert.strictEqual(r.ok, false);
     assert.strictEqual(r.status, 'message_unreachable');
+  });
+
+  // ════════════════ FETCH RETRY (Phase 2b-2 fetch-retry) ════════════════
+  // The recover fetch is the only network hop; a single transient miss used to
+  // bail the whole recovery. It now retries FETCH_MAX_ATTEMPTS times with a
+  // FETCH_RETRY_BACKOFF_MS schedule, treating BOTH a null return and a thrown
+  // error as a retryable miss.
+
+  // ── transient miss then hit: a null AND a throw both retry, then recover ──
+  await run('fetch fails twice (null, then throw) then succeeds → recovered, slip not lost', async () => {
+    const f = holdFixture();
+    seedHold(f);
+    const sleepCalls = [];
+    const deps = depsScripted(['null', 'throw', fakeMessage(ATTACH_IMG)], [{ description: 'Retry Lakers ML' }], sleepCalls);
+    const r = await recoverHold(f.ingestId, 'dashboard', deps);
+
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.status, 'recovered', 'a transient miss no longer loses the slip');
+    assert.strictEqual(deps.fetchMessage.calls, 3, 'fetched 3x: null, throw, then success');
+    assert.deepStrictEqual(sleepCalls, FETCH_RETRY_BACKOFF_MS, 'waited the 500ms→1500ms backoff between the two failures');
+    assert.strictEqual(betsForMessage(f.messageId).length, 1, 'the recovered bet was created after the retry');
+    assert.strictEqual(latestStage(f.ingestId), 'MANUAL_REVIEW_RELEASED', 'hold resolved on the retried success');
+    assert.strictEqual(countDecisions(f.ingestId), 1, 'one decision row');
+  });
+
+  // ── persistent failure: all attempts spent → message_unreachable, hold kept ──
+  await run('fetch fails all 3 attempts → message_unreachable, nothing created, hold untouched', async () => {
+    const f = holdFixture();
+    seedHold(f);
+    const sleepCalls = [];
+    const deps = depsScripted(['throw', 'null', 'throw'], [{ description: 'never' }], sleepCalls);
+    const r = await recoverHold(f.ingestId, 'dashboard', deps);
+
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.status, 'message_unreachable', 'returned only after every attempt failed');
+    assert.strictEqual(deps.fetchMessage.calls, FETCH_MAX_ATTEMPTS, 'tried exactly FETCH_MAX_ATTEMPTS times');
+    assert.deepStrictEqual(sleepCalls, FETCH_RETRY_BACKOFF_MS, 'backed off between attempts, never after the last');
+    assert.strictEqual(betsForMessage(f.messageId).length, 0, 'creates nothing');
+    assert.strictEqual(countStage(f.ingestId, 'MANUAL_REVIEW_RELEASED'), 0, 'hold not advanced');
+    assert.strictEqual(countDecisions(f.ingestId), 0, 'no decision row');
+    assert.strictEqual(latestStage(f.ingestId), 'MANUAL_REVIEW_HOLD', 'hold still open for a later retry');
+  });
+
+  // ── happy path unchanged: one fetch, no backoff, no extra calls ──
+  await run('fetch succeeds on the first attempt → recovered with a single fetch and no backoff', async () => {
+    const f = holdFixture();
+    seedHold(f);
+    const sleepCalls = [];
+    const deps = depsScripted([fakeMessage(ATTACH_IMG)], [{ description: 'First-try Heat ML' }], sleepCalls);
+    const r = await recoverHold(f.ingestId, 'dashboard', deps);
+
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.status, 'recovered');
+    assert.strictEqual(deps.fetchMessage.calls, 1, 'fetched exactly once — no extra calls on the happy path');
+    assert.deepStrictEqual(sleepCalls, [], 'no backoff when the first attempt succeeds');
+    assert.strictEqual(betsForMessage(f.messageId).length, 1);
   });
 
   // ── CORE: self-heals a partial run (bet exists, hold still open) ──
@@ -428,7 +519,7 @@ function depsCreatesAt(rows, createdTimestamp, images) {
   await run('API route: message_unreachable → 502', async () => {
     const f = holdFixture();
     seedHold(f);
-    const deps = { client: {}, fetchMessage: async () => null, getImageAttachments: (m) => m._images, extract: extractCreates([{ description: 'x' }]) };
+    const deps = { client: {}, fetchMessage: async () => null, getImageAttachments: (m) => m._images, extract: extractCreates([{ description: 'x' }]), sleep: noSleep };
     const res = mockRes();
     await handleRecoverRoute({ params: { ingestId: f.ingestId }, body: {} }, res, deps);
     assert.strictEqual(res._code, 502);
