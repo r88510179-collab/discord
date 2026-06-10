@@ -235,6 +235,31 @@ function reduceParlayResult(rawStatuses) {
   }
   return result;
 }
+
+// ── Parlay leg-completeness check (early grader guard) ──────────
+// A parlay can be graded only when its recorded leg rows cover every pick the
+// description names. "Expected" pick count is the description's bullet (`•`)
+// count — the same structural signal the leg-explosion guard uses
+// (aggregateParlayLegResults). Complete ⇔ at least one leg recorded AND the
+// recorded count equals the expected pick count.
+//
+//   • 1 bullet,  1 leg  → complete   (single pick stored as a 1-leg parlay —
+//                                      grade it; reduceParlayResult rolls the
+//                                      lone leg up)
+//   • 3 bullets, 3 legs → complete
+//   • 3 bullets, 1 leg  → incomplete (caption names 3 picks, legs weren't split)
+//   • 0 bullets, 1 leg  → incomplete (no bullet structure to confirm coverage)
+//   • any desc,  0 legs → incomplete (no leg data at all)
+//
+// Incomplete parlays must stay PENDING for manual review: grading a subset of a
+// multi-pick bet would emit a hallucinated single-grader result. Pure + exported
+// (via _internal) so the decision is unit-testable without live leg grading.
+function parlayLegDataComplete(description, legCount) {
+  if (!Number.isInteger(legCount) || legCount < 1) return false;
+  const expectedPicks = (String(description == null ? '' : description).match(/•/g) || []).length;
+  return legCount === expectedPicks;
+}
+
 // ── Supported sports for grading ──
 // Bets outside this set get auto-voided at the top of gradePropWithAI
 // (see the "AUTO-VOID UNSCOPED BETS" block). Keep in sync with the
@@ -1824,11 +1849,20 @@ async function gradePropWithAI(bet) {
   const betType = (bet.bet_type || '').toLowerCase();
   if (betType === 'parlay' || betType === 'sgp') {
     const legs = db.prepare('SELECT * FROM parlay_legs WHERE bet_id = ? ORDER BY created_at').all(bet.id);
+    const recordedLegs = legs ? legs.length : 0;
 
-    // Guard: parlay missing leg data — prevent hallucinated single-grader results
-    if (!legs || legs.length <= 1) {
-      console.log(`[Grader] SKIP parlay missing legs: ${bet.id?.slice(0, 8)} (bet_type=${betType}, legs=${legs?.length || 0})`);
-      return { status: 'PENDING', evidence: `Parlay has ${legs?.length || 0} recorded legs — cannot grade without leg data. Manual review required.` };
+    // Guard: a parlay reaching the grader with ≤1 recorded leg grades only when
+    // it is COMPLETE — the description names exactly as many picks as legs were
+    // recorded (a single pick stored as a 1-leg parlay: 1 bullet, 1 leg). It
+    // then dispatches to gradeParlay, where reduceParlayResult rolls the lone
+    // leg up. Genuine missing legs (caption names more picks than were recorded,
+    // or no legs at all) stay PENDING for manual review — grading a subset would
+    // emit a hallucinated single-grader result. Multi-leg parlays (≥2 legs) are
+    // unaffected: they bypass this branch and dispatch straight to gradeParlay,
+    // where the existing leg-explosion guard owns over-split detection.
+    if (recordedLegs <= 1 && !parlayLegDataComplete(bet.description, recordedLegs)) {
+      console.log(`[Grader] SKIP parlay incomplete legs: ${bet.id?.slice(0, 8)} (bet_type=${betType}, legs=${recordedLegs}, bullets=${(bet.description?.match(/•/g) || []).length})`);
+      return { status: 'PENDING', evidence: `Parlay has ${recordedLegs} recorded legs — cannot grade without leg data. Manual review required.` };
     }
 
     console.log(`[AI Grader] Parlay detected: ${legs.length} legs for bet ${bet.id?.slice(0, 8)}`);
@@ -2659,6 +2693,7 @@ module.exports = {
   // Exported for unit tests only — do not rely on these from bot code:
   _internal: {
     looksLikePlayerProp, parsePlayerPropDescription, searchWeb, isTrustedLossLeg, aggregateParlayLegResults,
+    parlayLegDataComplete,                             // early leg-completeness guard (1-leg-parlay fix)
     // Phase-1 grading gates:
     reduceParlayResult, normalizeLegStatus,            // Gate 1
     computeEvidenceHash, decideFinalGradeWrite, GRADER_VERSION, // Gate 2
