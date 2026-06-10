@@ -70,6 +70,41 @@ The S-01/U-1 wiring made `ecosystem.config.cjs` the canonical env source for `zo
 ---
 
 
+## ✅ SHIPPED — 2026-06-10 evening batch 2 (#76 grading + #77 ROI, v610; LockedIn swap, dubclub#3)
+
+PRs #76 (`7a55842`) + #77 (`3ed77e2`) merged and deployed together as **v610 ~21:30Z**. Verified live via `/admin` snapshot (Fly `/data/bettracker.db` read-only).
+
+### #77 (`3ed77e2`) — unify + correct the capper ROI formula
+ROI% = Σ(profit_units) ÷ Σ(units risked) over settled bets, now defined **once** in `CAPPER_STATS_COLUMNS` (`services/database.js:713`) and shared verbatim by `getCapperStats` (`:737`) and `getLeaderboard` (`:753`) — previously two byte-identical-but-drift-prone copies. The fix:
+- **Removed the arbitrary per-bet `MAX(units,1)` floor** that inflated risked capital and understated losses. `capperledger` (0-4, stakes 0.09/1/1/1u) read **-77.3%** when the true ROI is **-100%** (lost all risked capital) — corrected live post-deploy.
+- Numerator and denominator now read the **same settled set** — `SETTLED_BET` = `result IN ('win','loss','push') AND profit_units IS NOT NULL` (`:712`); push stake counts as risked capital; graded-but-unpriced (`profit_units` NULL) rows drop from both.
+- `CAST(units AS REAL)` coerces legacy text-garbage stakes (`"N/A"`, `"mortal mega max"` — real rows) to 0 deterministically instead of leaking through SQLite's scalar `MAX()`.
+- Division guarded once at the aggregate (`NULLIF(denom,0)` + `COALESCE`) → `roi_pct` is always finite (0 when nothing settled), never NULL/NaN/÷0.
+- **No silent display cap.** `flagAbnormalRoi(row)` (`:731`) *logs* `>500%` for monitoring but never clamps. Validated read-only vs Fly prod: across all 24 cappers exactly **one** value changes (`capperledger -77.3% → -100%`); `total_profit_units` unchanged for everyone. Tests: `tests/capper-roi.test.js` (10).
+- **No-cap correction (closes the old "Capper ROI display bug" + the "2498.5% after Scoot override" items):** top-3 are now differentiated and `dangambleai +2498.5%` is **arithmetically real** (49.97u profit on 2u risked via a `+5097` longshot hit), **not** a cap artifact. There is **no live 500% cap** — the historical `+500%` cluster was the pre-`faa88208` export's clamp behavior, removed 2026-04-13.
+
+### #76 (`7a55842`) — query-builder artifacts + defensive Bing parse (+ resolver env drop)
+- **`extractSubject` slash→space + orphan-dash cleanup** (`services/grading.js:1425`): slash/backslash between tokens now becomes a **space** (`:1453`) instead of being deleted — `"McGhee/Yannis ITD"` → `"McGhee Yannis ITD"` (was the unsearchable `"McGheeYannis ITD"`), DubClub `"CHC/PHI"` → `"CHC PHI"`; orphan dash-runs isolated by whitespace/boundary are dropped (`:1466`) — `"Joanderson Brito ML (-165)"` → `"Joanderson Brito"` (was `"Joanderson Brito -"`), while intra-word hyphens (`Saint-Denis`) survive. The #74 ordinal/period sentinels (`1st`–`4th`, `1H`/`2H`, `1Q`–`4Q`, `F5`) are unaffected.
+- **New pure `parseBingHtml(html)`** (`:1829`, exported via `_internal`): ordered block-delimiter fallback (`b_algo` → `b_algoheader` → `b_ans`) × ordered title/snippet selectors (`h2`/`h3`/`tilk`/anchor; `b_caption>p`/`b_lineclamp`/`b_algoSlug`/first-`p`); first delimiter yielding ≥1 hit wins, 5-block cap preserved. A total miss returns `[]` → `assessSearchResults` flags `parse_empty` → S2 honesty gate falls through to Brave (the gate is **not** weakened). Tests: `tests/query-builder-bing-parse.test.js` (37).
+- **Dead resolver env removed:** `fly.toml` `RESOLVER_URL`/`RESOLVER_VERSION` `[env]` entries deleted (grep confirmed no JS reads them); the `zonetracker-resolver` Fly app is **destroyed**.
+
+### dubclub#3 (`23c63ed`) — GNP leg-drop fix (deployed box-side)
+`zonetracker-dubclub` PR #3 merged + deployed on the Surface Pro (pm2 restarted, watchdog armed): TOTAL regex `/(?<!\d)[OU]\s?\d+/i` fixes the **fused-marker** drop (e.g. `O8.5` runs read as a leg) + adds a new **F5** (first-5-innings) signal. Root cause and the Jun 5 deploy-timeline correlation (`0da16bc`) are in the PR body.
+
+### LockedIn handle swap — TeamLockTalk → lockedin_sportz (complete end-to-end)
+The dead `TeamLockTalk` handle was retired and `lockedin_sportz` wired in across all three sources of truth:
+- **Box-local DubClub config** (`~/zonetracker-dubclub/config.json`, backup `config.json.bak-20260610`): `TeamLockTalk` removed; boot now logs `"1 capper(s): GuessAndPrayBets"`.
+- **Fly `scraper_handles`**: `lockedin_sportz` inserted (`enabled=1`, dated note); scraper confirmed `"[Handles] fetched 8 active from Fly"`.
+- **Fly `tracked_twitter`**: `lockedin_sportz` row inserted with `display_name='LockedIn'`, channel `1485091165308190780` — so its picks attribute under the **LockedIn** capper, not the raw handle.
+- **Architecture finding (root cause of capper splits):** the handle source of truth is `scraper_handles` on Fly, served at `HANDLES_URL` (`GET /api/scraper-handles`, `x-mobile-secret` auth); the scraper's `active_handles.json` is a **write-through cache with built-in fallback**. Capper attribution derives from `tracked_twitter.display_name`, and a handle **without** a `tracked_twitter` row attributes under the **raw handle** — this is the root cause of the `LockedIn`/`lockedin_sportz` and `guess_pray_bets` duplicate-capper splits. See the **"Capper dedup / merge"** item in the search-arc follow-ups below.
+
+### Ops
+- **298-bet `grading_attempts` reset** — already documented in the 2026-06-10 ops close-out above (do not duplicate).
+- Stale worktrees pruned; `zonetracker-resolver` Fly app destroyed.
+
+---
+
+
 ## ✅ SHIPPED - Weekend 1 (Apr 20)
 
 ### MLB StatsAPI Resolver — live in production
@@ -437,8 +472,9 @@ Diagnostic: pull description for May Unknown/straight voids, classify manually, 
 
 Investigation query: `SELECT id, capper_id, description, raw_text, created_at FROM bets WHERE result = 'void' AND sport = 'Unknown' AND bet_type = 'straight' AND strftime('%Y-%m', created_at) = '2026-05' ORDER BY created_at DESC LIMIT 30;`
 
-### ~~Capper ROI display bug~~ — RESOLVED 2026-04-13 (faa88208)
-Cap removed by commit faa88208 ("remove ROI cap, harden bouncer"). The "+500%" pattern observed in the 2026-04-13 09:34 slip-receipts export was the cap behavior; export was taken ~4h before the fix landed at 13:36 EDT. `getCapperStats` and `getLeaderboard` now return real values; `services/database.js:515` retains a >500% log warning for monitoring but does not clamp the displayed value. Confirmed via git blame 2026-05-08.
+### ~~Capper ROI display bug~~ — RESOLVED 2026-04-13 (faa88208), formula unified 2026-06-10 (#77)
+Cap removed by commit faa88208 ("remove ROI cap, harden bouncer"). The "+500%" pattern observed in the 2026-04-13 09:34 slip-receipts export was the **old export's clamp behavior**; export was taken ~4h before the fix landed at 13:36 EDT. **There is no live 500% cap** — confirmed again 2026-06-10. `getCapperStats` and `getLeaderboard` return real values; a `>500%` warning is logged (now via `flagAbnormalRoi`) for monitoring but never clamps the displayed value.
+- **Formula unification — PR #77 (`3ed77e2`), v610 2026-06-10:** the ROI math was a byte-identical-but-drift-prone copy in both functions; it is now defined **once** in `CAPPER_STATS_COLUMNS` (`services/database.js:713`) and the arbitrary per-bet `MAX(units,1)` floor (which inflated risked capital and understated losses) was **removed**. Live correction: `capperledger` (0-4) `-77.3% → -100%` — the only value that moved across all 24 cappers. Numerator/denominator now read the same `SETTLED_BET` set; `CAST(units AS REAL)` neutralizes text-garbage stakes; `NULLIF`+`COALESCE` guard division. See the **"#77"** ship entry at the top of the backlog. This also explains the **"2498.5% after Scoot override"** item below: `+2498.5%` is arithmetically real (49.97u on 2u risked via `+5097`), not a formula bug.
 
 ### MLB backfill script using resolver
 Batch script that reads bets with `grading_state='backoff'` and MLB player prop descriptions, resets `grading_state='ready'` on those that the resolver would now handle, lets the normal grader pick them up. Dry-run mode mandatory. Use `resolver_events` and the new `GRADE_*` drop counts as success metric.
@@ -449,7 +485,18 @@ The grader's web-search backends (Bing/Brave/DDG/Serper) are the weakest link: w
 
 Live sizing (2026-06-10, `grading_state='backoff'`, n=**312**): Tennis **68**, MLB 70 (already has the StatsAPI resolver — *not* searchless), NBA 56, NHL 32, UFC 31, Soccer 29 (+ Serie A 4 / EPL 2 / UCL 1), Golf 7, MMA 6, Boxing 3.
 
-- **S1 — MEASURE.** ← **NEXT** (S2 now shipped, v606). Classify all ~300 backoff bets by gradeable source — structured adapter (`services/sportsdata/`), Odds API, or search-only — sized per sport. Read-only DB pull + code analysis; output a table. (Backoff queue is 312 live; the by-sport split above is the starting cut.) **Time it after ~1 week of honest post-#74 attempts + the 2026-06-10 pool reset** (298 `backoff` bets had `grading_attempts` reset to 0 — see the evening close-out above), so the source-availability cut reflects real grading, not broken-search-era burned counters.
+- **S1 — MEASURE.** Classify all backoff bets by gradeable source — structured adapter (`services/sportsdata/`), Odds API, or search-only — sized per sport. Read-only DB pull + code analysis. **Time the *final* cut after ~1 week of honest post-#74 attempts + the 2026-06-10 pool reset** (298 `backoff` bets had `grading_attempts` reset to 0 — see the evening close-out above), so source-availability reflects real grading, not broken-search-era burned counters.
+  - **S1a — first classification done (read-only probe, 2026-06-10, pool = 302 backoff+quarantined):**
+    - **Tennis 68** (50 parlay / 18 straight) — **no structured source** today (largest searchless bucket, drives S3).
+    - **MLB 65** (61 parlay) — has the MLB StatsAPI adapter, but the parlays are prop-heavy.
+    - **NBA 57** (43 parlay + 2 quarantined missing-legs).
+    - **NHL 29** (22 parlay).
+    - **Headline:** ~**151** bets (≈half the pool) are **prop-heavy parlays inside adapter-covered sports** — so the real adapter gap is **props-within-covered-sports**, not just uncovered sports.
+    - **Soccer family fragmented across 5 sport labels:** Soccer 31 / Serie A 4 / EPL 2 / SOCCER 1 / UCL 1 = **39** (see the "Sport-label taxonomy normalization" follow-up below).
+    - **Combat 35:** UFC 27 / MMA 5 / Boxing 3.
+    - **~80% of the pool is >14 days old** → favors a **BDL (balldontlie) historical backfill** over live polling.
+  - **Preliminary S3 arbitration (from S1a):** **BDL NBA props first**, **MLB Stats API second**, **tennis adapter third** — re-confirm against the S1b re-measure before committing build order.
+  - **S1b — re-measure after ~1 week of honest attempts.** Scope addition: add a **`parlay_legs` prop-keyword cut** so the props-within-covered-sports slice is sized directly (S1a inferred it from parlay share).
 - **S2 — BREAKER HONESTY (COA audit M-3).** ✅ **SHIPPED + DEPLOYED — PR [#74](https://github.com/r88510179-collab/discord/pull/74) (`4c992c9`), v606 2026-06-10 ~18:40Z (clean main, `--no-cache`).** Live-verified post-deploy: a real autograde query took the **Bing `GENERIC_NEWS` → Brave `SUCCESS`** fall-through (junk-Bing no longer scored healthy). Each search backend now routes parsed results through `assessSearchResults` before recording success: zero usable hits = `parse_empty` (registered as a circuit failure, same as a 4xx/5xx/timeout, for **every** backend); Bing-only `generic_news` (parsed but no result mentions a query token >3 chars — MLB.com/ESPN homepage HTML) falls through **without** tripping the breaker. Both classes return `[]` so the chain falls through (e.g. junk-Bing now reaches Brave). `recordBackendResult` only stamps `lastSuccess` on a real success, so `getBackendSnapshot`/`/admin snapshot` now show honest per-backend state + last-success age in every state (`OPEN` gated-skipped vs `DEGRADED` un-gated-still-tried). Bing/Serper stay un-gated (Bing-first preserved — leading with Brave burns its 2K/mo quota). *Was: any HTTP 200 records `ok` (parse-blind), broken-parse class never opens the breaker.* Closes "Snapshot Brave health check" + the Bing generic-news detector below.
 - **S3 — TENNIS ADAPTER (largest searchless bucket, 68).** Deterministic results via the whitelisted sources the regrade skill already trusts (ESPN / ATP), following the `services/sportsdata/` adapter pattern. Tennis is the biggest bucket with **no** structured path today.
 - **S4 — PER-SPORT ROLLOUT by bucket size.** After Tennis: Soccer (~36 across Soccer / Serie A / EPL / UCL — also unblocks the 2 quarantined Soccer parlays from the close-out), UFC/MMA (~37), Golf (7). Then decide whether generic web search is retired to last-resort or removed entirely.
@@ -460,11 +507,10 @@ Live sizing (2026-06-10, `grading_state='backoff'`, n=**312**): Tennis **68**, M
 - **zonetracker-stats inventory pass** — the sixth on-box dir is cron-only (not a PM2 app) and not yet inventoried (flagged in `docs/SURFACE-PRO.md` crontab note).
 - *(S-01 arm-time observability PR — now shipped + deployed, see the 2026-06-10 close-out above; no longer in-flight.)*
 
-### Search query builder — slash/dash artifacts (P3, discovered 2026-06-10 evening)
-`extractSubject` / `buildGraderSearchQuery` (`services/grading.js:1425` / `1474`) corrupt two query shapes, observed live during the v606 verification window:
-- **Slash fusion (no space separator):** `"McGhee/Yannis ITD"` → query `"McGheeYannis ITD"`. The `/` is *deleted* in the symbol pass (`[()[\]{}<>•·–—@#,;:/\\]`) with no replacement, fusing two fighter surnames into one non-existent token — a slip naming two fighters becomes unsearchable.
-- **Stray dash artifact:** `"Joanderson Brito - UFC"` survives odds/market stripping with a dangling ` - ` (the symbol pass strips en/em dashes `–`/`—` but a plain hyphen `-` is left intact).
-Both degrade search hit-rate on UFC/MMA specimens. Fix: in the same symbol pass, *replace* `/` (and a bare `-` between word chars) with a space rather than deleting it. Low risk — `extractSubject` is pure and unit-tested (`tests/search-backend-honesty.test.js`); add the two specimens as fixtures.
+### ~~Search query builder — slash/dash artifacts~~ ✅ SHIPPED — PR #76 (`7a55842`), v610 2026-06-10
+`extractSubject` (`services/grading.js:1425`) corrupted two query shapes, observed live during the v606 verification window — **both now fixed:**
+- **Slash fusion (no space separator):** `"McGhee/Yannis ITD"` → query `"McGheeYannis ITD"`. The `/` was *deleted* in the symbol pass with no replacement, fusing two fighter surnames into one non-existent token. **Fixed:** a dedicated `.replace(/[/\\]/g, ' ')` (`:1453`) runs *before* the symbol strip → `"McGhee Yannis ITD"`; DubClub `"CHC/PHI"` → `"CHC PHI"`.
+- **Stray dash artifact:** `"Joanderson Brito ML (-165)"` survived odds/market stripping with a dangling ` - `. **Fixed:** `.replace(/(^|\s)-+(?=\s|$)/g, '$1')` (`:1466`) drops only a dash-run isolated by whitespace/boundary; the ASCII hyphen is deliberately kept out of the symbol class so intra-word hyphens (`Saint-Denis`) survive. The #74 ordinal sentinels are unaffected. Tests: `tests/query-builder-bing-parse.test.js` (both live specimens + #74 regressions).
 
 ### Non-uniform auto-void rule (S5 exhaustion-by-design input, discovered 2026-06-10 evening)
 Two **independent** void paths key on **different signals**, so the *same* attempt count yields different outcomes across bet classes:
@@ -472,8 +518,25 @@ Two **independent** void paths key on **different signals**, so the *same* attem
 - `canFinalizeBet` `RETRY_CAP=15` (`:636`) — voids at `grading_attempts ≥ 15` with `GRADE_BACKOFF_EXHAUSTED`, but **only when the bet traverses the denial branch**; a bet parked in `backoff` with a future `grading_next_attempt_at` isn't attempted, so neither path fires and attempts simply sit.
 Evidence (live 2026-06-10): bet `9d839e18` (McGhee/Yannis ITD, UFC) auto-voided at **exactly 7 attempts / 90h** (recent-5 all no-data PENDING) — yet pool bets sat at **15–35 attempts unvoided** at the same moment. This is *not* a bug to "fix" blindly (it's S5-adjacent terminal behavior), but the non-uniformity is an explicit **input** to any exhaustion-policy refinement: voiding should be driven by source-availability + audit content, not raw attempt count. Document now, measure under S1.
 
-### Bing `b_algo` defensive multi-selector parse (follow-up from #74 / S2)
-Deferred from PR #74 (noted in its PR body). S2 made the breaker *honest* — junk-Bing now falls through to Brave via `parse_empty`/`generic_news` — but did **not** improve the Bing parse itself. `searchBing` (`services/grading.js:1776`; `b_algo` split `:1793`) still parses only `class="b_algo"`, which Microsoft has drifted. A defensive multi-selector parse (try several result-container selectors, not just `b_algo`) would recover real Bing hits instead of always burning the fall-through to Brave's 2K/mo quota. Lower priority now that fall-through is honest, but it is the structural fix; today's mitigation is fall-through, not a better parse.
+### 24h void-volume watch (S5 / auto-void monitoring, opened 2026-06-10 evening)
+Tie-in to the **"Non-uniform auto-void rule"** above and **S5**. Live 2026-06-10 the 24h void volume was **22 unscoped + 32 no-data = 54 voids**. With S2 honest search live + the 298-bet reset, a *wave* of legitimate voids is expected as searchless bets exhaust honestly (the close-out's "VOID-slip flow" watch item) — so this is **not** auto-alarming. But because the two void paths key on different signals (non-uniform rule), raw count alone is misleading. **Action:** watch the daily `auto_void_no_searchable_data` (content-based) vs `GRADE_BACKOFF_EXHAUSTED` (RETRY_CAP=15) split in `pipeline_events`; if either climbs *after* the backlog should have drained (~1 week), the per-sport adapter gap (S3/S4) — not the breaker — is the driver. Fold the numbers into the S1b re-measure.
+
+### Handle review — pending keep/drop decisions (opened 2026-06-10 evening)
+Two `scraper_handles` rows need an operator keep/drop call (toggle `enabled` via `POST /api/admin/handles/:handle`, never delete the row):
+- **`@toptierpicks_` — 0 saved bets in the last 7 days.** Either the handle has gone quiet, the scraper is silently failing on it (cross-ref the `page.waitForSelector` timeout item below — `@toptierpicks_` is named there), or its picks aren't ingest-shaped. Decide: disable, or investigate the scrape path.
+- **`@nrfianalytics` — pending keep/drop.** Confirm it is still a wanted source before the next scrape-cost review.
+
+### Sport-label taxonomy normalization (opened 2026-06-10 evening, from S1a)
+S1a found the **Soccer family fragmented across 5 distinct sport labels**: `Soccer 31` / `Serie A 4` / `EPL 2` / `SOCCER 1` / `UCL 1` (= 39 bets). League names (`Serie A`, `EPL`, `UCL`) and a casing variant (`SOCCER`) are stored as if they were top-level sports, which (a) splits the bucket so per-sport sizing under-counts Soccer, and (b) will fragment any future Soccer adapter's dispatch key (`services/sportsdata/index.js` routes on `sport`). **Action:** normalize at the classification/storage boundary so a league maps to its parent sport (`Serie A`/`EPL`/`UCL`/`SOCCER` → `Soccer`) with the league preserved as a sub-field, not the dispatch key. Audit other sports for the same leakage before building S4's Soccer adapter.
+
+### Capper dedup / merge — handle-vs-display-name attribution splits (opened 2026-06-10 evening)
+**Root cause (from the LockedIn swap):** capper attribution derives from `tracked_twitter.display_name`. A scraped handle with **no** `tracked_twitter` row attributes under its **raw handle** instead of the intended capper, creating a duplicate capper. Known splits to merge:
+- **`LockedIn` vs `lockedin_sportz`** — the swap inserted a `tracked_twitter` row (`display_name='LockedIn'`) so *new* `lockedin_sportz` picks attribute correctly, but any bets ingested **before** that row exists were filed under the raw `lockedin_sportz` (or the retired `TeamLockTalk`) and need merging into the `LockedIn` capper.
+- **`guess_pray_bets` raw-handle attribution** — same pattern; verify whether any bets sit under the raw handle vs the intended `GuessAndPrayBets` capper.
+**Action:** audit `cappers` for near-duplicate names / raw-handle rows (`SELECT id, display_name, COUNT(bets)` …), then merge bets onto the canonical capper id and backfill the missing `tracked_twitter` rows. Guard the merge with the same read-only-first DB-intervention rules (`docs/RUNBOOKS/db-interventions.md`). Pairs with the existing **"Cappers table data integrity audit (post-5efcdd8)"** item.
+
+### ~~Bing `b_algo` defensive multi-selector parse~~ ✅ SHIPPED — PR #76 (`7a55842`), v610 2026-06-10
+Deferred from PR #74; now done. The single hard-coded `class="b_algo"` + `b_caption>p` selector (which Microsoft drifts every few months) is replaced by pure `parseBingHtml(html)` (`services/grading.js:1829`, exported via `_internal`): an **ordered block-delimiter list** (`b_algo` → `b_algoheader` → `b_ans`) — first that yields ≥1 hit wins — × **ordered title/snippet selectors** (`h2`/`h3`/`tilk`/anchor; `b_caption>p`/`b_lineclamp`/`b_algoSlug`/first-`p`), 5-block cap preserved (`BING_BLOCK_DELIMITERS` `:1797`). `searchBing` (`:1849`) now calls it. A total miss still returns `[]` → `assessSearchResults` flags `parse_empty` → S2 honesty gate falls through to Brave (gate **not** weakened). A live `curl` of bing.com returns only the search-box shell, so selectors are built from known markup variants (documented inline). Tests: `tests/query-builder-bing-parse.test.js` (fixture-driven over classic/lineclamp/anchor-only/rotted markup + a rotted→`parse_empty` honest-fall-through assertion).
 
 ### Quarantined missing-legs parlays (manual leg reconstruction)
 2 of the 4 live-quarantined bets (2026-06-10) are parlays stored with only **1 recorded leg** in `parlay_legs`, so the grader can't evaluate them: *"Parlay has 1 recorded legs — cannot grade without leg data. Manual review required."* Both NBA: `7b04366b…` ("Jokic, Brunson & Donovan Mitchell to Combine for 100+ Pts, 25+ Reb & 25+ Ast", 22 att) and `b0140947…` ("Spurs/OKC Over 218.5 Points", 20 att). These are a *storage* gap (legs lost at ingest), not a search gap — the search arc above won't clear them. **Note (#73, v606):** the 1-leg-parlay grader fix grades only **COMPLETE** 1-leg parlays (`•` bullet count === recorded leg count); both quarantined specimens are **INCOMPLETE** — `7b04366b` is the confirmed counter-specimen (0 bullets / 1 leg → still rejected, byte-identical reason). `b0140947`'s bullet count was not re-verified this session; if its description carries exactly one `•`, #73 would now grade it (worth a read-only re-check). Action: reconstruct the legs from the original slip and re-stage, or VOID with a recorded reason. (The other 2 quarantined bets are Soccer awaiting a result source — handled by S4 above.)
@@ -791,9 +854,8 @@ Pending live-traffic confirmations (not concerning, just awaiting samples):
 - `VALIDATOR_LEG_SHAPE_INVALID` count = 0 in pipeline_events. Will fire next time a stat-line tweet comes through.
 - P1a-ext header drops haven't been observed yet either; v360 was deployed only 30 min before the histogram was checked.
 
-### Capper ROI showing 2498.5% after manual Scoot override
-
-After flipping Scoot Henderson bet `ada01c0f9dbefb16a5b8a2444f3c819f` from WIN to LOSS via direct UPDATE, capper Dan (dangambleai) shows ROI=2498.5% (1W-1L) at next bot startup. Manual override likely didn't touch the running unit math the way `finalizeBetGrading` would. Pairs with existing "Capper ROI display bug" entry — same root cause likely (ROI calc divides by something nonsensical). Investigate ROI formula and figure out the canonical way to do manual grade overrides without breaking unit math. P2.
+### ~~Capper ROI showing 2498.5% after manual Scoot override~~ — RESOLVED 2026-06-10 (#77): the value is real, not a bug
+After flipping Scoot Henderson bet `ada01c0f9dbefb16a5b8a2444f3c819f` from WIN to LOSS via direct UPDATE, capper Dan (dangambleai) showed ROI=2498.5% (1W-1L). **#77 (`3ed77e2`) confirmed this is arithmetically correct, not a formula divide-by-nonsense:** `+2498.5%` = 49.97u profit on 2u risked via a `+5097` longshot hit. The unified `CAPPER_STATS_COLUMNS` formula (settled-set numerator ÷ `CAST(units AS REAL)` denominator, no floor) reproduces it exactly, and it is surfaced for monitoring via `flagAbnormalRoi` (`>500%` log) without being clamped. The original concern (manual UPDATE not running `finalizeBetGrading`'s unit math) was the wrong hypothesis — ROI is computed on read from settled rows, so the override is reflected correctly. (Canonical manual-override path remains worth documenting, but no ROI math is broken.)
 
 ### G7 — Player-prop threshold verification (future grader hardening)
 
