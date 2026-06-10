@@ -46,9 +46,12 @@ took `:8443`. The dashboard is deliberately `serve` (tailnet) not `funnel` (publ
 
 ## ollama-proxy  (pm_id 1, cluster)
 
-- **Repo:** ⚠️ **none — not a git repository** (`git rev-parse` fails; no `.git`, no remote).
-  Lives only as files in `/home/tracker/ollama-proxy`. Edits are made directly on the box;
-  there is no upstream to `git pull`. (See BACKLOG / risk note below.)
+- **Repo:** `git@github.com-ollama-proxy:r88510179-collab/zonetracker-ollama-proxy.git`
+  (private; default branch `main`; per-repo deploy key `~/.ssh/github_ollama_proxy` + `~/.ssh/config`
+  alias `github.com-ollama-proxy`, mirroring the OCR/dashboard pattern). The box dir
+  `/home/tracker/ollama-proxy` is a **tracking clone** as of 2026-06-10. Secrets are excluded
+  by `.gitignore`: the live `ecosystem.config.js` (carries `OLLAMA_PROXY_SECRET`) and `logs/`
+  are **not** committed; `ecosystem.config.example.js` (CHANGEME placeholder) + `README.md` are.
 - **cwd / entry:** `/home/tracker/ollama-proxy` · `proxy.js` (node).
 - **Port:** listens `127.0.0.1:11435`.
 - **Exposure:** Tailscale **Funnel** (public) on the root domain `:443` → `127.0.0.1:11435`.
@@ -59,25 +62,40 @@ took `:8443`. The dashboard is deliberately `serve` (tailnet) not `funnel` (publ
   and forwards to Ollama at `http://127.0.0.1:11434` (both port and upstream are
   hardcoded in `proxy.js`).
 - **Deploy procedure:**
-  - *Code change:* edit `proxy.js` on the box → `pm2 restart ollama-proxy`.
-  - *Env/secret change:* edit `ecosystem.config.js` → `pm2 delete ollama-proxy && pm2 start ecosystem.config.js && pm2 save`
+  - *Code change:* commit `proxy.js`/`package.json` to the repo → on the box `cd ~/ollama-proxy
+    && git pull && pm2 restart ollama-proxy` (the box dir is a tracking clone now; the README
+    documents this).
+  - *Env/secret change:* edit `ecosystem.config.js` **on the box** (gitignored — never committed)
+    → `pm2 delete ollama-proxy && pm2 start ecosystem.config.js && pm2 save`
     (`pm2 restart` reads the saved dump, **not** the file — the delete/start/save cycle
     is required to re-read the env block; mirrors `docs/DEPLOY_CHECKLIST.md` Step 9's
     three-location rule: file ↔ `~/.pm2/dump.pm2` ↔ runtime).
+  - *Secret rotation:* `OLLAMA_PROXY_SECRET` must match in 3 places — box `ecosystem.config.js`,
+    the box PM2 saved dump (refreshed by the delete/start/save cycle), and the Fly bot's
+    `OLLAMA_PROXY_SECRET` secret (the bot sends it as `x-ollama-secret`). See the repo README's
+    "Secret rotation" section.
 
 ## zonetracker-scraper  (pm_id 0, fork)
 
 - **Repo:** `git@github.com-zonetracker:r88510179-collab/zonetracker-scraper.git`
-  · HEAD `e28d768` (2026-06-10, "Merge PR #3 fix/s01-dead-air-watchdog").
+  · HEAD `ff9fda0` (2026-06-10, "Merge PR #4 fix/s01-observability") — S-01 deployed in two
+  parts: dead-air watchdog + zero-tweet strike fix (#3, `e28d768`) and the arm-time log line +
+  ISO-timestamped `[Strike]`/`[Disable]`/`[Alarm]`/`[DeadAir]` logs (#4).
 - **cwd / entry:** `/home/tracker/zonetracker-scraper` · `scraper.js` (node).
+- **PM2 process mode:** `ecosystem.config.js` sets `exec_mode: 'fork'` **explicitly** alongside
+  `instances: 1`. PM2 silently switches to **cluster** mode whenever `instances` is set — wrong
+  for a single-process scraper — so the explicit `fork` is load-bearing (verified live `pm2 jlist`
+  → `fork_mode instances=1`).
 - **Port:** none — outbound HTTP client only.
 - **Exposure:** none.
 - **Canonical env:** TWO sources.
-  - `.env` (loaded by `require('dotenv').config()`, `scraper.js:6`) — **keys:**
-    `INGEST_URL`, `MOBILE_SCRAPER_SECRET`, `TWITTER_API_KEY`, `TWITTER_EMAIL`,
-    `TWITTER_PASSWORD`, `TWITTER_USERNAME`.
+  - `.env` (loaded by `require('dotenv').config()`, `scraper.js:6`; file mode **`600`** as of
+    2026-06-10) — **keys:** `INGEST_URL`, `MOBILE_SCRAPER_SECRET`, `TWITTER_API_KEY`,
+    `TWITTER_EMAIL`, `TWITTER_PASSWORD`, `TWITTER_USERNAME`.
   - `ecosystem.config.js` `env:` block — **keys:** `ALERT_WEBHOOK_URL`,
-    `DEAD_AIR_CYCLES`, `NODE_ENV`.
+    `DEAD_AIR_CYCLES`, `NODE_ENV`. The S-01 **dead-air alarm is live via this block**:
+    `ALERT_WEBHOOK_URL` carries the real Discord webhook and `DEAD_AIR_CYCLES` arms the
+    watchdog (`0` disables it).
   - (A stale `ecosystem.config.js.bak.20260610-115918` is also present — ignore.)
 - **Call graph:** scrapes X/Twitter timelines → `POST` to the Fly bot
   `INGEST_URL` (default `https://bettracker-discord-bot.fly.dev/api/mobile-ingest`)
@@ -94,15 +112,21 @@ took `:8443`. The dashboard is deliberately `serve` (tailnet) not `funnel` (publ
 - **cwd / entry:** `/home/tracker/zonetracker-dubclub` · `index.js` (node).
 - **Port:** none — IMAP in, Discord webhooks out.
 - **Exposure:** none.
+- **PM2 process mode:** `ecosystem.config.cjs` sets `exec_mode: 'fork'` **explicitly** alongside
+  `instances: 1` (same load-bearing reason as the scraper above — PM2 would otherwise default to
+  cluster; verified live `pm2 jlist` → `fork_mode instances=1`). The U-1 browser watchdog +
+  dead-air alarm run live through this block (`ADMIN_ALERT_WEBHOOK_URL` + the `BROWSER_*` /
+  `DEAD_AIR_MAX_MS` knobs below).
 - **Canonical env:** **`ecosystem.config.cjs`** (the canonical env source as of the
-  S-01/U-1 wiring) `env:` block — **keys:** `ADMIN_ALERT_WEBHOOK_URL`,
+  S-01/U-1 wiring; this closes BACKLOG **U-6**) `env:` block — **keys:** `ADMIN_ALERT_WEBHOOK_URL`,
   `BROWSER_PROBE_INTERVAL_MS`, `BROWSER_PROBE_TIMEOUT_MS`, `BROWSER_RELAUNCH_BACKOFF_MS`,
   `BROWSER_RELAUNCH_MAX_ATTEMPTS`, `DEAD_AIR_MAX_MS`, `DUBCLUB_FROM`, `GNP_WEBHOOK_URL`,
   `HEADLESS`, `IMAP_APP_PASSWORD`, `IMAP_HOST`, `IMAP_PORT`, `IMAP_USER`,
   `LOCKEDIN_WEBHOOK_URL`.
   - A `.env` is also present with an overlapping subset (`ADMIN_ALERT_WEBHOOK_URL`,
     `DUBCLUB_FROM`, `GNP_WEBHOOK_URL`, `HEADLESS`, `IMAP_*`, `LOCKEDIN_WEBHOOK_URL`) and is
-    loaded by `import 'dotenv/config'` (`index.js:1`). PM2 injects the ecosystem env at
+    loaded by `import 'dotenv/config'` (`index.js:1`; file mode **`600`** as of 2026-06-10).
+    PM2 injects the ecosystem env at
     spawn and dotenv does **not** override already-set vars, so the **`.cjs` values win** —
     treat `ecosystem.config.cjs` as canonical.
 - **Call graph:** watches Gmail via IMAP (`IMAP_HOST`/`IMAP_USER`/`IMAP_APP_PASSWORD`) for

@@ -32,7 +32,7 @@ PK is `id` (TEXT, hex hash — **NOT** `bet_id`, common memory error).
 | profit_units | REAL | signed: positive=win, negative=loss |
 | grade | TEXT | "WIN" / "LOSS" / "VOID" / "PUSH" (uppercase) or NULL while pending |
 | grade_reason | TEXT | human-readable explanation, includes `[retro-fix YYYY-MM-DD]` for manual fixes |
-| event_date | TEXT | 98.4% null — NOT a void driver |
+| event_date | TEXT | mostly null; not a void driver. **Write-gated** by `normalizeEventDateForStorage` (`services/eventDate.js`, called in `createBet` at `database.js:350`) → stored as NULL or a parseable datetime only, never time-only/free-text. Mig **029** nulled legacy unparseable rows. Read-side: `grading.js` GUARD 3 falls back to `created_at` when a stored value resolves >0.25h ahead of now (marker `grade.event_date_skew_fallback`, `:2154`) |
 | graded_at | TEXT | ISO timestamp |
 | source | TEXT | see §Source enum below |
 | source_url | TEXT | Discord message URL — populated on most paths; audit pending |
@@ -223,7 +223,7 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 | --- | --- |
 | **Gate 1** `reduceParlayResult` (pure parlay reducer — keystone; LOSS>PENDING>WIN) | 209 (fn); `normalizeLegStatus` 202 |
 | **Gate 2** `GRADER_VERSION` / `computeEvidenceHash` / `decideFinalGradeWrite` | 20 / 25 / 45 |
-| **Gate 3** quote-bound grading — tri-state `QUOTE_BOUND_GRADING` (`off`/`shadow`(default)/`enforce`); shadow logs `[GATE3 would-fire]` and leaves the grade, enforce forces PENDING (`UNVERIFIED_QUOTE`); unknown/legacy → shadow | `normalizeQuoteWhitespace` 76; `validateEvidenceQuote` 89; `resolveGate3Mode` 115; `applyGate3` 129 (returns `claimed` for the marker) |
+| **Gate 3** quote-bound grading — tri-state `QUOTE_BOUND_GRADING` (`off`/`shadow`(staged default)/`enforce`); **live on Fly = `enforce` as of 2026-06-10** (verified in-container; staged default is still `shadow`). shadow logs `[GATE3 would-fire]` and leaves the grade, enforce forces PENDING (`UNVERIFIED_QUOTE`); unknown/legacy → shadow | `normalizeQuoteWhitespace` 76; `validateEvidenceQuote` 89; `resolveGate3Mode` 115; `applyGate3` 129 (returns `claimed` for the marker) |
 | **Gate 3 (B0)** `buildGate3WouldFireMarker` — pure; returns `GATE3_WOULD_FIRE\|mode=\|claimed=\|prop=\|reason=` token or `null` (off / quote ok). Caller pushes it onto `audit.guards_failed` (display-only; never gates grading) so the event rides the attempt's existing `grading_audit` row — **zero extra rows** (a dedicated row would perturb `shouldAutoVoidNoData`'s recent-5 + the daily cap). Query: `WHERE guards_failed LIKE '%GATE3_WOULD_FIRE%'` | 177 (fn); marker const 176 |
 | `looksLikePlayerProp` | 261 (fn); structured gate → `tryStructured` 2171 (call L2172) |
 | `canFinalizeBet` | 532 |
@@ -238,6 +238,7 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 | `gradeParlay` (builds per-leg `legBet` with `bet_type:'straight'` — legs have no stored prop flag) | 1966 |
 | `writeGradingAudit` (module-level; extracted from the `gradeSingleBet` `writeAudit` closure, B0) — one `grading_audit` row per attempt; `timestamp` is epoch MILLIS | 2007 |
 | `gradeSingleBet` | 2028; structured pre-check 2172; **Gate 3** quote check 2367 (`applyGate3` call 2374; B0 would-fire marker push 2385–2386); grader waterfall 2250–2272 (groq-llama4-scout 2251 → cerebras-gpt-oss → groq-qwen → openrouter → groq-gpt-oss → mistral → ollama → groq-llama8b 2272) |
+| GUARD 3 (too-recent) **event_date skew fallback** — when a stored `event_date` resolves >0.25h ahead of now, re-anchor to `created_at` (kills legacy time-only strings re-anchoring to "today" every poll → "too soon" forever → burned attempts to quarantine; pairs with mig 029 + `services/eventDate.js`) | marker `grade.event_date_skew_fallback` 2154 (guard block ~2144–2159) |
 | `finalizeBetGrading` | 2511 (also exported as `gradeBet`); **Gate 2** idempotency check 2515; atomic write stamps `grader_version`+`evidence_hash` via `gradeBetRecord` |
 | `resolvePlayerProp` | REMOVED (v459) — replaced by `tryStructured()` from services/sportsdata, called at L2172 |
 
@@ -322,9 +323,18 @@ The grading cron's **7-Day Smart Sweeper** auto-grades any pending **non-prop** 
 | What | Line(s) |
 | --- | --- |
 | `getOrCreateCapper` | 304 |
+| `createBet` (single-bet insert; **write-gates `event_date`** via `normalizeEventDateForStorage` from `services/eventDate.js`) | 334 (fn); event_date gate at the INSERT, L350 |
 | `createBetWithLegs` | 579 |
 | `findPendingBetBySubject` | 928 |
 | `gradeBet` | 597 (`gradeBetRecord`, exported as `gradeBet` L1077) |
+
+### services/eventDate.js (event_date write-gate, #70 + mig 029)
+The single write-path normalizer for `bets.event_date`. `normalizeEventDateForStorage(raw, createdAt=now)` returns **NULL or a parseable datetime** — rejects time-only (`"9:10PM ET"`) and free-text, ET-anchors wall-clock dates to UTC. Called from `createBet` (`database.js:350`) so every write is gated. The same rule was applied to existing rows by mig **029**; the read-side skew fallback lives in `grading.js` GUARD 3 (marker `grade.event_date_skew_fallback`).
+
+| What | Line(s) |
+| --- | --- |
+| `normalizeEventDateForStorage` (the write gate; exported) | 78 |
+| `etWallClockToUtc` / `etParts` (ET helpers; exported) | 52 / 34 |
 
 ### bot.js
 | What | Line(s) |
@@ -413,6 +423,7 @@ Pre-filter drops between RECEIVED and PARSED emit DROPPED (not a named stage): `
 | 026 | bets.grader_version + bets.evidence_hash (Gate 2 idempotency) + idx_bets_grade_idem |
 | 027 | scraper_handles (DB-driven Twitter scraper handle list; seeds 9 handles, `INSERT OR IGNORE`) |
 | 028 | bets.sweep_exempt_until (Phase 2b-2 sweeper-grace for recovered bets) |
+| 029 | NULLs legacy unparseable `bets.event_date` (`UPDATE … SET event_date=NULL WHERE event_date IS NOT NULL AND datetime(event_date) IS NULL`); mirrors the `services/eventDate.js` write-gate onto existing rows. Live 2026-06-10: corrupt rows 19 → 0 |
 
 ## Database — quirky things
 
@@ -431,6 +442,7 @@ Pre-filter drops between RECEIVED and PARSED emit DROPPED (not a named stage): `
 | GEMMA_FALLBACK_DISABLED | Gemma vision fallback | (v431 sets true — Surface hardware ceiling) |
 | AUTOGRADER_DISABLED | autograder cron | If true, no auto-grading runs |
 | TWITTER_POLLER_DISABLED | Fly Twitter poller | Currently paused; Surface Playwright replaces |
+| QUOTE_BOUND_GRADING | `gradeSingleBet` Gate 3 (`resolveGate3Mode`) | unset → `shadow` (log-only). **Live on Fly = `enforce`** (2026-06-10): a failed quote check forces PENDING (`UNVERIFIED_QUOTE`) |
 
 ## Channels — ingestion routing (verified 2026-05-21 via `fly ssh`)
 
