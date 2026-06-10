@@ -7,8 +7,6 @@ primary_region = 'iad'
 [env]
   NODE_ENV = 'production'
   PORT = '8080'
-  RESOLVER_URL = 'http://zonetracker-resolver.internal:8080'
-  RESOLVER_VERSION = 'v10'
 
 [http_service]
   internal_port = 8080
