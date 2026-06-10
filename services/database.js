@@ -680,35 +680,73 @@ function getRecentBets(capperId, limit = 10) {
 }
 
 // ── Stats & Leaderboard ─────────────────────────────────────
-function getCapperStats(capperId) {
-  const row = db.prepare(`
-    SELECT
-      c.id, c.display_name, c.discord_id,
+//
+// Capper record + ROI — single source of truth, shared verbatim by
+// getCapperStats() and getLeaderboard() so the two can never drift.
+//
+//   ROI% = 100 × Σ(profit_units) ÷ Σ(units risked), over SETTLED bets only.
+//
+//   SETTLED_BET — result IN ('win','loss','push') AND profit_units IS NOT NULL.
+//     The numerator (profit) and denominator (stake) read the EXACT same row
+//     set: a bet contributes its profit AND its stake, or neither. Voids/cancels
+//     (capital returned) and pending (not yet risked) are excluded from both, and
+//     graded-but-unpriced rows (profit_units NULL — a known data anomaly) drop
+//     out cleanly instead of counting stake with no profit.
+//
+//   CAST(units AS REAL) — `units` has REAL affinity but legacy rows hold
+//     free-text garbage ("N/A", "mortal mega max"). CAST coerces a non-numeric
+//     stake to 0 deterministically, instead of leaking through SQLite's scalar
+//     MAX() into the SUM (the previous formula's silent failure mode).
+//
+//   NO arbitrary per-bet floor. The old denominator wrapped each stake in
+//     `MAX(units, 1)`, inflating risked capital for sub-1u stakes and understating
+//     losses (e.g. a 0.09/1/1/1u 0-4 capper read -77% instead of the true -100%).
+//     Division is guarded once, at the aggregate, with NULLIF(denominator, 0) →
+//     a zero-risk capper yields NULL ÷, COALESCEd to 0%. roi_pct is therefore
+//     always a finite number (0 when nothing is settled), never NULL — render
+//     sites that do `${roi_pct}%` never print "null".
+//
+//   NO display cap. A value like +2498.5% is the real ROI of a +5097 longshot hit
+//   on a 1u stake, not an artifact; implausible values are surfaced for
+//   monitoring via flagAbnormalRoi(), not silently clamped.
+const SETTLED_BET = `b.result IN ('win','loss','push') AND b.profit_units IS NOT NULL`;
+const CAPPER_STATS_COLUMNS = `
       COUNT(b.id) AS total_bets,
       COUNT(CASE WHEN b.result = 'win' THEN 1 END) AS wins,
       COUNT(CASE WHEN b.result = 'loss' THEN 1 END) AS losses,
       COUNT(CASE WHEN b.result = 'push' THEN 1 END) AS pushes,
-      COUNT(CASE WHEN b.result = 'pending' THEN 1 END) AS pending,
       ROUND(
         CAST(COUNT(CASE WHEN b.result = 'win' THEN 1 END) AS REAL) /
         MAX(COUNT(CASE WHEN b.result IN ('win','loss') THEN 1 END), 1) * 100, 1
       ) AS win_pct,
-      COALESCE(SUM(CASE WHEN b.result IN ('win','loss','push') THEN b.profit_units ELSE 0 END), 0) AS total_profit_units,
+      COALESCE(SUM(CASE WHEN ${SETTLED_BET} THEN b.profit_units ELSE 0 END), 0) AS total_profit_units,
       ROUND(
-        COALESCE(SUM(CASE WHEN b.result IN ('win','loss','push') THEN b.profit_units ELSE 0 END), 0) /
-        MAX(SUM(CASE WHEN b.result IN ('win','loss') THEN MAX(b.units, 1) ELSE 0 END), 1) * 100, 1
-      ) AS roi_pct
+        COALESCE(
+          COALESCE(SUM(CASE WHEN ${SETTLED_BET} THEN b.profit_units ELSE 0 END), 0) /
+          NULLIF(SUM(CASE WHEN ${SETTLED_BET} THEN CAST(b.units AS REAL) ELSE 0 END), 0),
+        0) * 100, 1
+      ) AS roi_pct`;
+
+// Surface (do NOT clamp) an implausible ROI for monitoring.
+function flagAbnormalRoi(row) {
+  if (row && Math.abs(row.roi_pct) > 500) {
+    console.warn(`[ROI Alert] Abnormal ROI for ${row.display_name}: ${row.roi_pct}% (${row.wins}W-${row.losses}L, ${row.total_profit_units}u)`);
+  }
+}
+
+function getCapperStats(capperId) {
+  const row = db.prepare(`
+    SELECT
+      c.id, c.display_name, c.discord_id,
+      ${CAPPER_STATS_COLUMNS},
+      COUNT(CASE WHEN b.result = 'pending' THEN 1 END) AS pending
     FROM cappers c
     LEFT JOIN bets b ON b.capper_id = c.id AND b.season = ?
     WHERE c.id = ?
     GROUP BY c.id
   `).get(ACTIVE_SEASON, capperId);
 
-  // Log abnormal ROI but display real value (no cap)
-  if (row && Math.abs(row.roi_pct) > 500) {
-    console.warn(`[ROI Alert] Abnormal ROI for ${row.display_name}: ${row.roi_pct}% (${row.wins}W-${row.losses}L, ${row.total_profit_units}u)`);
-  }
-
+  flagAbnormalRoi(row);
   return row || null;
 }
 
@@ -720,19 +758,7 @@ function getLeaderboard(sortBy = 'total_profit_units', limit = 10) {
   const rows = db.prepare(`
     SELECT
       c.id, c.display_name, c.discord_id,
-      COUNT(b.id) AS total_bets,
-      COUNT(CASE WHEN b.result = 'win' THEN 1 END) AS wins,
-      COUNT(CASE WHEN b.result = 'loss' THEN 1 END) AS losses,
-      COUNT(CASE WHEN b.result = 'push' THEN 1 END) AS pushes,
-      ROUND(
-        CAST(COUNT(CASE WHEN b.result = 'win' THEN 1 END) AS REAL) /
-        MAX(COUNT(CASE WHEN b.result IN ('win','loss') THEN 1 END), 1) * 100, 1
-      ) AS win_pct,
-      COALESCE(SUM(CASE WHEN b.result IN ('win','loss','push') THEN b.profit_units ELSE 0 END), 0) AS total_profit_units,
-      ROUND(
-        COALESCE(SUM(CASE WHEN b.result IN ('win','loss','push') THEN b.profit_units ELSE 0 END), 0) /
-        MAX(SUM(CASE WHEN b.result IN ('win','loss') THEN MAX(b.units, 1) ELSE 0 END), 1) * 100, 1
-      ) AS roi_pct
+      ${CAPPER_STATS_COLUMNS}
     FROM cappers c
     LEFT JOIN bets b ON b.capper_id = c.id AND b.season = ?
     GROUP BY c.id
@@ -741,12 +767,7 @@ function getLeaderboard(sortBy = 'total_profit_units', limit = 10) {
     LIMIT ?
   `).all(ACTIVE_SEASON, limit);
 
-  // Log abnormal ROI but display real value (no cap)
-  for (const row of rows) {
-    if (Math.abs(row.roi_pct) > 500) {
-      console.warn(`[ROI Alert] Abnormal ROI: ${row.display_name} ${row.roi_pct}% (${row.wins}W-${row.losses}L)`);
-    }
-  }
+  rows.forEach(flagAbnormalRoi);
   return rows;
 }
 
