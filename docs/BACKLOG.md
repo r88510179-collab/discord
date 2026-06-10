@@ -14,7 +14,7 @@ See that repo's docs/CODEMAP.md for env vars, config.json shape, and gotchas.
 
 ### F-12 — Twitter repost content-window dedup (#53, `3cfc694`)
 `services/twitter-handler.js` now drops same-capper / same-content / same-odds Twitter reposts inside a 12h window as `DUPLICATE_REPOST` (new drop reason), after `VALIDATED` and before bet creation. `findRecentRepost` deliberately **ignores the tweet id** (which `buildFingerprint` folds into its key, so id-different reposts otherwise both save). Collapses `bobby__tracker`'s same-day reposts (observed gaps ≤3.25h) while preserving legit different-day repeats (≥2 days) — the headline regression test. Applied to the normal path and per-step to the ladder path. Mapped in docs/CODEMAP.md §Twitter ingest.
-- **F-12 follow-up — dedup leak check (#60, `7fa1bfb`):** `services/dedupLeakCheck.js` — a daily read-only safety net (`reportDedupLeaks`, bot.js cron `0 13 * * *`) that re-derives the exact F-12 match key (imports `normalizeForDedup`, mirrors `findRecentRepost`) and posts one `#admin-log` alert **only if** a repost ever slips past the gate. Never writes. Read-only; 10 tests (`tests/dedup-leak-check.test.js`); deployed v576.
+- **F-12 follow-up — dedup leak check (#60, `7fa1bfb`):** `services/dedupLeakCheck.js` — a daily read-only safety net (`reportDedupLeaks`, bot.js cron `0 13 * * *`) that re-derives the exact F-12 match key (imports `normalizeForDedup`, mirrors `findRecentRepost`) and posts one `#admin-log` alert **only if** a repost ever slips past the gate. Never writes. Read-only; 10 tests (`tests/dedup-leak-check.test.js`); deployed with the Jun 8 v589–v591 deploys (the earlier "v576" claim was premature — v576 predates the #60 merge; live image v591 includes `7fa1bfb`, verified 2026-06-10).
 
 ### F-07 — slip-feed multi-image processing (#61, `d0753f1`)
 `handleSlipFeed` processed only `images[0]`; multi-slip messages silently lost bets `[1..n]`. Now loops `selectSlipImages(images)` (pure, exported): all `origin:'attachment'` real slips in order, capped at 4, each with a per-image ingestId (`slipImageIngestId`); embed/preview thumbnails are never multiply-processed. N=1 / embed-only / snapshot-only paths are byte-for-byte unchanged — only N≥2 real attachments changes behavior. Distinct from #40 (which fixed the OCR-first *measurement* count, not the live processing path). Mapped in docs/CODEMAP.md §messageHandler.
@@ -27,10 +27,11 @@ Removed three confirmed def-only, unexported functions from `handlers/messageHan
 ### Scraper-handle management + `guess_pray_bets` disabled (#46 `63595cd`, #54 `76e980a`)
 `scraper_handles` (migration 027, seeds 9 handles, `INSERT OR IGNORE` preserves manual edits) is the DB-driven source for the Surface Pro Twitter scraper, read scraper-side via `GET /api/scraper-handles` (`MOBILE_SCRAPER_SECRET`, `enabled=1` only). Operator/dashboard management over the same table: read `GET /api/admin/handles` + write `POST /api/admin/handles/:handle` (`handleSetHandleRoute` — toggles `enabled`/`note` on a seeded row, never inserts; `ADMIN_API_SECRET`). The external dashboard's **Handles tab** is built on these. **Operational note:** `guess_pray_bets` is toggled **disabled** — GNP (GuessAndPrayBets) now arrives via the DubClub bridge (see ✅ Shipped → DubClub split pipeline), not the Twitter scraper. Mapped in docs/CODEMAP.md §routes + §`scraper_handles` management.
 
-### Phase 2b-2 — on-demand hold Recover + backdate + sweeper-grace (#56 `5da6a49`, #59 `705db91`, #62 `94a973b`)
+### Phase 2b-2 — on-demand hold Recover + backdate + sweeper-grace (#56 `5da6a49`, #59 `705db91`, #62 `94a973b`, #65 `ad08321`)
 On-demand **Recover** for slip holds that were posted before their share-card unfurled (the HRB grade-before-unfurl race): `POST /api/admin/holds/:ingestId/recover` → `holdReview.recoverHold` re-fetches the now-unfurled message and re-runs the existing `vision_slip` extract+create path. Idempotent on `bets.source_message_id`; **creation-time `is_bet` gates and the hot won-race create path are untouched** (this rescues holds after they unfurl, it does not change any upstream drop). Two follow-ons make the rescued bet gradeable instead of instantly false-LOSSed:
 - **Backdate (#59):** `recoverHold` backdates the recovered bet's `created_at`+`event_date` to the original slip post time so every grader family anchors the real game date (holdReview-only; the hot create path still defaults `created_at=now`/`event_date=NULL`).
 - **Sweeper-grace (#62, migration 028):** because that backdate would make the bet instantly older than `SWEEP_DAYS` (7), `recoverHold` also stamps `bets.sweep_exempt_until = datetime('now','+3 days')` (the **recovery** moment, NOT backdated). The 7-Day Smart Sweeper (`grading.js runAutoGrade` → `evaluateSweep`) leaves any pending bet still inside its window pending (logged `[Sweeper] Grace skip …`) instead of auto-LOSS; past the window it sweeps normally. `sweep_exempt_until` defaults NULL for every normal bet (`evaluateSweep` reason `fresh`/`prop`/`grace`/`eligible`).
+- **Fetch-retry (#65, `ad08321`):** `recoverHold`'s Discord re-fetch now retries transient misses (`_fetchMessageWithRetry`, 3 attempts with [500, 1500]ms backoff; null and throw both retryable, `deps.sleep` test seam). Fetch-only — extraction/create path untouched.
 
 Mapped in docs/CODEMAP.md §services/holdReview.js + §7-Day Sweeper + recovery grace + §routes. The P1 HRB item above cross-refs why this rescues already-held slips without changing the upstream `ai_is_bet_false` drop.
 
@@ -94,7 +95,7 @@ Mapped in docs/CODEMAP.md §services/holdReview.js + §7-Day Sweeper + recovery 
 - Fix B (slip-share exemption in `validateParsedBet`, commit `3aadc63`, 2026-05-07): `services/ai.js:1515` defines `slipExempt = slipShape || hasMedia`, gates the entity-mismatch check at `:1573` and the brand checks at `:1598` / `:1608`. Closed the 98-hits/7d `VALIDATOR_ENTITY_MISMATCH` bucket. Fixes the case where Vision DID extract a bet from the image but text-only validator rejected the entities.
 - pipeline_events instrumentation (migrations 018 + 021): verified healthy 2026-05-13 — 1102 rows/24h, GRADE_* drop reasons stamping, zero synthetic `bet_%` ingest_ids, zero orphan-class drops.
 
-**Cross-ref — after-the-fact rescue shipped (Phase 2b-2), does NOT change this drop:** for HRB shares already sitting in the hold queue, on-demand **Recover** (#56, `5da6a49`; `POST /api/admin/holds/:ingestId/recover` → `holdReview.recoverHold`) re-fetches the now-unfurled message and re-runs the existing `vision_slip` extract+create path. Recovered bets are backdated to the slip post time (#59, `705db91`) and given a 3-day `sweep_exempt_until` grace window (#62, `94a973b`) so the 7-Day Sweeper can't false-LOSS them first. **Creation-time `is_bet` gates and `MANUAL_REVIEW_HOLD` staging are untouched** — this rescues holds after they unfurl; it does not alter the `ai_is_bet_false` drop analyzed above. Mechanism mapped in docs/CODEMAP.md (§services/holdReview.js + §7-Day Sweeper + recovery grace).
+**Cross-ref — after-the-fact rescue shipped (Phase 2b-2), does NOT change this drop:** for HRB shares already sitting in the hold queue, on-demand **Recover** (#56, `5da6a49`; `POST /api/admin/holds/:ingestId/recover` → `holdReview.recoverHold`) re-fetches the now-unfurled message and re-runs the existing `vision_slip` extract+create path. Recovered bets are backdated to the slip post time (#59, `705db91`) and given a 3-day `sweep_exempt_until` grace window (#62, `94a973b`) so the 7-Day Sweeper can't false-LOSS them first; the recover fetch retries transient Discord misses (#65, `ad08321`). **Creation-time `is_bet` gates and `MANUAL_REVIEW_HOLD` staging are untouched** — this rescues holds after they unfurl; it does not alter the `ai_is_bet_false` drop analyzed above. Mechanism mapped in docs/CODEMAP.md (§services/holdReview.js + §7-Day Sweeper + recovery grace).
 
 
 ### OCR-first SGP gate — would-hold measurement (PR 2a shadow) → drop→hold (PR 2b)
@@ -105,28 +106,11 @@ Mapped in docs/CODEMAP.md §services/holdReview.js + §7-Day Sweeper + recovery 
 **PR 2b (next — the only behavior change), gated on the shadow split looking right** (PASS on rescuable SGP, FAIL on phantom/junk): flip drop→hold on a gate PASS (signed-off design D2) and extend the `MANUAL_REVIEW_HOLD` payload + modal to carry the OCR legs (#41 discovery finding #2).
 
 
-### Retry storm: ai_pending_legs denial bypasses attempt cap
+### ~~Retry storm: ai_pending_legs denial bypasses attempt cap~~ — RESOLVED
 
-**Symptom**: Parlay bets with pending legs hit `canFinalizeBet()` P0 gate, which calls `scheduleRecheckAfterDenial(ai_pending_legs_N, 30)`. That schedule flips `grading_state` back to `'ready'`, not `'backoff'`. Grader picks it up 30s later, same pending legs, same denial, same 30s requeue. Normal bets cap at ~20 attempts via state machine escalation to backoff, but this path bypasses that cap. Observed 162-163 `grading_attempts` on 2 NBA parlays over 6-7 days.
+**RESOLVED (shipped, verified live 2026-06-10):** `scheduleRecheckAfterDenial` caps denial requeues at `RETRY_CAP=15`, then voids with `GRADE_BACKOFF_EXHAUSTED` inside a transaction (`services/grading.js:606-641`). The 162-attempt class cannot recur; `GRADE_BACKOFF_EXHAUSTED` firing ~3/day live (21 drops/7d per COA audit 2026-06-10 §F.5).
 
-**Observed bets (voided manually Apr 21)**:
-- `8260a66122cc1bd80731f02049071cbf` — 163 attempts, Portland/Phoenix play-in parlay
-- `5c963d41f9ee262d27e5e6e2c8878adc` — 162 attempts, Paul George / Franz Wagner parlay
-
-Both created ~Apr 14-15, `event_date = null`, never resolved.
-
-**Root cause (refined Apr 21 after data check)**:
-`scheduleRecheckAfterDenial(ai_pending_legs_N, 30)` flips `grading_state='ready'` unconditionally. The normal attempt-cap logic (which forces `backoff` at ~20 attempts for most bets) doesn't apply here. Effectively a backdoor around the state machine.
-
-The original hypothesis that `event_date = NULL` caused the loop was wrong. Null `event_date` is ubiquitous — 480 of ~580 all-time bets have it, most of which grade successfully (141 win, 98 loss, 145 void). The 2 voided bets (Apr 14-15 NBA parlays) were exceptional specifically because of this retry path, not their `event_date` state.
-
-**Next debug steps when resumed**:
-1. `grep -n "scheduleRecheckAfterDenial" services/grading.js` — find the call sites and review the retry escalation path
-2. Fix: cap `ai_pending_legs_N` recheck scheduling at N attempts (match the cap that applies to other failure modes), escalate to `backoff` after cap hit
-3. Consider a separate `grading_denial_count` column or use existing `grading_attempts` against a new threshold
-4. Note: null `event_date` itself is NOT a bug — it's the ingest default when source (Twitter, Discord text) doesn't have a clear game date. Ingest audit not needed for this issue.
-
-**Interim mitigation**: Stage 1.2 classifier now captures `ai_pending_legs_N` drops via `GRADE_AI_PENDING_NO_DATA` or `GRADE_PENDING_UNCLASSIFIED` depending on the evidence string. If you see a bet over 50 attempts in `/admin snapshot`, query its `drop_reason` in the `bets` table.
+Historical context for the record: 2 NBA parlays (`8260a661…` 163 attempts, `5c963d41…` 162 attempts, Apr 14-15 2026, voided manually Apr 21) were the observed storms — `scheduleRecheckAfterDenial(ai_pending_legs_N, 30)` flipped `grading_state='ready'` unconditionally, bypassing the normal ~20-attempt backoff escalation. Null `event_date` was ruled out as the cause. Full diagnostic preserved in this entry's git history.
 
 ## Grading Reconciliation Project — all-time regrade with Claude + ChatGPT
 
@@ -519,20 +503,14 @@ aistudio.google.com Free tier limits gemini-2.5-flash-lite to 20 RPD per project
 ### ~~pipeline_events instrumentation gap post-BUFFERED~~ — RESOLVED (predates 2026-04-30)
 STAGED emission already shipped: `recordStage` calls in `handlers/messageHandler.js:539` (Twitter path) and `:1147` (Discord path) both emit `stage: 'STAGED', eventType: 'STAGE_EXIT'` immediately after `createBetWithLegs` returns. Production verification 2026-05-08: 690 STAGED events recorded in `pipeline_events`. The wonderful-dirac branch entry that prompted this BACKLOG item was already obsolete when written.
 
-### Grading audit table
-Full decision trail per grading attempt. Admin command to dump trail for any bet ID.
+### ✅ Shipped foundation items (verified live 2026-06-10, COA audit M-11.4)
+These four sat as TODO long after shipping:
+- **Grading audit table** — live: `grading_audit` with 30,896 rows + `/admin` decision-trail surface.
+- **State snapshot admin command** — `/admin snapshot` shipped and in daily use.
+- **CI reliability gate** — `.github/workflows/ci.yml` runs `npm run check` + `npm run test:reliability` on PRs; with the suite now green (see "Pre-existing test failures" above) the gate is meaningful.
+- **Deploy verification protocol** — `docs/DEPLOY_CHECKLIST.md` exists and is required for every non-trivial deploy.
 
-### State snapshot admin command
-`/admin snapshot` → dumps full bot state in one message
-
-### CI reliability gate
-GitHub Actions workflow that blocks PRs on failing `npm run check` + `npm run test:reliability`
-
-### Test suite: migration-validation.js fails — pre-existing
-Codex audit Apr 22 ran `npm run test:reliability` and found it fails on `tests/migration-validation.js` with an assertion expecting `006_add_season_to_bets.sql` ordering/name mismatch. Not caused by recent work — predates Stage 1. Investigate before next major deploy that needs CI gating.
-
-### Deploy verification protocol
-`docs/DEPLOY_CHECKLIST.md` required for every non-trivial deploy
+Also resolved: the "Test suite: migration-validation.js fails — pre-existing" entry that lived here — `tests/migration-validation.js` passes as of `84650b8` (full `test:reliability` EXIT=0, 2026-06-10).
 
 ### README comprehensive documentation
 Architecture, env vars, admin commands, scraper setup, troubleshooting, guard chain reference
@@ -552,8 +530,8 @@ Apr 22 extended classifier with `GRADE_RESOLVER_PENDING` and `GRADE_PARLAY_LEGS_
 
 ## Surface Pro
 
-### Scraper (building now)
-Target 8 handles without TweetShift coverage
+### ~~Scraper (building now)~~ — SHIPPED (v2.0 in production)
+The Surface Pro Twitter scraper is live: `zonetracker-scraper` repo (in production at `6743106`, pm2 `zonetracker-scraper` online). Handle list is DB-driven via `scraper_handles` / `GET /api/scraper-handles` (see ✅ SHIPPED 2026-06-07/08 → Scraper-handle management). See that repo's README for polling/cursor behavior.
 
 ### Local Ollama for free AI grading
 Offload grading AI calls from Groq to local Ollama instance. Zero marginal cost. Slower but unlimited.
@@ -664,8 +642,8 @@ Replace external AI dependencies with Surface Pro Ollama:
 ### Parser PARSED event: `isBet` / `betCount` field mismatch
 In a v340 pipeline trace (msg=1499408189240774686, #datdude-slips, 2026-04-30), the PARSED payload showed `isBet:false` alongside `betCount:1` and `type:"bet"` — three fields telling different stories about the same parse. The bet went on to STAGED successfully so it is not blocking, but the inconsistency suggests stale flag wiring at the emit site. Audit wherever `pipeline_events.PARSED` is emitted and either drop the redundant flag or derive `isBet` from `betCount > 0` so the two cannot disagree. Risk if left: future filters that key off `isBet` could drop legitimate bets that the rest of the pipeline considers real.
 
-### Pre-existing test failures on main
-Three test files fail on `main` independent of recent changes (surfaced 2026-04-30 during validator and parser fixes): `tests/migration-validation.js` (assertion mismatch on `006_add_season_*.sql` filenames), `tests/twitter-pipeline-validation.js` (multi-pick mapping), and `tests/message-handler.integration.js` (mock omits `evaluateTweet` from `services/ai.js` export). Not blocking anything currently, but blocks the CI reliability gate from being meaningful. Triage all three — likely either fix the assertions/mocks or delete the dead tests.
+### ~~Pre-existing test failures on main~~ — RESOLVED
+✅ RESOLVED — reliability suite green as of `84650b8` (full `npm run test:reliability` EXIT=0, verified 2026-06-10): `tests/migration-validation.js` and `tests/message-handler.integration.js` now pass; `tests/twitter-pipeline-validation.js` was removed. The CI reliability gate is now meaningful.
 
 ### Twitter ingestion: recap leakage, slip-image bypass, missing audit trail
 
@@ -793,20 +771,16 @@ Fingerprint-composition idempotency migration cannot ship until this is fixed �
 ### /admin retest-slip command
 Admin command to delete dedupe + pipeline state for a given Discord message ID so the same slip can be reposted for testing without manually clearing tables. Should clear: dedupe table row (TBD name), pipeline_events rows, vision_failures rows, bets rows. Useful for debugging gate changes without needing fresh slip content.
 
-### Odds API: 401 Unauthorized on both primary and backup keys
-Live as of 2026-05-14 15:21 UTC. Every per-bet odds lookup fails 401 for baseball_mlb, icehockey_nhl (and likely all sports). War-room embeds still post but without live odds enrichment. Surfaced during v423 MAG7 verification. Fix: rotate Odds API keys, check billing/quota status on theoddsapi.com or whichever provider.
+### ~~Odds API: 401 Unauthorized on both primary and backup keys~~ — RESOLVED
+✅ RESOLVED 2026-06-10 — free-tier quota reset June 1 restored auth (HTTP 200 on `/v4/sports` with the primary key, verified from the Fly container; COA audit §F.7). The 401s were quota exhaustion, not bad keys. The caching design (`odds_snapshots`, see "Odds API caching" below) remains the pre-July to-do if usage repeats the burn rate.
 
 ### v423 VERIFIED — DubClub MAG7 sheets ingest as per-sport straights
 Smokke-posted test slip in #lockedin-slips at 15:20:49 UTC produced 7 separate war-room embeds, each tagged with correct per-leg sport (NHL, MLB, etc). SHEET vs PARLAY rule fires correctly. No HALLUCINATION BLOCKED. Vision AI also resolved OCR ambiguity (Bills+Sabres → Sabres NHL; Dolphins+Marlins → Marlins MLB). Closes the "LockedIn multi-section sheets skip NBA" issue class for sheet-shape inputs.
 
 ## 🚨 KNOWN ISSUES — Surfaced 2026-05-14, Deferred
 
-### Cerebras llama3.1-8b retires 2026-05-27 (13 days)
-Cerebras docs banner: "llama3.1-8b and qwen-3-235b-a22b-instruct-2507 will be deprecated on May 27, 2026." services/ai.js:44 defaults CEREBRAS_MODEL to llama3.1-8b. This is the PRIMARY tier in grader waterfall (940 successful calls / week per Cerebras CSV). MUST migrate before May 27 or grader primary dies.
-
-Fix options: (a) set CEREBRAS_MODEL=gpt-oss-120b in Fly secrets (one-liner, easiest), or (b) consolidate waterfall — drop cerebras tier since it now offers same model as Groq, simplify to gpt-oss-120b on Groq → llama-3.1-8b-instant on Groq → ollama. Option (a) ships in 1 command. Option (b) is cleaner architecturally but requires a session to decide tier order and verify under load.
-
-Recommended: ship (a) immediately as a fresh Fly secret set + restart, plan (b) for next architecture session.
+### ~~Cerebras llama3.1-8b retires 2026-05-27~~ — RESOLVED (deadline passed without incident)
+✅ RESOLVED — option (a) shipped pre-deadline: `fly secrets set CEREBRAS_MODEL=gpt-oss-120b` (v426) + code default aligned at `services/ai.js:44` (v428, see ✅ SHIPPED 2026-05-14). Current state (verified in code 2026-06-10): the grader waterfall leads with `groq-llama4-scout` and pins Cerebras to `gpt-oss-120b` hardcoded at `services/grading.js:2254` — Cerebras is no longer the primary tier. Stale line refs (`:1995`, qwen literal) corrected in the "Wire Cerebras grader model to env var" entry below.
 
 ### Gemma fallback returns empty responses (NOT a config bug)
 Verified 2026-05-14: OLLAMA_URL IS set on Fly (https://tracker-surface-pro.tail65f8f0.ts.net), OLLAMA_PROXY_SECRET set (len=64), proxy returns 200 + gemma3:4b loaded via direct curl test. So function does NOT bail at services/ai.js:707. The empty `gemma_response` rows (23 in 7 days, all gemma_len=0) come from somewhere later in the call path. Hypotheses to investigate next session:
@@ -817,6 +791,8 @@ Verified 2026-05-14: OLLAMA_URL IS set on Fly (https://tracker-surface-pro.tail6
 Add temporary debug logging around services/ai.js:741 (the data.response read) to see what Ollama actually returns on a real production slip.
 
 ### Odds API exhausted (the-odds-api.com)
+> ✅ Resolved by the June-1 quota reset — HTTP 200 round-trip verified from the container 2026-06-10 (COA audit §F.7). Kept for context; caching remains the pre-July lever.
+
 Free tier: 498/500 credits used, resets June 1 at 12AM UTC. Both keys (primary + backup) on same usage pattern. Bot logs 401 because the-odds-api returns 401 when over quota (not 429). War-room embeds still post; just no live odds enrichment. Fix options: (a) upgrade to $30/mo for 20K credits, (b) cache aggressively + only enrich on stage-to-war-room, (c) wait until June 1. Business decision, not code.
 
 ### GNP-slips silent drop on 2026-05-14
@@ -938,13 +914,17 @@ Both Cerebras and Groq now serve `gpt-oss-120b`. Current waterfall (cerebras →
 
 The-odds-api.com free tier exhausted 2026-05-14 (498/500 credits used, returning 401 since). Quota resets June 1 00:00 UTC. Decision before then: (a) wait and stay on free, (b) upgrade to $30/mo for 20K credits, (c) aggressive caching to extend free tier coverage. Business decision — pending Smokke's read on signal-to-cost ratio.
 
+> Update 2026-06-10: option (a) is what effectively happened — the June-1 reset restored auth (HTTP 200 verified from the container, COA audit §F.7). Caching (`odds_snapshots` design above) is the standing pre-July to-do if the burn rate repeats.
+
 ### Wire Cerebras grader model to env var
-`services/grading.js:1995` hardcodes the Cerebras model literal (`qwen-3-235b-a22b-instruct-2507` as of v445). The `CEREBRAS_MODEL` Fly secret exists but is unused at this call site, so model swaps require a code deploy. Either change the literal to `process.env.CEREBRAS_MODEL || 'qwen-3-235b-a22b-instruct-2507'` so swaps are `fly secrets set` + restart, or drop the unused secret to avoid confusion. Same pattern likely applies at `services/ai.js:44` — verify before touching. Low priority — current model works.
+(Refreshed 2026-06-10, COA audit M-11.7 — prior line refs were stale.) The grader waterfall pins the Cerebras provider to `gpt-oss-120b` hardcoded at `services/grading.js:2254` (provider `cerebras-gpt-oss`; the waterfall now leads with `groq-llama4-scout` at `:2251`). The `CEREBRAS_MODEL` Fly secret exists but is unused at this call site, so model swaps require a code deploy. Either change the literal to `process.env.CEREBRAS_MODEL || 'gpt-oss-120b'` so swaps are `fly secrets set` + restart, or drop the unused secret to avoid confusion. Note `services/ai.js:44` already does this correctly (`process.env.CEREBRAS_MODEL || 'gpt-oss-120b'`). Low priority — current model works. Caveat: smoke-test any swap against the grader's `max_tokens` budget (now 1000 at `services/grading.js:2323`; the v441 starvation happened at the old 200 — see the v441/v442 postmortem above).
 
 ## Discovered 2026-05-19 (Phase 1 session)
 
 ### Bing scraper returns generic news (not just 402)
-Memory #30. `services/grading.js:1369-1404` parses `class="b_algo"` which Microsoft changed. Returns HTTP 200 with MLB.com/ESPN homepage HTML, not game recaps. Phase 1 (commit 9a19ba6) mitigates for MLB/NBA/NHL. Soccer/golf/tennis/MMA still affected. Fix: defensive multi-selector parsing + generic-news detector that returns "no reliable evidence" → PENDING instead of forcing a bad parse.
+Memory #30. `searchBing` (`services/grading.js:1645-1681`; `b_algo` split at `:1662` — prior `:1369-1404` ref was stale) parses `class="b_algo"` which Microsoft changed. Returns HTTP 200 with MLB.com/ESPN homepage HTML, not game recaps. Phase 1 (commit 9a19ba6) mitigates for MLB/NBA/NHL. Soccer/golf/tennis/MMA still affected. Fix: defensive multi-selector parsing + generic-news detector that returns "no reliable evidence" → PENDING instead of forcing a bad parse.
+
+> Audit 2026-06-10: still live — 84 Brave fallbacks/7d (vs 1262 Bing "ok"), and the circuit breaker is parse-blind (any HTTP 200 records `ok`, including 0-hit drifted markup and junk hits), so the broken-parse class never opens the breaker; see COA audit M-3 for the written-out resolution (PARSE_EMPTY + generic-news detector in `searchBing`).
 
 **Symptom ↔ cause — "bets stuck pending / everything voids":** this is a **search-layer** symptom, not a grader bug. When the backends here return garbage or no usable evidence, the grader correctly emits repeated PENDING, and `shouldAutoVoidNoData` (5+ no-data PENDINGs over 12h, `services/grading.js`) then converts those to VOID — so a broad search degradation reads downstream as mass stuck-pending followed by mass voids. The live driver is the Bing generic-news return above (non-MLB/NBA/NHL sports); Brave-402 is already resolved (see that item above). Lever is the search layer, not the grader. Distinct from the "Unknown-sport straight voids" bucket above, which is missing sport classification rather than backend health.
 
@@ -1117,7 +1097,9 @@ This is a third bug: bet legs visible in tweet text, parser still returns `is_be
   ORDER BY created_at DESC LIMIT 30;
 ```
 
-## P2 — `recordStage()` does not enforce enum at write boundary
+## ✅ SHIPPED (#49) — `recordStage()` write-boundary enum validation
+
+**SHIPPED as #49 (verified in code 2026-06-10):** soft warn-only validation `warnUnknownEnums` runs at the single write boundary (`services/pipeline-events.js:127` definition, called from `writeRow` at `:154`) — non-canonical `sourceType`/`stage`/`eventType`/`dropReason` values log one attributable warn line and still write (fire-and-forget contract preserved). The drifted values observed in prod were registered in the canonical arrays. Original finding preserved below for context.
 
 **Source:** Audit finding F-17 (`docs/audits/2026-05-22-full-audit.md`).
 
@@ -1167,9 +1149,8 @@ This is a third bug: bet legs visible in tweet text, parser still returns `is_be
 - (also check Philadelphia "philly", Kansas City "kansas city")
 **Fix**: Remove bare ambiguous-city aliases. Each entry keeps non-ambiguous aliases (e.g. Ravens keeps "ravens"/"bal"/"baltimore ravens"). BUILD A TEST HARNESS FIRST: run normalizeDescription against ~30 real bet descriptions from the bets table, diff before/after, confirm only ambiguous cases change. This is shared normalization affecting every capper — do not hand-edit without the harness. Codex audit before deploy.
 
-### Odds API key 401 Unauthorized
-**Symptom**: `[Odds] API error: 401 Unauthorized` on every MLB bet, primary AND backup key. Returns 0 events. Feeds the existing "86% of slip bets have bad odds" problem.
-**Fix**: rotate/verify the odds API key(s). Check which provider, check billing/expiry.
+### ~~Odds API key 401 Unauthorized~~ — RESOLVED
+✅ RESOLVED 2026-06-10 — free-tier quota reset June 1 restored auth (HTTP 200 verified from the container; COA audit §F.7). Same root cause as the 2026-05-14 entry above: quota exhaustion returned as 401, no key rotation was needed. The caching design (`odds_snapshots`) remains the pre-July to-do if usage repeats the burn rate.
 
 ## P1 follow-ups
 

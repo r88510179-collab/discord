@@ -56,7 +56,7 @@ PK is `id` (TEXT, hex hash — **NOT** `bet_id`, common memory error).
 | grading_next_attempt_at | TEXT | reaper-driven |
 | grading_last_failure_reason | TEXT | |
 | grading_lock_until | TEXT | optimistic lock |
-| grading_state | TEXT | "pending" / "graded" / "locked" — mig 016 atomic guard |
+| grading_state | TEXT | mig 016 atomic guard; live values are `done`/`backoff`/`quarantined`/`ready`/`graded` — see §Enums |
 | drop_reason | TEXT | first-class column |
 | drop_reason_set_at | INTEGER | epoch sec |
 | grader_version | TEXT | mig 026 (Gate 2) — code-constant grading-logic version that produced the final grade |
@@ -107,7 +107,7 @@ PK is `id` (TEXT, hex hash — **NOT** `bet_id`, common memory error).
 
 ### `grading_audit`
 
-Every grader attempt logged. Cols: `bet_id, attempt_num, timestamp INTEGER, sport_in/out, reclassified, is_parlay, leg_index, leg_count, search_backend, search_query, search_hits, search_duration_ms, provider_used, raw_response, guards_passed, guards_failed, final_status, final_evidence`. Created via `CREATE TABLE IF NOT EXISTS` in `services/database.js:97` (NOT a numbered migration). `timestamp` is epoch **MILLIS** (`Date.now()`) — window filters use `timestamp >= (unixepoch()-N)*1000` (see the daily cap at `grading.js:~1105`), not `datetime('now',…)`. `guards_passed`/`guards_failed` are JSON-array TEXT. **B0 (2026-06-04):** Gate-3 would-fire events ride `guards_failed` as a `GATE3_WOULD_FIRE|mode=|claimed=|prop=|reason=` token (`SELECT … WHERE guards_failed LIKE '%GATE3_WOULD_FIRE%'`); `guards_failed` is display-only (`commands/admin.js:439`) and never gates grading.
+Every grader attempt logged. Cols: `bet_id, attempt_num, timestamp INTEGER, sport_in/out, reclassified, is_parlay, leg_index, leg_count, search_backend, search_query, search_hits, search_duration_ms, provider_used, raw_response, guards_passed, guards_failed, final_status, final_evidence`. Created via `CREATE TABLE IF NOT EXISTS` in `services/database.js:97` (NOT a numbered migration). `timestamp` is epoch **MILLIS** (`Date.now()`) — window filters use `timestamp >= (unixepoch()-N)*1000` (see the daily cap at `grading.js:~1178`), not `datetime('now',…)`. `guards_passed`/`guards_failed` are JSON-array TEXT. **B0 (2026-06-04):** Gate-3 would-fire events ride `guards_failed` as a `GATE3_WOULD_FIRE|mode=|claimed=|prop=|reason=` token (`SELECT … WHERE guards_failed LIKE '%GATE3_WOULD_FIRE%'`); `guards_failed` is display-only (`commands/admin.js:439`) and never gates grading.
 
 ### `regrade_results`, `regrade_batches`, `bet_grade_history` (mig 022)
 
@@ -115,7 +115,7 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 
 ### Other tables
 
-`bankrolls, bet_props, bot_health_log, cappers, daily_snapshots, processed_tweets, resolver_events (orphaned), scan_state, schema_migrations, search_backend_calls, settings, tracked_twitter, twitter_audit_log, user_bets, users, vision_failures`. Run `PRAGMA table_info(<name>)` before assuming structure for any of these.
+`bankrolls, bet_props, bot_health_log, cappers, daily_snapshots, processed_tweets, resolver_events (orphaned), scan_state, schema_migrations, scraper_handles (mig 027 — documented under §scraper_handles management), search_backend_calls, settings, tracked_twitter, twitter_audit_log, user_bets, users, vision_failures`. Run `PRAGMA table_info(<name>)` before assuming structure for any of these.
 
 ## Enums (live-verified 2026-05-21)
 
@@ -131,11 +131,15 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 
 **`bets.grade`**: `WIN`, `LOSS`, `VOID`, `PUSH` (uppercase) or NULL while pending
 
-**`bets.grading_state`** (mig 016): `pending`, `graded`, `locked`
+**`bets.grading_state`** (live-verified 2026-06-10): `done`, `backoff`, `quarantined`
+(attempts ≥ 20, terminal — no auto-exit), `ready`, `graded`. The mig-016 doc values
+`pending`/`locked` no longer occur.
 
-**`bets.source`** (observed): `vision_slip`, `hold_review_script`, `manual_hold_release`, `untracked_win`. Set wherever `createBetWithLegs` is called.
+**`bets.source`** (live-verified 2026-06-10, by volume): `twitter_vision`, `vision_slip`,
+`twitter_text`, `discord`, `twitter` (legacy), `untracked_win`, `hold_review_script`,
+`twitter_mobile` (legacy), `manual_hold_release`. Set wherever `createBetWithLegs` is called.
 
-**`pipeline_events.stage`**: `RECEIVED`, `AUTHORIZED`, `BUFFERED`, `EXTRACTED`, `PARSED`, `VALIDATED`, `STAGED`, `DROPPED`, `MANUAL_REVIEW_HOLD`, `MANUAL_REVIEW_DISMISSED`, `PURE_SLIP_SKIP_HOLD`, `GRADING_ENTER`, `GRADING_SEARCH`, `GRADING_AI`, `GRADING_GUARDS`, `GRADING_COMPLETE`, `GRADING_DROPPED`. Enum lives at `services/pipeline-events.js:18`. Note: `STAGE_ENTER` etc. listed here previously were `event_type` values, not stages — those are `STAGE_ENTER`, `STAGE_EXIT`, `DROP`, `ERROR` (line 32). `recordStage()` does not enforce the enum at the write boundary (see audit F-17).
+**`pipeline_events.stage`**: `RECEIVED`, `AUTHORIZED`, `BUFFERED`, `EXTRACTED`, `PARSED`, `VALIDATED`, `STAGED`, `DROPPED`, `MANUAL_REVIEW_HOLD`, `MANUAL_REVIEW_DISMISSED`, `PURE_SLIP_SKIP_HOLD`, `GRADING_ENTER`, `GRADING_SEARCH`, `GRADING_AI`, `GRADING_GUARDS`, `GRADING_COMPLETE`, `GRADING_DROPPED`. Enum lives at `services/pipeline-events.js:18`. Note: `STAGE_ENTER` etc. listed here previously were `event_type` values, not stages — those are `STAGE_ENTER`, `STAGE_EXIT`, `DROP`, `ERROR` (line 32). Write-boundary enum validation shipped as #49: `warnUnknownEnums` (`services/pipeline-events.js:127`, called at the single write boundary L154) warn-only logs non-canonical values and still writes (fire-and-forget contract preserved; closes audit F-17).
 
 **`hold_review_decisions.human_decision`**: `release`, `dismiss`, `edit`
 
@@ -174,7 +178,7 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 
 **`raw_text` semantics — two ingest paths, inconsistent by history (NOT a bug):**
 - Pure-slip / HRB path (`processAggregatedMessage`, L1288): `raw_text` = the scrubbed Discord message *body* (`cleanText`, defined L683). For HRB shares that body is share-card boilerplate (e.g. "Check out this bet I placed on Hard Rock Bet!"), **not** the Vision extraction.
-- Vision extraction lands in `description` — intentional. The grader reads `description` only and never `raw_text` (enforced by the `buildGraderSearchQuery` doc-comment at `services/grading.js:~1287-1295` + `tests/grader-uses-description.test.js`), so the HRB `raw_text` boilerplate is purely cosmetic — do not "fix" it.
+- Vision extraction lands in `description` — intentional. The grader reads `description` only and never `raw_text` (enforced by the `buildGraderSearchQuery` doc-comment at `services/grading.js:~1416-1430` + `tests/grader-uses-description.test.js`), so the HRB `raw_text` boilerplate is purely cosmetic — do not "fix" it.
 - `processSlipImage` (L562) differs: stores `ocrText || description` in `raw_text`. The two paths diverge by history, not design intent — recorded here so it is not mistaken for a bug.
 
 **Hold rescue is messageUrl-based — the slip image is never rendered, `payload.imageUrl` is never read (do NOT "persist imageUrl"):**
@@ -210,6 +214,10 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 > +31 from `reduceParlayResult` down, +56 from `gradeSingleBet` down. The Gate-3
 > would-fire event now persists to `grading_audit.guards_failed` as a
 > `GATE3_WOULD_FIRE|…` marker on the attempt's existing row (zero extra rows).
+> Refreshed again 2026-06-10 (COA audit M-10): the #62 sweeper-grace block
+> (~L1124–1165) had been mapped for its own rows but everything below it was
+> never re-shifted — every row from `gradeFromCelebration` down was +43 stale.
+> All rows below re-verified against `main`@84650b8.
 
 | What | Line(s) |
 | --- | --- |
@@ -217,21 +225,21 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 | **Gate 2** `GRADER_VERSION` / `computeEvidenceHash` / `decideFinalGradeWrite` | 20 / 25 / 45 |
 | **Gate 3** quote-bound grading — tri-state `QUOTE_BOUND_GRADING` (`off`/`shadow`(default)/`enforce`); shadow logs `[GATE3 would-fire]` and leaves the grade, enforce forces PENDING (`UNVERIFIED_QUOTE`); unknown/legacy → shadow | `normalizeQuoteWhitespace` 76; `validateEvidenceQuote` 89; `resolveGate3Mode` 115; `applyGate3` 129 (returns `claimed` for the marker) |
 | **Gate 3 (B0)** `buildGate3WouldFireMarker` — pure; returns `GATE3_WOULD_FIRE\|mode=\|claimed=\|prop=\|reason=` token or `null` (off / quote ok). Caller pushes it onto `audit.guards_failed` (display-only; never gates grading) so the event rides the attempt's existing `grading_audit` row — **zero extra rows** (a dedicated row would perturb `shouldAutoVoidNoData`'s recent-5 + the daily cap). Query: `WHERE guards_failed LIKE '%GATE3_WOULD_FIRE%'` | 177 (fn); marker const 176 |
-| `looksLikePlayerProp` | 261 (fn); structured gate → `tryStructured` 2128 (call L2129) |
+| `looksLikePlayerProp` | 261 (fn); structured gate → `tryStructured` 2171 (call L2172) |
 | `canFinalizeBet` | 532 |
 | `scheduleRecheckAfterDenial` | 606 |
 | `calcProfit` | 986 |
-| `gradeFromCelebration` | 1263 |
-| `buildGraderSearchQuery` (description-only; doc-comment above) | 1390 |
-| `searchBing` (BROKEN — returns 200 OK with garbage HTML) | 1602 |
-| `gradePropWithAI` (dispatch: parlay→gradeParlay, else gradeSingleBet) | 1736 |
-| `isTrustedLossLeg` (Bug A Part 1, v438) | 1802 |
-| `aggregateParlayLegResults` (now downgrades untrusted-LOSS→PENDING, then delegates precedence to Gate 1 reducer) | 1857 (fn); reducer call 1894; "Parlay LOSS — leg N" emit 1904 |
-| `gradeParlay` (builds per-leg `legBet` with `bet_type:'straight'` — legs have no stored prop flag) | 1923 |
-| `writeGradingAudit` (module-level; extracted from the `gradeSingleBet` `writeAudit` closure, B0) — one `grading_audit` row per attempt; `timestamp` is epoch MILLIS | 1964 |
-| `gradeSingleBet` | 1985; structured pre-check 2129; **Gate 3** quote check 2324 (`applyGate3` call 2331; B0 would-fire marker push 2342–2343); grader waterfall 2207–2229 (groq-llama4-scout 2208 → cerebras-gpt-oss → groq-qwen → openrouter → groq-gpt-oss → mistral → ollama → groq-llama8b 2229) |
-| `finalizeBetGrading` | 2468 (also exported as `gradeBet`); **Gate 2** idempotency check 2472; atomic write stamps `grader_version`+`evidence_hash` via `gradeBetRecord` |
-| `resolvePlayerProp` | REMOVED (v459) — replaced by `tryStructured()` from services/sportsdata, called at L2129 |
+| `gradeFromCelebration` | 1306 |
+| `buildGraderSearchQuery` (description-only; doc-comment above) | 1433 |
+| `searchBing` (BROKEN — returns 200 OK with garbage HTML) | 1645 (`b_algo` split 1662) |
+| `gradePropWithAI` (dispatch: parlay→gradeParlay, else gradeSingleBet) | 1779 |
+| `isTrustedLossLeg` (Bug A Part 1, v438) | 1845 |
+| `aggregateParlayLegResults` (now downgrades untrusted-LOSS→PENDING, then delegates precedence to Gate 1 reducer) | 1900 (fn); reducer call 1937; "Parlay LOSS — leg N" emit 1947 |
+| `gradeParlay` (builds per-leg `legBet` with `bet_type:'straight'` — legs have no stored prop flag) | 1966 |
+| `writeGradingAudit` (module-level; extracted from the `gradeSingleBet` `writeAudit` closure, B0) — one `grading_audit` row per attempt; `timestamp` is epoch MILLIS | 2007 |
+| `gradeSingleBet` | 2028; structured pre-check 2172; **Gate 3** quote check 2367 (`applyGate3` call 2374; B0 would-fire marker push 2385–2386); grader waterfall 2250–2272 (groq-llama4-scout 2251 → cerebras-gpt-oss → groq-qwen → openrouter → groq-gpt-oss → mistral → ollama → groq-llama8b 2272) |
+| `finalizeBetGrading` | 2511 (also exported as `gradeBet`); **Gate 2** idempotency check 2515; atomic write stamps `grader_version`+`evidence_hash` via `gradeBetRecord` |
+| `resolvePlayerProp` | REMOVED (v459) — replaced by `tryStructured()` from services/sportsdata, called at L2172 |
 
 ### services/sportsdata/ (Phase 1 structured grading, v459)
 | File | Purpose |
@@ -331,9 +339,12 @@ The grading cron's **7-Day Smart Sweeper** auto-grades any pending **non-prop** 
 | --- | --- |
 | `/admin pipeline-trace` | 114 (def), 808 (handler) |
 | `/admin pipeline-drops-24h` | 120 (def), 887 (handler) |
-| `/admin snapshot` resolver panel | 100 (def), 541 (handler), 707–767 (resolver panel) |
-| `/admin resolver-health` | 129 (def), 995 (handler) |
 | `/admin dedup-stats-24h` | 144 (def), 922 (handler) |
+
+> Resolver panels removed: `commands/admin.js` contains zero resolver references
+> today and `services/resolver.js` is deleted — only the `resolver_events` table
+> (orphaned, 481 rows) + `fly.toml` env refs (`RESOLVER_URL`/`RESOLVER_VERSION`)
+> remain; the `zonetracker-resolver` Fly app is suspended (see audit 2026-06-10).
 
 ### scripts/
 | Script | Purpose |
