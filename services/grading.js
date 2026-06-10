@@ -1446,12 +1446,24 @@ function extractSubject(description) {
   return protectedLeg
     .replace(/•/g, '')                          // bullet points
     .replace(/\+/g, ' ')                        // "Hits+Runs+RBIs" → "Hits Runs RBIs"
+    // Slash/backslash JOIN two tokens — they must become a SPACE, never be
+    // deleted. Live bug (June 2026): "McGhee/Yannis ITD" fused into the query
+    // "McGheeYannis ITD"; DubClub/total formats like "CHC/PHI" likewise fused
+    // to "CHCPHI". Run before the symbol strip so the strip can't eat them.
+    .replace(/[/\\]/g, ' ')
     .replace(/\b(over|under|less|more|o|u|alt)\b/gi, '') // direction words
     .replace(/\d+\.?\d*/g, '')                  // lines/odds/stats (protected ordinals are sentinels now)
     .replace(/\b(pts?|points?|reb|rebounds?|ast|assists?|stl|steals?|blk|blocks?|yds|yards?|tds?|touchdowns?|hr|home\s*runs?|hits?|runs?|rbis?|ks?|strikeouts?|sog|shots?|saves?|aces?|goals?|sacks?|receptions?|completions?|pass\s*yds|rush\s*yds|rec\s*yds)\b/gi, '') // ALL stat categories
     .replace(/\b(ml|moneyline|spread|rl|pk|parlay|teaser|to win|to lose|1q|2q|3q|4q|1h|2h|fg|ft|prop|anytime|first|last|td|scorer)\b/gi, '') // market types
-    .replace(/[()[\]{}<>•·–—@#,;:/\\]/g, '')   // symbols
+    .replace(/[()[\]{}<>•·–—@#,;:]/g, '')      // symbols (slash/backslash already spaced above)
     .replace(new RegExp(SENT, 'g'), () => stash[qi++]) // restore ordinals (in order)
+    // Drop ORPHAN dashes left after odds/parens are stripped. Live bug (June
+    // 2026): "Joanderson Brito ML (-165)" → number strip "(-)" → symbol strip
+    // "Brito  -" → query "Joanderson Brito - UFC final score...". The ASCII
+    // hyphen is intentionally absent from the symbol class above so intra-word
+    // hyphens ("Saint-Denis", "Smith-Jones") survive; here we remove only a
+    // dash-run isolated by whitespace/boundary on both sides.
+    .replace(/(^|\s)-+(?=\s|$)/g, '$1')
     .replace(/\s+/g, ' ')                       // collapse whitespace
     .trim();
 }
@@ -1769,6 +1781,67 @@ async function searchDDG(query) {
   return [];
 }
 
+// ── Defensive Bing SERP parse ──────────────────────────────────────────
+// Bing renames its organic-result wrapper and snippet container every few
+// months. A single hard-coded selector (the old `class="b_algo"` +
+// `b_caption>p` pair) silently rots to zero hits when the markup drifts
+// (COA audit M-3). Parse with an ORDERED list of block delimiters — the
+// first delimiter that yields ≥1 usable hit wins — and within each block
+// try several title/snippet selectors in order. A total miss is SAFE:
+// assessSearchResults() flags parse_empty and searchWeb falls through to
+// Brave (S2 honesty gate — do NOT weaken it to paper over a parse miss).
+//
+// Live-capture note: a `curl` of bing.com/search from a datacenter/dev IP
+// returns only the search-box shell (no organic results), so these
+// selectors are built from KNOWN Bing markup variants, not a live fixture.
+const BING_BLOCK_DELIMITERS = ['class="b_algo"', 'class="b_algoheader"', 'class="b_ans"'];
+const BING_TITLE_SELECTORS = [
+  /<h2[^>]*>([\s\S]*?)<\/h2>/i,                         // standard organic title
+  /<h3[^>]*>([\s\S]*?)<\/h3>/i,                         // some answer/news cards
+  /<a[^>]*class="[^"]*tilk[^"]*"[^>]*>([\s\S]*?)<\/a>/i, // titled-link variant
+  /<a[^>]*>([\s\S]*?)<\/a>/i,                           // first anchor — last resort
+];
+const BING_SNIPPET_SELECTORS = [
+  /class="b_caption"[^>]*>[\s\S]*?<p[^>]*>([\s\S]*?)<\/p>/i,        // classic caption>p
+  /<p[^>]*class="[^"]*b_lineclamp[^"]*"[^>]*>([\s\S]*?)<\/p>/i,     // newer line-clamp snippet
+  /class="b_algoSlug"[^>]*>([\s\S]*?)<\/(?:div|p|span)>/i,         // slug/metadata variant
+  /<p[^>]*>([\s\S]*?)<\/p>/i,                                      // first <p> — last resort
+];
+
+// Strip inner tags, decode entities, trim. Returns '' if nothing usable.
+function cleanBingFragment(raw) {
+  if (!raw) return '';
+  return decodeHTML(raw.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+}
+
+function firstSelectorMatch(block, selectors) {
+  for (const re of selectors) {
+    const m = block.match(re);
+    if (m) {
+      const cleaned = cleanBingFragment(m[1]);
+      if (cleaned) return cleaned;
+    }
+  }
+  return '';
+}
+
+// Exported via _internal for fixture-driven tests. Pure: HTML string → hits.
+function parseBingHtml(html) {
+  const text = String(html || '');
+  for (const delim of BING_BLOCK_DELIMITERS) {
+    if (!text.includes(delim)) continue;
+    const blocks = text.split(delim).slice(1, 6); // up to 5 organic blocks
+    const results = [];
+    for (const block of blocks) {
+      const title = firstSelectorMatch(block, BING_TITLE_SELECTORS);
+      const snippet = firstSelectorMatch(block, BING_SNIPPET_SELECTORS);
+      if (title || snippet) results.push({ title, snippet });
+    }
+    if (results.length > 0) return results; // first delimiter that parses wins
+  }
+  return [];
+}
+
 // Bing scrape with increased timeout.
 // NOTE: Bing is the workhorse backend — tracked but NOT gated by a breaker
 // so snapshot can show its state without risking a breaker tripping and
@@ -1789,15 +1862,7 @@ async function searchBing(query) {
     }
 
     const html = await res.text();
-    const results = [];
-    const blocks = html.split('class="b_algo"');
-    for (const block of blocks.slice(1, 6)) {
-      const titleMatch = block.match(/<a[^>]*>([^<]+)<\/a>/);
-      const snippetMatch = block.match(/class="b_caption"[^>]*>[\s\S]*?<p[^>]*>([\s\S]*?)<\/p>/);
-      const title = titleMatch ? decodeHTML(titleMatch[1]).trim() : '';
-      const snippet = snippetMatch ? decodeHTML(snippetMatch[1].replace(/<[^>]+>/g, '')).trim() : '';
-      if (title || snippet) results.push({ title, snippet });
-    }
+    const results = parseBingHtml(html);
     const assessed = assessSearchResults(results, query, { checkRelevance: true });
     if (assessed.status === 'parse_empty') {
       console.log(`[Search] Backend=Bing | Result=PARSE_EMPTY | Duration=${duration}ms`);
@@ -2828,7 +2893,7 @@ module.exports = {
   _internal: {
     looksLikePlayerProp, parsePlayerPropDescription, searchWeb, isTrustedLossLeg, aggregateParlayLegResults,
     parlayLegDataComplete,                             // early leg-completeness guard (1-leg-parlay fix)
-    assessSearchResults, getBackendSnapshot, extractSubject, // S2 — search backend honesty (M-3) + query builder
+    assessSearchResults, getBackendSnapshot, extractSubject, parseBingHtml, // S2 — search backend honesty (M-3) + query builder + defensive Bing parse
 
     // Phase-1 grading gates:
     reduceParlayResult, normalizeLegStatus,            // Gate 1
