@@ -595,21 +595,33 @@ module.exports = {
 
       // ── 4. Grading health ──
       const lastGrade = db.prepare("SELECT MAX(graded_at) as last FROM bets WHERE graded_at IS NOT NULL").get()?.last || 'never';
-      const { backendHealth } = require('../services/grading');
+      const { getBackendSnapshot } = require('../services/grading');
       const { espnStats } = require('../services/espn');
+      // Real per-backend state (COA audit M-3): lastSuccess is now a true
+      // "last good result" timestamp (parse failures no longer record `ok`),
+      // surfaced in every state. 'OPEN' = gated backend searchWeb is skipping;
+      // 'DEGRADED' = un-gated workhorse (bing/serper) whose circuit is open but
+      // is still attempted — shown distinctly so it doesn't read as "grading dead".
+      const snapById = {};
+      for (const s of getBackendSnapshot()) snapById[s.name] = s;
+      const fmtAge = (ms) => (ms == null ? 'never' : `${Math.floor(ms / 60000)}m ago`);
       const fmtBackend = (name) => {
-        const h = backendHealth[name];
-        if (!h) return 'unknown';
-        if (h.openUntil && Date.now() < h.openUntil) {
-          const m = Math.ceil((h.openUntil - Date.now()) / 60000);
-          return `OPEN (${h.lastError || 'unknown'}, ${m}m)`;
+        const s = snapById[name];
+        if (!s) return 'unknown';
+        const lastOk = `last ok ${fmtAge(s.lastSuccessAgeMs)}`;
+        switch (s.state) {
+          case 'idle': return 'idle';
+          case 'healthy': return `healthy (${fmtAge(s.lastSuccessAgeMs)})`;
+          case 'open': {
+            const m = Math.ceil((s.openRemainingMs || 0) / 60000);
+            return `OPEN (${s.lastError || 'unknown'}, ${m}m) | ${lastOk}`;
+          }
+          case 'degraded':
+            return `DEGRADED (${s.lastError || 'unknown'}, ${s.failCount} fails) | ${lastOk}`;
+          case 'failing':
+          default:
+            return `failing (${s.failCount} fails, last: ${s.lastError || 'unknown'}) | ${lastOk}`;
         }
-        if (!h.lastSuccess && !h.lastFailure) return 'idle';
-        if (h.lastSuccess) {
-          const m = Math.floor((Date.now() - h.lastSuccess) / 60000);
-          return `healthy (${m}m ago)`;
-        }
-        return `failing (${h.failCount} fails, last: ${h.lastError || 'unknown'})`;
       };
       const espnSportLine = Object.entries(espnStats.bySport || {})
         .map(([s, v]) => `${s}:${v.grades}/${v.requests}`)
