@@ -1,6 +1,8 @@
 # COA Full Multi-Repo Audit — 2026-06-10 (report only)
 
-Report-only operational audit of all four ZoneTracker repos plus live runtime state. No production code changed, nothing deployed, nothing restarted, no DB writes. All DB access readonly (`{readonly:true}` via base64-delivered `node` scripts on Fly). Every live-state claim below carries the command + output snippet (§F appendix).
+Report-only operational audit of four of the **five** ZoneTracker repos plus live runtime state. No production code changed, nothing deployed, nothing restarted, no DB writes. All DB access readonly (`{readonly:true}` via base64-delivered `node` scripts on Fly). Every live-state claim below carries the command + output snippet (§F appendix).
+
+> **Scope correction (added 2026-06-10):** this audit code-tracked four repos (pinned below). The fifth ZoneTracker repo, **`zonetracker-ocr`** (RapidOCR FastAPI microservice on the Surface Pro, live at `:11436` / Funnel `:8443`), was **out of scope** — the inventory this audit worked from omitted it. A dedicated COA pass for it is tracked in `docs/BACKLOG.md` (P1 follow-ups); the full host inventory is in `docs/SURFACE-PRO.md`.
 
 **Pinned revisions audited:**
 

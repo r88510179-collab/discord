@@ -5,6 +5,10 @@ through the Code tab on a Mac clone (agent opens a PR / commits and stops; Smokk
 merges/deploys manually). Code-tab prompt files live in
 `~/Documents/discord/prompts/`. See PREFLIGHT.md for prompt conventions.
 
+> For the **runtime** view of the Surface Pro — every PM2 app (incl. `ollama-proxy` and
+> `zonetracker-ocr`, which are not sectioned below), listen ports, the Tailscale exposure
+> map, systemd units, and the call graph — see **`docs/SURFACE-PRO.md`**.
+
 ## discord  (main bot — bettracker-discord-bot on Fly)
 - Mac clone: `~/Documents/discord`  (remote: r88510179-collab/discord)
 - Edit: Code tab on the Mac clone. Agent opens a PR and STOPS.
