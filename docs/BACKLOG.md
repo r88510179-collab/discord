@@ -1154,6 +1154,19 @@ This is a third bug: bet legs visible in tweet text, parser still returns `is_be
 
 ## P1 follow-ups
 
+### COA audit pass for `zonetracker-ocr` (was out of the 2026-06-10 audit scope)
+The 2026-06-10 COA full audit (`docs/audits/2026-06-10-coa-full-audit.md`) pinned and
+code-tracked **four** repos (discord/main, dashboard, dubclub, scraper) — it omitted
+`zonetracker-ocr`, the fifth ZoneTracker repo, because the inventory it worked from didn't
+list it. The service is live and public (RapidOCR FastAPI on the Surface Pro, `:11436`,
+exposed via Tailscale Funnel `:8443`; called by the Fly bot's `services/localOcr.js`). See
+the full inventory in `docs/SURFACE-PRO.md`.
+**Action:** run a COA-style track pass on `r88510179-collab/zonetracker-ocr` — code,
+docs (`README.md` + `CONTRACT.md`), prompts (if any), and resiliency (auth/`OCR_SERVICE_TOKEN`
+handling, `413`/`503` paths, model-load health gate, timeouts, image-size cap, logging/PII).
+Sibling note worth folding in: `ollama-proxy` on the same box is **not under version
+control** (no git repo/remote) — flag in the same pass.
+
 ### detectSport: SF Giants data gap
 `MLB_TEAMS` omits the Giants, so bare "Giants"/"SF Giants" resolves NFL. detectSport is nickname-only — needs a city-aware signal. Low frequency, but wrong sport poisons grading routing.
 
