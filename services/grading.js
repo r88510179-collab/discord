@@ -1428,14 +1428,30 @@ function extractSubject(description) {
     .map(l => l.trim())
     .filter(l => l.length > 0)[0] || description || '';
 
-  return firstLeg
+  // Period/ordinal qualifiers ("1st", "2nd", "1H"/"2H", quarters, "F5") scope a
+  // prop to a game segment — a query without them returns whole-game data. They
+  // must survive the numeric + market-type strips below. Live bug (June 2026):
+  // the blunt `\d+\.?\d*` strip mangled "1st Quarter Points" → "st Quarter",
+  // producing the query "...st Quarter NBA final score...". Protect them with a
+  // sentinel (U+0001 — matched by no strip pattern, not \s, not a \w boundary)
+  // in left-to-right order, strip everything else, then restore in that order.
+  const stash = [];
+  const SENT = String.fromCharCode(1); // U+0001 SOH — matched by no strip below
+  const protectedLeg = firstLeg.replace(
+    /\b(\d+(?:st|nd|rd|th)|[1-4][HQ]|F5)\b/gi,
+    (m) => { stash.push(m); return SENT; }
+  );
+
+  let qi = 0;
+  return protectedLeg
     .replace(/•/g, '')                          // bullet points
     .replace(/\+/g, ' ')                        // "Hits+Runs+RBIs" → "Hits Runs RBIs"
     .replace(/\b(over|under|less|more|o|u|alt)\b/gi, '') // direction words
-    .replace(/\d+\.?\d*/g, '')                  // ALL numbers (lines, odds, stats)
+    .replace(/\d+\.?\d*/g, '')                  // lines/odds/stats (protected ordinals are sentinels now)
     .replace(/\b(pts?|points?|reb|rebounds?|ast|assists?|stl|steals?|blk|blocks?|yds|yards?|tds?|touchdowns?|hr|home\s*runs?|hits?|runs?|rbis?|ks?|strikeouts?|sog|shots?|saves?|aces?|goals?|sacks?|receptions?|completions?|pass\s*yds|rush\s*yds|rec\s*yds)\b/gi, '') // ALL stat categories
     .replace(/\b(ml|moneyline|spread|rl|pk|parlay|teaser|to win|to lose|1q|2q|3q|4q|1h|2h|fg|ft|prop|anytime|first|last|td|scorer)\b/gi, '') // market types
     .replace(/[()[\]{}<>•·–—@#,;:/\\]/g, '')   // symbols
+    .replace(new RegExp(SENT, 'g'), () => stash[qi++]) // restore ordinals (in order)
     .replace(/\s+/g, ' ')                       // collapse whitespace
     .trim();
 }
@@ -1532,6 +1548,13 @@ const backendHealth = {
   serper: { lastSuccess: null, lastFailure: null, failCount: 0, openUntil: null, lastError: null },
 };
 
+// Backends that searchWeb() actually SKIPS when their circuit is open. bing and
+// serper are deliberately un-gated "workhorse" backends: their failures (incl.
+// parse failures, M-3) are still RECORDED so the snapshot is honest, but
+// searchWeb always attempts them — Bing is the free primary and a broken Serper
+// is a cheap last resort. Leading with Brave instead would burn its 2K/mo quota.
+const GATED_BACKENDS = new Set(['brave', 'ddg']);
+
 function isBackendHealthy(name) {
   const h = backendHealth[name];
   if (!h?.openUntil) return true;
@@ -1564,6 +1587,45 @@ function recordBackendResult(name, ok, errorCode = null) {
   }
 }
 
+// Structured per-backend health for /admin snapshot + tests (COA audit M-3).
+// Now that parse failures no longer record a false success, lastSuccess is a
+// real "last good result" timestamp and the breaker reflects reality. State:
+//   idle      — never called this process
+//   healthy   — last outcome was a real success
+//   failing   — consecutive failures, circuit not (yet) open
+//   open      — gated backend, circuit open → searchWeb is SKIPPING it
+//   degraded  — un-gated backend (bing/serper) whose circuit is open, but
+//               searchWeb still attempts it; reported distinctly so an operator
+//               doesn't read "open" as "grading stopped".
+function getBackendSnapshot(now = Date.now()) {
+  return Object.keys(backendHealth).map((name) => {
+    const h = backendHealth[name];
+    const gated = GATED_BACKENDS.has(name);
+    const open = !!(h.openUntil && now < h.openUntil);
+    let state;
+    if (!h.lastSuccess && !h.lastFailure) {
+      state = 'idle';
+    } else if (open) {
+      state = gated ? 'open' : 'degraded';
+    } else if (h.failCount > 0 && (!h.lastSuccess || (h.lastFailure && h.lastFailure >= h.lastSuccess))) {
+      state = 'failing';
+    } else {
+      state = 'healthy';
+    }
+    return {
+      name,
+      gated,
+      state,
+      failCount: h.failCount,
+      lastError: h.lastError,
+      lastSuccessMs: h.lastSuccess,
+      lastFailureMs: h.lastFailure,
+      lastSuccessAgeMs: h.lastSuccess ? now - h.lastSuccess : null,
+      openRemainingMs: open ? h.openUntil - now : null,
+    };
+  });
+}
+
 // Persistent per-call tracking for /admin search-backends.
 // Distinct from recordBackendResult (in-memory health) — this writes one
 // row per attempt to search_backend_calls so we can answer "what % of
@@ -1582,6 +1644,43 @@ function recordBackendCall({ backend, status, httpCode, betId, latencyMs, hits }
   } catch (e) {
     console.error('[recordBackendCall] failed:', e.message);
   }
+}
+
+// ── Content sanity gate (COA audit M-3) ───────────────────────────────
+// Every search backend routes its parsed results through this BEFORE
+// recording SUCCESS. Previously any HTTP 200 recorded `ok`, so drifted Bing
+// markup (0 hits) and homepage/news HTML (junk hits) were scored healthy and
+// the chain never fell through to a working backend. Two failure classes:
+//   parse_empty  — zero results, or none with usable title/snippet text. A
+//                  hard parse failure: registered as a CIRCUIT failure
+//                  (recordBackendResult false, same as a timeout) so the
+//                  breaker and snapshot stop lying. Applies to every backend.
+//   generic_news — results parsed but none mention any query token >3 chars
+//                  (Bing returning MLB.com/ESPN homepage HTML). A softer
+//                  heuristic, so it falls through WITHOUT tripping the breaker;
+//                  enabled only for the Bing scrape (checkRelevance), not the
+//                  structured Brave/Serper APIs where it would over-suppress.
+// Returns { results, status } with status ∈ 'ok' | 'parse_empty' | 'generic_news'.
+function assessSearchResults(results, query, { checkRelevance = false } = {}) {
+  const usable = (results || []).filter((r) => {
+    const text = `${r?.title || ''} ${r?.snippet || ''}`.trim();
+    return text.length > 0;
+  });
+  if (usable.length === 0) return { results: [], status: 'parse_empty' };
+  if (checkRelevance) {
+    const qTokens = String(query || '')
+      .toLowerCase()
+      .split(/\s+/)
+      .filter((t) => t.length > 3);
+    const relevant =
+      qTokens.length === 0 ||
+      usable.some((r) => {
+        const hay = `${r.title || ''} ${r.snippet || ''}`.toLowerCase();
+        return qTokens.some((t) => hay.includes(t));
+      });
+    if (!relevant) return { results: usable, status: 'generic_news' };
+  }
+  return { results: usable, status: 'ok' };
 }
 
 // Daily probe — fires searchBrave() with a fixed cheap query so the existing
@@ -1647,10 +1746,17 @@ async function searchDDG(query) {
         for (const m of links.slice(0, 5)) results.push({ title: decodeHTML(m[1]).trim(), snippet: '' });
       }
 
-      console.log(`[Search] Backend=DDG | Result=SUCCESS | Duration=${duration}ms | Hits=${results.length}`);
+      const assessed = assessSearchResults(results, query);
+      if (assessed.status === 'parse_empty') {
+        console.log(`[Search] Backend=DDG | Result=PARSE_EMPTY | Duration=${duration}ms`);
+        recordBackendResult('ddg', false, 'PARSE_EMPTY');
+        recordBackendCall({ backend: 'ddg', status: 'parse_empty', latencyMs: duration, hits: 0 });
+        return [];
+      }
+      console.log(`[Search] Backend=DDG | Result=SUCCESS | Duration=${duration}ms | Hits=${assessed.results.length}`);
       recordBackendResult('ddg', true);
-      recordBackendCall({ backend: 'ddg', status: 'ok', latencyMs: duration, hits: results.length });
-      return results;
+      recordBackendCall({ backend: 'ddg', status: 'ok', latencyMs: duration, hits: assessed.results.length });
+      return assessed.results;
     } catch (err) {
       const duration = Date.now() - start;
       console.log(`[Search] Backend=DDG | Result=TIMEOUT | Duration=${duration}ms | Attempt=${attempt}/2`);
@@ -1692,10 +1798,24 @@ async function searchBing(query) {
       const snippet = snippetMatch ? decodeHTML(snippetMatch[1].replace(/<[^>]+>/g, '')).trim() : '';
       if (title || snippet) results.push({ title, snippet });
     }
-    console.log(`[Search] Backend=Bing | Result=SUCCESS | Duration=${duration}ms | Hits=${results.length}`);
+    const assessed = assessSearchResults(results, query, { checkRelevance: true });
+    if (assessed.status === 'parse_empty') {
+      console.log(`[Search] Backend=Bing | Result=PARSE_EMPTY | Duration=${duration}ms`);
+      recordBackendResult('bing', false, 'PARSE_EMPTY');
+      recordBackendCall({ backend: 'bing', status: 'parse_empty', latencyMs: duration, hits: 0 });
+      return [];
+    }
+    if (assessed.status === 'generic_news') {
+      // Parsed hits but none mention the query — Bing homepage/news HTML.
+      // Fall through to the next backend WITHOUT tripping the breaker.
+      console.log(`[Search] Backend=Bing | Result=GENERIC_NEWS | Duration=${duration}ms | Hits=${results.length}`);
+      recordBackendCall({ backend: 'bing', status: 'generic_news', latencyMs: duration, hits: results.length });
+      return [];
+    }
+    console.log(`[Search] Backend=Bing | Result=SUCCESS | Duration=${duration}ms | Hits=${assessed.results.length}`);
     recordBackendResult('bing', true);
-    recordBackendCall({ backend: 'bing', status: 'ok', latencyMs: duration, hits: results.length });
-    return results;
+    recordBackendCall({ backend: 'bing', status: 'ok', latencyMs: duration, hits: assessed.results.length });
+    return assessed.results;
   } catch (err) {
     const duration = Date.now() - start;
     console.log(`[Search] Backend=Bing | Result=TIMEOUT | Duration=${duration}ms`);
@@ -1731,10 +1851,17 @@ async function searchBrave(query) {
     }
     const data = await res.json();
     const results = (data.web?.results || []).slice(0, 5).map(r => ({ title: r.title || '', snippet: r.description || '' }));
-    console.log(`[Search] Backend=Brave | Result=SUCCESS | Duration=${duration}ms | Hits=${results.length}`);
+    const assessed = assessSearchResults(results, query);
+    if (assessed.status === 'parse_empty') {
+      console.log(`[Search] Backend=Brave | Result=PARSE_EMPTY | Duration=${duration}ms`);
+      recordBackendResult('brave', false, 'PARSE_EMPTY');
+      recordBackendCall({ backend: 'brave', status: 'parse_empty', latencyMs: duration, hits: 0 });
+      return [];
+    }
+    console.log(`[Search] Backend=Brave | Result=SUCCESS | Duration=${duration}ms | Hits=${assessed.results.length}`);
     recordBackendResult('brave', true);
-    recordBackendCall({ backend: 'brave', status: 'ok', latencyMs: duration, hits: results.length });
-    return results;
+    recordBackendCall({ backend: 'brave', status: 'ok', latencyMs: duration, hits: assessed.results.length });
+    return assessed.results;
   } catch (err) {
     const duration = Date.now() - start;
     console.log(`[Search] Backend=Brave | Result=ERROR | Duration=${duration}ms | ${err.message}`);
@@ -1766,9 +1893,15 @@ async function searchSerper(query) {
     const results = [];
     if (data.answerBox?.answer) results.push({ title: 'Answer', snippet: data.answerBox.answer });
     for (const r of (data.organic || []).slice(0, 5)) results.push({ title: r.title || '', snippet: r.snippet || '' });
+    const assessed = assessSearchResults(results, query);
+    if (assessed.status === 'parse_empty') {
+      recordBackendResult('serper', false, 'PARSE_EMPTY');
+      recordBackendCall({ backend: 'serper', status: 'parse_empty', latencyMs: duration, hits: 0 });
+      return [];
+    }
     recordBackendResult('serper', true);
-    recordBackendCall({ backend: 'serper', status: 'ok', latencyMs: duration, hits: results.length });
-    return results;
+    recordBackendCall({ backend: 'serper', status: 'ok', latencyMs: duration, hits: assessed.results.length });
+    return assessed.results;
   } catch (err) {
     recordBackendResult('serper', false, 'ERROR');
     recordBackendCall({ backend: 'serper', status: 'error', latencyMs: Date.now() - start });
@@ -2686,6 +2819,7 @@ module.exports = {
   backendHealth,
   isBackendHealthy,
   recordBackendResult,
+  getBackendSnapshot,
   searchBrave,
   probeBrave,
   SUPPORTED_SPORTS,
@@ -2694,6 +2828,8 @@ module.exports = {
   _internal: {
     looksLikePlayerProp, parsePlayerPropDescription, searchWeb, isTrustedLossLeg, aggregateParlayLegResults,
     parlayLegDataComplete,                             // early leg-completeness guard (1-leg-parlay fix)
+    assessSearchResults, getBackendSnapshot, extractSubject, // S2 — search backend honesty (M-3) + query builder
+
     // Phase-1 grading gates:
     reduceParlayResult, normalizeLegStatus,            // Gate 1
     computeEvidenceHash, decideFinalGradeWrite, GRADER_VERSION, // Gate 2

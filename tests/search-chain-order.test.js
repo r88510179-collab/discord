@@ -67,8 +67,11 @@ function mockResponse(backend) {
   if (backend === 'bing') {
     // Bing parser splits on class="b_algo" and matches <a>title</a>
     // plus class="b_caption"...<p>snippet</p> inside the resulting block.
+    // The title embeds the query token "test" so the M-3 generic-news
+    // relevance gate (Bing-only) treats this hit as relevant rather than
+    // homepage HTML — otherwise the chain would (correctly) fall through.
     const html = r.type === 'hit'
-      ? '<div class="b_algo"><a href="x">Bing Title</a><div class="b_caption"><p>Bing Snippet</p></div></div>'
+      ? '<div class="b_algo"><a href="x">Bing Title test</a><div class="b_caption"><p>Bing Snippet</p></div></div>'
       : '<html></html>';
     return { ok: true, status: 200, text: async () => html, json: async () => ({}) };
   }
@@ -89,7 +92,7 @@ global.fetch = async (url) => {
   return mockResponse(backend);
 };
 
-const { _internal } = require('../services/grading');
+const { _internal, backendHealth } = require('../services/grading');
 const { searchWeb } = _internal;
 
 if (typeof searchWeb !== 'function') {
@@ -117,6 +120,12 @@ function eqArr(a, b) {
 
 async function runScenario(label, responses, expectedOrder) {
   callOrder.length = 0;
+  // Reset in-memory breaker state so this ORDER test is independent of the
+  // failure accumulation introduced by M-3 (parse_empty now records a circuit
+  // failure; a gated backend could otherwise open mid-run and skip a call).
+  for (const k of Object.keys(backendHealth)) {
+    Object.assign(backendHealth[k], { lastSuccess: null, lastFailure: null, failCount: 0, openUntil: null, lastError: null });
+  }
   for (const k of Object.keys(backendResponses)) backendResponses[k] = { type: 'empty' };
   for (const [k, v] of Object.entries(responses)) backendResponses[k] = v;
 
