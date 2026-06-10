@@ -4,7 +4,7 @@ How to read and (rarely) write `/data/bettracker.db` on Fly safely. Written up
 2026-06-10 after the v606 evening session, where two write attempts aborted *by
 design* before touching a row — both are worked examples below.
 
-**Two hard rules (the reason this runbook exists):**
+**Three hard rules (the reason this runbook exists):**
 
 1. **Never trust an agent-reported bet id.** They are routinely the **8-char
    truncation** shown in logs/summaries (`f71cbbc4…`), not the stored id
@@ -15,6 +15,14 @@ design* before touching a row — both are worked examples below.
    prior verified script. The grading columns are `grading_attempts` /
    `grading_next_attempt_at` / `grading_lock_until` — there is **no** bare
    `attempts` column.
+3. **Never hand-retype base64.** Emit the `fly ssh` one-shot with the base64
+   payload **already inlined by tooling** and copy/paste it **verbatim** — do not
+   retype, re-wrap, or "clean up" the blob by hand. A single transposed/omitted
+   base64 character decodes to corrupt JS: on 2026-06-10 a hand-retyped payload
+   produced a **corrupted `PRAGMA`** that failed on the box. Build the full
+   command string in one step (see the canonical pattern below) and treat the
+   base64 as opaque — if it doesn't fit on one line, that's fine, just don't edit
+   it. Re-generate from the source `.js` rather than patching the blob.
 
 ---
 
@@ -44,6 +52,11 @@ fly ssh console -a bettracker-discord-bot -C \
 ```
 
 Gotchas:
+- **Copy the `B64=…`/`fly ssh …` command VERBATIM (Rule 3).** The base64 blob is
+  opaque — never hand-retype, re-wrap, or edit it. One wrong character decodes to
+  corrupt JS (a hand-retyped payload produced a corrupted `PRAGMA` on the box
+  2026-06-10). If you need to change the query, edit `/tmp/q.js` and **re-run
+  `base64`**, don't patch the blob.
 - Open **`{ readonly: true }`** for every investigative query — it makes an
   accidental write impossible, not just unlikely.
 - `require('/app/node_modules/better-sqlite3')` by absolute path (or `cd /app`
@@ -71,6 +84,50 @@ Gotchas:
 Source of truth: `migrations/016_add_grading_state_columns.sql`,
 `migrations/028_add_sweep_exempt_until.sql`. Re-run `PRAGMA table_info(bets)` if
 anything here looks off — schema drifts faster than docs.
+
+---
+
+## Twitter-handle tables — `scraper_handles` + `tracked_twitter` (verified)
+
+Two **separate** tables with two **different** jobs. Conflating them is the root
+cause of duplicate-capper splits — see `docs/CODEMAP.md` §Twitter ingest.
+
+| Table | Job | Key columns |
+| --- | --- | --- |
+| `scraper_handles` (mig **027**) | **scrape set** — which accounts the Surface Pro scraper polls. Served to the box at `HANDLES_URL` = `GET /api/scraper-handles` (`enabled=1` only). | `handle` TEXT **PK**, `enabled` INTEGER DEFAULT 1, `added_at` INTEGER (unix epoch **seconds** — `unixepoch()`), `note` TEXT |
+| `tracked_twitter` (mig **001**) | **capper attribution** — which capper a handle's bets file under. A handle with **no** row here attributes under its **raw handle** (= a stray duplicate capper). | `twitter_handle` TEXT **UNIQUE**, `display_name` TEXT, `guild_id` TEXT NOT NULL, `channel_id` TEXT NOT NULL, `active` INTEGER DEFAULT 1, `id`/`last_tweet_id`/`created_at` |
+
+Enabling a handle in `scraper_handles` makes it **scraped**; inserting the paired
+`tracked_twitter` row makes it **attributed**. A clean capper needs **both**.
+
+### Worked example — LockedIn handle swap (2026-06-10, `lockedin_sportz` → capper `LockedIn`)
+
+Inserting a new handle into **both** tables. Note the differing epoch
+conventions (`scraper_handles.added_at` = seconds; `tracked_twitter.created_at` =
+SQLite datetime string) and the **required** `guild_id`/`channel_id` on
+`tracked_twitter`. Read-only-verify both tables first; both inserts are guarded
+idempotent.
+
+```js
+const db = require('/app/node_modules/better-sqlite3')('/data/bettracker.db'); // write mode
+// 1. SCRAPE SET — INSERT OR IGNORE keeps it idempotent (handle is PK).
+db.prepare(`INSERT OR IGNORE INTO scraper_handles (handle, enabled, note)
+            VALUES ('lockedin_sportz', 1, 'LockedIn swap 2026-06-10 (replaces TeamLockTalk)')`).run();
+// 2. ATTRIBUTION — twitter_handle is UNIQUE; guild_id/channel_id are NOT NULL.
+db.prepare(`INSERT OR IGNORE INTO tracked_twitter (twitter_handle, display_name, guild_id, channel_id)
+            VALUES ('lockedin_sportz', 'LockedIn', ?, '1485091165308190780')`).run(GUILD_ID);
+// 3. Verify.
+console.log(db.prepare(`SELECT handle, enabled FROM scraper_handles WHERE handle='lockedin_sportz'`).get());
+console.log(db.prepare(`SELECT twitter_handle, display_name, channel_id FROM tracked_twitter WHERE twitter_handle='lockedin_sportz'`).get());
+```
+
+Result live-verified the same session: scraper reported `[Handles] fetched 8
+active from Fly`; new `lockedin_sportz` picks now attribute under the **LockedIn**
+capper, not the raw handle. (Bets ingested *before* the `tracked_twitter` row
+existed still sit under the raw handle and need a later merge — BACKLOG "Capper
+dedup / merge".) Source of truth: `migrations/027_scraper_handles.sql`,
+`migrations/001_initial_schema.sql`. Re-run `PRAGMA table_info(<name>)` before
+assuming structure.
 
 ---
 

@@ -32,7 +32,7 @@ PK is `id` (TEXT, hex hash — **NOT** `bet_id`, common memory error).
 | profit_units | REAL | signed: positive=win, negative=loss |
 | grade | TEXT | "WIN" / "LOSS" / "VOID" / "PUSH" (uppercase) or NULL while pending |
 | grade_reason | TEXT | human-readable explanation, includes `[retro-fix YYYY-MM-DD]` for manual fixes |
-| event_date | TEXT | mostly null; not a void driver. **Write-gated** by `normalizeEventDateForStorage` (`services/eventDate.js`, called in `createBet` at `database.js:350`) → stored as NULL or a parseable datetime only, never time-only/free-text. Mig **029** nulled legacy unparseable rows. Read-side: `grading.js` GUARD 3 falls back to `created_at` when a stored value resolves >0.25h ahead of now (marker `grade.event_date_skew_fallback`, `:2321`) |
+| event_date | TEXT | mostly null; not a void driver. **Write-gated** by `normalizeEventDateForStorage` (`services/eventDate.js`, called in `createBet` at `database.js:350`) → stored as NULL or a parseable datetime only, never time-only/free-text. Mig **029** nulled legacy unparseable rows. Read-side: `grading.js` GUARD 3 falls back to `created_at` when a stored value resolves >0.25h ahead of now (marker `grade.event_date_skew_fallback`, `:2386`) |
 | graded_at | TEXT | ISO timestamp |
 | source | TEXT | see §Source enum below |
 | source_url | TEXT | Discord message URL — populated on most paths; audit pending |
@@ -145,7 +145,7 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 
 **`parlay_legs_dedup_events.decision`**: `kept`, `dropped_duplicate`, `near_miss`
 
-**`search_backend_calls.status`** (one row per backend attempt; written by `recordBackendCall`, `services/grading.js:1639`): `ok`, `parse_empty` (#74 — 0 usable hits, all backends), `generic_news` (#74 — Bing-only, parsed-but-irrelevant), `circuit_open` (skipped, gated backend), `timeout`, `error`, plus HTTP buckets from `bucketHttpStatus(res.status)` (e.g. `402`/`4xx`/`5xx`). `parse_empty`/`generic_news` are the M-3 honesty additions — see the search-arc S2 entry in BACKLOG.
+**`search_backend_calls.status`** (one row per backend attempt; written by `recordBackendCall`, `services/grading.js:1651`): `ok`, `parse_empty` (#74 — 0 usable hits, all backends), `generic_news` (#74 — Bing-only, parsed-but-irrelevant), `circuit_open` (skipped, gated backend), `timeout`, `error`, plus HTTP buckets from `bucketHttpStatus(res.status)` (e.g. `402`/`4xx`/`5xx`). `parse_empty`/`generic_news` are the M-3 honesty additions — see the search-arc S2 entry in BACKLOG.
 
 ## Ingestion pipeline — entry to staging
 
@@ -226,6 +226,13 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 > (`GATED_BACKENDS` / `recordBackendResult` / `getBackendSnapshot` /
 > `assessSearchResults`) added ~+115 more. Every row below `reduceParlayResult`
 > re-verified against `main`@4c992c9.
+> Refreshed again 2026-06-10 **evening batch 2** (PR #76 `7a55842`, `main`@3ed77e2):
+> #76 added two `extractSubject` body lines (slash→space `:1453`, orphan-dash
+> `:1466`), shifting the search block by **+12** (so `getBackendSnapshot` 1600→1612,
+> `assessSearchResults` 1664→1676); and inserted the new pure `parseBingHtml`
+> block (`BING_*` selectors + `cleanBingFragment`/`firstSelectorMatch`/`parseBingHtml`,
+> ~+61) **before** `searchBing`, shifting `searchBing` and everything below it.
+> Every row from `extractSubject` down re-verified against `main`@3ed77e2.
 
 | What | Line(s) |
 | --- | --- |
@@ -234,27 +241,28 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 | **Gate 3** quote-bound grading — tri-state `QUOTE_BOUND_GRADING` (`off`/`shadow`(staged default)/`enforce`); **live on Fly = `enforce` as of 2026-06-10** (verified in-container; staged default is still `shadow`). shadow logs `[GATE3 would-fire]` and leaves the grade, enforce forces PENDING (`UNVERIFIED_QUOTE`); unknown/legacy → shadow | `normalizeQuoteWhitespace` 76; `validateEvidenceQuote` 89; `resolveGate3Mode` 115; `applyGate3` 129 (returns `claimed` for the marker) |
 | **Gate 3 (B0)** `buildGate3WouldFireMarker` — pure; returns `GATE3_WOULD_FIRE\|mode=\|claimed=\|prop=\|reason=` token or `null` (off / quote ok). Caller pushes it onto `audit.guards_failed` (display-only; never gates grading) so the event rides the attempt's existing `grading_audit` row — **zero extra rows** (a dedicated row would perturb `shouldAutoVoidNoData`'s recent-5 + the daily cap). Query: `WHERE guards_failed LIKE '%GATE3_WOULD_FIRE%'` | 177 (fn); marker const 176 |
 | **`parlayLegDataComplete`** — NEW #73, pure early leg-completeness guard: complete ⇔ `legCount ≥ 1` **AND** `legCount === ` the description's `•` bullet count (same structural signal as the leg-explosion guard). Exported via `_internal`. | 257 |
-| `looksLikePlayerProp` | 286 (fn); structured gate → `tryStructured` 2352 (call L2353) |
+| `looksLikePlayerProp` | 286 (fn); structured gate → `tryStructured` call L2418 |
 | `canFinalizeBet` (RETRY_CAP=15 → stamps `GRADE_BACKOFF_EXHAUSTED` + VOID in a txn) | 557 (`RETRY_CAP` 636; cap-void 640) |
 | `scheduleRecheckAfterDenial` | 631 |
 | `shouldAutoVoidNoData` — **the *other* void path**: recent-5 `grading_audit` rows all `PENDING` + no-data evidence, `grading_attempts ≥ 5`, age ≥ 12h → VOID (`auto_void_no_searchable_data`). Keys on audit *content*, not raw attempt count — why a 7-attempt bet can void while a 35-attempt bet does not (see BACKLOG "non-uniform auto-void"). | 708 (MIN_ATTEMPTS 710; MIN_AGE_MS 709) |
 | `calcProfit` | 1011 |
 | `gradeFromCelebration` | 1331 |
-| `extractSubject` — **ordinal/period sentinel protection (#74)**: stashes `1st`–`4th` / `1H`/`2H` / `1Q`–`4Q` / `F5` behind a U+0001 sentinel (`String.fromCharCode(1)`) *before* the `\d+\.?\d*` + market strips, then restores them in order, so `"1st Quarter"` survives (was mangled to `"st Quarter"`) while odds/lines still strip | 1425 (fn); sentinel stash 1438; `SENT` const 1439; restore-in-chain 1452 |
-| `buildGraderSearchQuery` (description-only; doc-comment 1459–1473) | 1474 |
-| **`GATED_BACKENDS`** — NEW #74, `Set{brave, ddg}`: the only backends `searchWeb` SKIPS when their circuit is open. `bing`/`serper` are deliberately un-gated workhorses (failures recorded but still attempted; Bing-first preserved) | 1556 |
-| `recordBackendResult` — #74: now stamps `lastSuccess` **only on a real success** (parse failures no longer record a false `ok`), so the breaker + snapshot stop scoring drifted 200s as healthy | 1569 |
-| **`getBackendSnapshot`** — NEW #74, structured per-backend health for `/admin` + tests; state ∈ `idle`/`healthy`/`failing`/`open`(gated, searchWeb skipping)/`degraded`(un-gated bing/serper, circuit open but still tried) + last-success age in every state. Top-level export; consumed by `commands/admin.js` `fmtBackend` | 1600 |
-| **`assessSearchResults`** — NEW #74, content sanity gate every backend routes through before recording success. Returns `{ results, status }`, status ∈ `ok` / `parse_empty` (0 usable hits → circuit failure + fall-through, all backends) / `generic_news` (Bing-only `checkRelevance`: parsed but no hit mentions a query token >3 chars → fall-through, no breaker trip) | 1664 |
-| `searchBing` (content-gated #74: a 200 with garbage now classes `parse_empty` (circuit fail) or `generic_news` (fall-through, no trip) → reaches Brave instead of scoring `ok`; `b_algo` selector parse itself still drift-prone — see BACKLOG follow-up) | 1776 (`b_algo` split 1793) |
-| `gradePropWithAI` (dispatch: parlay→gradeParlay, else gradeSingleBet) | 1937; **1-leg parlay guard** (#73 — skips to PENDING only when `recordedLegs ≤ 1 && !parlayLegDataComplete`; complete 1-leg parlays now dispatch to `gradeParlay`) 1996 |
-| `isTrustedLossLeg` (Bug A Part 1, v438) | 2012 |
-| `aggregateParlayLegResults` (now downgrades untrusted-LOSS→PENDING, then delegates precedence to Gate 1 reducer) | 2067 (fn); reducer call 2104; "Parlay LOSS — leg N" emit 2114 |
-| `gradeParlay` (builds per-leg `legBet` with `bet_type:'straight'` — legs have no stored prop flag) | 2133 |
-| `writeGradingAudit` (module-level; extracted from the `gradeSingleBet` `writeAudit` closure, B0) — one `grading_audit` row per attempt; `timestamp` is epoch MILLIS | 2174 |
-| `gradeSingleBet` | 2195; structured pre-check 2353; **Gate 3** quote check (`applyGate3` call 2555; B0 would-fire marker build 2566 / push 2567); grader waterfall 2432–2453 (groq-llama4-scout 2432 → cerebras-gpt-oss 2435 → groq-qwen 2438 → openrouter 2441 → groq-gpt-oss 2444 → mistral 2447 → ollama-llama3.2-3b 2450 → groq-llama8b 2453) |
-| GUARD 3 (too-recent) **event_date skew fallback** — when a stored `event_date` resolves >0.25h ahead of now, re-anchor to `created_at` (kills legacy time-only strings re-anchoring to "today" every poll → "too soon" forever → burned attempts to quarantine; pairs with mig 029 + `services/eventDate.js`) | marker `grade.event_date_skew_fallback` 2321 (guard block ~2311–2324) |
-| `finalizeBetGrading` | 2692 (also exported as `gradeBet`); **Gate 2** idempotency check 2704; atomic write stamps `grader_version`+`evidence_hash` via `gradeBetRecord` |
+| `extractSubject` — **ordinal/period sentinel protection (#74)** + **slash/dash query fixes (#76)**. #74: stashes `1st`–`4th` / `1H`/`2H` / `1Q`–`4Q` / `F5` behind a U+0001 sentinel (`String.fromCharCode(1)`) *before* the `\d+\.?\d*` + market strips, then restores them in order, so `"1st Quarter"` survives while odds/lines still strip. #76: slash/backslash between tokens → **space** (`.replace(/[/\\]/g, ' ')`, runs *before* the symbol strip so it can't be eaten) — `"McGhee/Yannis ITD"` → `"McGhee Yannis ITD"`; and **orphan dash-runs** isolated by whitespace/boundary are dropped (`.replace(/(^\|\s)-+(?=\s\|$)/g, '$1')`) — `"Joanderson Brito ML (-165)"` → `"Joanderson Brito"`, while intra-word hyphens (`Saint-Denis`) survive (the ASCII `-` is deliberately kept out of the symbol class) | 1425 (fn); sentinel stash 1438; `SENT` const 1439; slash→space 1453; restore-in-chain 1459; orphan-dash drop 1466 |
+| `buildGraderSearchQuery` (description-only; doc-comment 1471–1485) | 1486 |
+| **`GATED_BACKENDS`** — NEW #74, `Set{brave, ddg}`: the only backends `searchWeb` SKIPS when their circuit is open. `bing`/`serper` are deliberately un-gated workhorses (failures recorded but still attempted; Bing-first preserved) | 1568 |
+| `recordBackendResult` — #74: now stamps `lastSuccess` **only on a real success** (parse failures no longer record a false `ok`), so the breaker + snapshot stop scoring drifted 200s as healthy | 1581 |
+| **`getBackendSnapshot`** — NEW #74, structured per-backend health for `/admin` + tests; state ∈ `idle`/`healthy`/`failing`/`open`(gated, searchWeb skipping)/`degraded`(un-gated bing/serper, circuit open but still tried) + last-success age in every state. Top-level export; consumed by `commands/admin.js` `fmtBackend` | 1612 |
+| **`assessSearchResults`** — NEW #74, content sanity gate every backend routes through before recording success. Returns `{ results, status }`, status ∈ `ok` / `parse_empty` (0 usable hits → circuit failure + fall-through, all backends) / `generic_news` (Bing-only `checkRelevance`: parsed but no hit mentions a query token >3 chars → fall-through, no breaker trip) | 1676 |
+| **`parseBingHtml(html)`** — NEW #76, pure Bing-SERP parser, exported via `_internal`. Tries `BING_BLOCK_DELIMITERS` (`b_algo` → `b_algoheader` → `b_ans`) in order — first delimiter yielding ≥1 hit wins, 5-block cap — and within each block runs ordered `BING_TITLE_SELECTORS` (`h2`/`h3`/`tilk`/anchor) + `BING_SNIPPET_SELECTORS` (`b_caption>p`/`b_lineclamp`/`b_algoSlug`/first-`p`) via `firstSelectorMatch`+`cleanBingFragment`. Total miss → `[]` (→ `assessSearchResults` `parse_empty` → honest fall-through to Brave; gate NOT weakened). Replaces the old single hard-coded `b_algo`+`b_caption>p` selector | `BING_BLOCK_DELIMITERS` 1797; `cleanBingFragment` 1812; `firstSelectorMatch` 1817; `parseBingHtml` 1829 |
+| `searchBing` (content-gated #74 + #76: a 200 with garbage classes `parse_empty` (circuit fail) or `generic_news` (fall-through, no trip) → reaches Brave instead of scoring `ok`; now parses via `parseBingHtml` (#76) instead of the single drift-prone `b_algo` selector) | 1849 (`parseBingHtml` call 1865) |
+| `gradePropWithAI` (dispatch: parlay→gradeParlay, else gradeSingleBet) | 2002; **1-leg parlay guard** (#73 — skips to PENDING only when `recordedLegs ≤ 1 && !parlayLegDataComplete`; complete 1-leg parlays now dispatch to `gradeParlay`) 2061 |
+| `isTrustedLossLeg` (Bug A Part 1, v438) | 2077 |
+| `aggregateParlayLegResults` (now downgrades untrusted-LOSS→PENDING, then delegates precedence to Gate 1 reducer) | 2132 (fn); reducer call 2169; "Parlay LOSS — leg N" emit 2179 |
+| `gradeParlay` (builds per-leg `legBet` with `bet_type:'straight'` — legs have no stored prop flag) | 2198 |
+| `writeGradingAudit` (module-level; extracted from the `gradeSingleBet` `writeAudit` closure, B0) — one `grading_audit` row per attempt; `timestamp` is epoch MILLIS | 2239 |
+| `gradeSingleBet` | 2260; structured pre-check 2418; **Gate 3** quote check (`applyGate3` call 2620; B0 would-fire marker build 2631 / push 2632); grader waterfall providers.push 2497–2518 (groq-llama4-scout 2497 → cerebras-gpt-oss 2500 → openrouter 2506 → groq-gpt-oss 2509 → mistral 2512 → ollama-llama3.2-3b 2515 → groq-llama8b 2518) |
+| GUARD 3 (too-recent) **event_date skew fallback** — when a stored `event_date` resolves >0.25h ahead of now, re-anchor to `created_at` (kills legacy time-only strings re-anchoring to "today" every poll → "too soon" forever → burned attempts to quarantine; pairs with mig 029 + `services/eventDate.js`) | marker `grade.event_date_skew_fallback` 2386 |
+| `finalizeBetGrading` | 2757 (also exported as `gradeBet`); **Gate 2** idempotency check 2761; atomic write stamps `grader_version`+`evidence_hash` via `gradeBetRecord` |
 | `resolvePlayerProp` | REMOVED (v459) — replaced by `tryStructured()` from services/sportsdata, called at L2353 |
 
 ### services/sportsdata/ (Phase 1 structured grading, v459)
@@ -335,13 +343,19 @@ The grading cron's **7-Day Smart Sweeper** auto-grades any pending **non-prop** 
 | Edit modal capper lookup (v463 fix, commit 5efcdd8) | 617 (strict `cappers` lookup in `war_modal` submit; field read L605, reattribution L625) |
 
 ### services/database.js
+> Line numbers refreshed 2026-06-10 **evening batch 2** (PR #77 `3ed77e2`, `main`@3ed77e2): the unified ROI block (`SETTLED_BET` + `CAPPER_STATS_COLUMNS` + `flagAbnormalRoi`) replaced the two inline ROI copies in `getCapperStats`/`getLeaderboard` (net +52), shifting everything below ~L790 down. Rows re-verified against `main`.
+
 | What | Line(s) |
 | --- | --- |
-| `getOrCreateCapper` | 304 |
+| `getOrCreateCapper` | 305 |
 | `createBet` (single-bet insert; **write-gates `event_date`** via `normalizeEventDateForStorage` from `services/eventDate.js`) | 334 (fn); event_date gate at the INSERT, L350 |
-| `createBetWithLegs` | 579 |
-| `findPendingBetBySubject` | 928 |
-| `gradeBet` | 597 (`gradeBetRecord`, exported as `gradeBet` L1077) |
+| `createBetWithLegs` | 583 |
+| **Capper ROI — single source of truth (#77).** `SETTLED_BET` SQL fragment (`result IN ('win','loss','push') AND profit_units IS NOT NULL`) + `CAPPER_STATS_COLUMNS` (the win/loss/push/win_pct/total_profit_units/`roi_pct` column block) are defined **once** and interpolated verbatim into both `getCapperStats` and `getLeaderboard` so the two can't drift. `roi_pct` = `Σ(profit_units) ÷ Σ(CAST(units AS REAL))` over `SETTLED_BET` rows, `NULLIF(denom,0)`+`COALESCE`-guarded (always finite, 0 when nothing settled); **no `MAX(units,1)` floor, no display cap.** | `SETTLED_BET` 712; `CAPPER_STATS_COLUMNS` 713 |
+| `flagAbnormalRoi(row)` — #77: *logs* (never clamps) `Math.abs(roi_pct) > 500`; called by `getCapperStats` + `rows.forEach` in `getLeaderboard` | 731 |
+| `getCapperStats` (selects `CAPPER_STATS_COLUMNS` + `pending`; one capper) | 737 |
+| `getLeaderboard` (selects `CAPPER_STATS_COLUMNS`; sorted, limited) | 753 |
+| `findPendingBetBySubject` | 960 |
+| `gradeBet` | 601 (`gradeBetRecord`, exported as `gradeBet` L1109) |
 
 ### services/eventDate.js (event_date write-gate, #70 + mig 029)
 The single write-path normalizer for `bets.event_date`. `normalizeEventDateForStorage(raw, createdAt=now)` returns **NULL or a parseable datetime** — rejects time-only (`"9:10PM ET"`) and free-text, ET-anchors wall-clock dates to UTC. Called from `createBet` (`database.js:350`) so every write is gated. The same rule was applied to existing rows by mig **029**; the read-side skew fallback lives in `grading.js` GUARD 3 (marker `grade.event_date_skew_fallback`).
@@ -367,10 +381,12 @@ The single write-path normalizer for `bets.event_date`. `normalizeEventDateForSt
 | `/admin dedup-stats-24h` | 144 (def), 922 (handler) |
 | `/admin status` grading-health backend snapshot — `fmtBackend` (#74) now reads structured `getBackendSnapshot()` (was `backendHealth`) and renders all five states with last-success age: `idle` / `healthy (Nm ago)` / `failing` / `OPEN (…m) \| last ok …` (gated, searchWeb skipping) / `DEGRADED (…fails) \| last ok …` (un-gated bing/serper, circuit open but still tried) | `getBackendSnapshot` import 598; `snapById` build 606; `fmtBackend` 608 |
 
-> Resolver panels removed: `commands/admin.js` contains zero resolver references
-> today and `services/resolver.js` is deleted — only the `resolver_events` table
-> (orphaned, 481 rows) + `fly.toml` env refs (`RESOLVER_URL`/`RESOLVER_VERSION`)
-> remain; the `zonetracker-resolver` Fly app is suspended (see audit 2026-06-10).
+> Resolver fully retired: `commands/admin.js` contains zero resolver references
+> today, `services/resolver.js` is deleted, and the `fly.toml`
+> `RESOLVER_URL`/`RESOLVER_VERSION` `[env]` entries were **removed in #76** (no JS
+> read them). The `zonetracker-resolver` Fly app is **destroyed** (was suspended;
+> destroyed 2026-06-10 evening). Only the orphaned `resolver_events` table
+> (481 rows) remains in the DB.
 
 ### scripts/
 | Script | Purpose |
@@ -387,6 +403,11 @@ The single write-path normalizer for `bets.event_date`. `normalizeEventDateForSt
 > Code refs accurate as of `main` post-#53 (commit `3cfc694`, 2026-06-07). This is the **direct HTTP** Twitter path through `services/twitter-handler.js`. It is NOT the **Twitter relay channels** (Dan/Cody/Harry/Gavin) under "Channels — ingestion routing" below: those arrive as Discord *messages* and run the `messageHandler` pipeline, so they never reach the F-12 gate.
 
 **Source.** The live Twitter feed is the Surface Pro scraper (`zonetracker-scraper`, private repo — see its README "Polling & cursor behavior"), which POSTs tweet batches to the Fly Express endpoint `POST /api/mobile-ingest` (`routes/api.js:19`; router mounted at `/api` in `bot.js`). Auth: the `x-mobile-secret` header must equal `MOBILE_SCRAPER_SECRET` (`routes/api.js:21-22`), else 401. The route 200s immediately, then processes async via `handleTwitterWebhookPayload` (`routes/api.js:55`). The scraper pulls its handle list from `GET /api/scraper-handles` (`routes/api.js:68`; `scraper_handles` table, mig 027). Fly's own twitterapi.io poller (`services/twitter.js:90`) feeds the *same* handler but is kill-switched by `TWITTER_POLLER_DISABLED` (paused in prod — see "Env vars that gate behavior"), so the scraper is the sole live source.
+
+> **Two different tables, two different jobs — scrape set vs capper attribution (do not conflate; root cause of duplicate-capper splits).**
+> - **`scraper_handles` (Fly, mig 027) = the SCRAPE SET** — *which accounts to poll*. The single source of truth, served to the box at `HANDLES_URL` = `GET /api/scraper-handles` (`x-mobile-secret` auth, `enabled=1` only). The scraper's local `active_handles.json` is a **write-through cache with a built-in fallback** — it mirrors the Fly list each fetch and falls back to its last good copy if the endpoint is unreachable; it is **not** authoritative.
+> - **`tracked_twitter.display_name` = capper ATTRIBUTION** — *which capper a scraped tweet's bets file under*. A handle **without** a matching `tracked_twitter` row attributes under its **raw handle** (creating a stray duplicate capper) rather than the intended display name. This is the root cause of the `LockedIn` / `lockedin_sportz` and `guess_pray_bets` duplicate-capper splits: adding a `tracked_twitter` row (`display_name='LockedIn'`, the 2026-06-10 swap) fixes attribution **going forward**, but pre-existing raw-handle bets still need a merge (see BACKLOG "Capper dedup / merge").
+> - **Takeaway:** enabling a handle in `scraper_handles` makes it *scraped*; inserting the paired `tracked_twitter` row makes it *attributed*. Both are required for a clean capper.
 
 **Handler.** `services/twitter-handler.js` → `handleTwitterWebhookPayload(payload, client)` (L92), one iteration per tweet. Stages emitted via `recordStage`:
 
