@@ -170,6 +170,7 @@ function dismissHold(ingestId, actor) {
 // fingerprint also keys on it — a second, lower guard), so re-running creates
 // at most one bet:
 //   no hold for ingest_id                 → { ok:false, status:'not_found' }
+//   same ingest already being recovered   → { ok:false, status:'in_flight' }    (creates nothing)
 //   a bet already exists for this message → { ok:true,  status:'already_recovered', betId }
 //   hold already released / dismissed     → { ok:false, status:'already_resolved' }
 //   message unreachable / no client       → { ok:false, status:'message_unreachable' }
@@ -376,11 +377,32 @@ function _graceMarkRecoveredBets(id, betIds) {
   console.log(`[HoldRecover] ${id.slice(0, 16)} grace-marked ${betIds.length} bet(s) sweep_exempt_until=now+${GRACE_DAYS}d`);
 }
 
+// TOCTOU guard: the source_message_id pre-check below runs at ENTRY, but the
+// bet insert lands seconds later (fetch retries + vision). Two rapid dashboard
+// clicks both pass the pre-check before either inserts → duplicate bets
+// (observed 2026-06-10, ingest disc_1513906474227732602). The bot is
+// single-process, so an in-memory in-flight set keyed on ingest id closes the
+// window; the pre-check stays for sequential re-clicks.
+const inFlightRecoveries = new Set();
+
 async function recoverHold(ingestId, actor, deps = {}) {
   const id = String(ingestId == null ? '' : ingestId).trim();
   if (!id) return { ok: false, status: 'not_found', ingestId: id };
   const actorStr = (actor == null || String(actor).trim() === '') ? 'unknown' : String(actor);
 
+  if (inFlightRecoveries.has(id)) {
+    console.log(`[recoverHold] duplicate in-flight, skipping key=${id}`);
+    return { ok: false, status: 'in_flight', ingestId: id };
+  }
+  inFlightRecoveries.add(id);
+  try {
+    return await _recoverHoldInner(id, actorStr, deps);
+  } finally {
+    inFlightRecoveries.delete(id);
+  }
+}
+
+async function _recoverHoldInner(id, actorStr, deps) {
   const client = ('client' in deps) ? deps.client : global._discordClient;
   const fetchMessage = deps.fetchMessage || _defaultFetchMessage;
   const getImages = deps.getImageAttachments || _defaultGetImages;

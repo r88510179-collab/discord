@@ -82,6 +82,7 @@ const RECOVER_STATUS_CODE = {
   recovered: 200,
   already_recovered: 200,
   already_resolved: 409,
+  in_flight: 409,
   not_found: 404,
   no_image_yet: 422,
   no_bet_found: 422,
