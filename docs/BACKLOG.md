@@ -35,6 +35,35 @@ On-demand **Recover** for slip holds that were posted before their share-card un
 
 Mapped in docs/CODEMAP.md §services/holdReview.js + §7-Day Sweeper + recovery grace + §routes. The P1 HRB item above cross-refs why this rescues already-held slips without changing the upstream `ai_is_bet_false` drop.
 
+## ✅ SHIPPED — 2026-06-10 (ops close-out: Gate 3 enforce, event_date validation, quarantine reset, Surface Pro S-01/U-1/D-1)
+
+All facts below verified live 2026-06-10 (Fly `/data/bettracker.db` read-only pull + Surface Pro `ssh`).
+
+### Gate 3 → `enforce` (quote-bound grading is live)
+`QUOTE_BOUND_GRADING=enforce` is now live on Fly — verified **in-container** (`printenv QUOTE_BOUND_GRADING` → `enforce`), not just the staged default (which is still `shadow`). The shadow→enforce flip was decided after reviewing the persisted would-fire set: **7 distinct bets** carried a `GATE3_WOULD_FIRE` marker (`grading_audit.guards_failed`, 11 attempt-rows). All 7 reviewed cases were evidence-free **VOID**s — the grade was already heading to VOID/PENDING with no quotable evidence — so enforce blocks nothing that was grading correctly (**zero false positives**). Closes the "Gate 3 enforce flip (pending)" item below.
+
+### event_date validation (#70, migration 029)
+The write path is now gated by `normalizeEventDateForStorage` (`services/eventDate.js`), wired into `createBet` at `services/database.js:350`: `event_date` is stored as **NULL or a parseable datetime**, never a time-only / free-text string. Migration **029** (`029_null_unparseable_event_dates.sql`) applied the same rule to existing rows (`UPDATE bets SET event_date=NULL WHERE event_date IS NOT NULL AND datetime(event_date) IS NULL`). Read-side defense in `grading.js` GUARD 3: when a stored `event_date` resolves >0.25h ahead of now, the grader falls back to `created_at` (marker `grade.event_date_skew_fallback`, `:2154`) so legacy time-only strings ("9:10PM ET") can't re-anchor to "today" every poll and burn attempts to quarantine forever. **Corrupt unparseable rows: 19 → 0** (verified live: `COUNT(*) WHERE event_date IS NOT NULL AND datetime(event_date) IS NULL` = 0). The poison specimen `3a503cc4…` named in the migration is the same Soccer bet now sitting (correctly) in quarantine below.
+
+### Quarantine reset (18 → 3 at close-out; **4 live**)
+The quarantine backlog was manually reset today (18 quarantined → 3). **Verified live 2026-06-10: 4 bets remain** in `grading_state='quarantined'` — one more NBA missing-legs parlay re-accrued past the attempt-20 cap since the reset — in two classes:
+- **Missing-legs parlays (2, both NBA)** — stored with only **1 recorded leg**; the grader returns *"Parlay has 1 recorded legs — cannot grade without leg data. Manual review required."* Needs manual leg reconstruction. (`7b04366b…` Jokic/Brunson/Mitchell combine, 22 att; `b0140947…` Spurs/OKC Over 218.5, 20 att.) See **"Quarantined missing-legs parlays"** entry below.
+- **Soccer awaiting a result source (2)** — all legs recorded but every leg PENDING because there is no Soccer adapter / usable search path (`3a503cc4…` 5 legs; `d8e42b70…` 9 legs). Clears once the search arc gives Soccer a source (S4 below).
+
+### Surface Pro S-01 / U-1 / D-1 — shipped + deployed
+- **S-01** (scraper dead-air watchdog + arm-time observability) — PRs #3 + #4 merged and **deployed** to the box (`zonetracker-scraper` HEAD `ff9fda0` = "Merge PR #4"; was `e28d768`/PR #3 at the time `docs/SURFACE-PRO.md` was captured — that doc's HEAD line is patched in this PR). Zero-tweet strike fix + dead-air alarm (#3); arm-time log line + ISO-timestamped `[Strike]`/`[Disable]`/`[Alarm]`/`[DeadAir]` logs (#4).
+- **U-1** (dubclub browser watchdog) — PR #2 merged + deployed (`zonetracker-dubclub` HEAD `b55c449`).
+- **D-1** (dashboard upstream mid-body-failure containment) — #5 merged + deployed (`zonetracker-dashboard` HEAD `b37e51a`).
+
+### U-6 — dubclub canonical env = `ecosystem.config.cjs` (closed)
+The S-01/U-1 wiring made `ecosystem.config.cjs` the canonical env source for `zonetracker-dubclub`: PM2 injects the `.cjs` env at spawn and dotenv does **not** override already-set vars, so the `.cjs` values win over the overlapping `.env`. Documented in `docs/SURFACE-PRO.md` (`zonetracker-dubclub` section).
+
+### Scraper exec_mode fork fix
+`zonetracker-scraper`'s `ecosystem.config.js` now sets `exec_mode: 'fork'` **explicitly** alongside `instances: 1`. PM2 silently defaults to **cluster** mode whenever `instances` is set, which a single-process scraper must not run as. Verified live: `pm2 jlist` → `zonetracker-scraper fork_mode instances=1`. `zonetracker-dubclub` carries the same explicit `exec_mode: 'fork'`.
+
+---
+
+
 ## ✅ SHIPPED - Weekend 1 (Apr 20)
 
 ### MLB StatsAPI Resolver — live in production
@@ -300,9 +329,9 @@ Current `<parent>-leg<N>` ids don't stamp `drop_reason` on the parent bet row �
 
 **v526 (PR #37, `44f9b5e`).** Gate 3's shadow-mode "would-fire" events are now persisted so the false-PENDING rate is SQL-queryable *before* any enforce flip. Each would-fire rides the existing `grading_audit.guards_failed` column as a `GATE3_WOULD_FIRE|mode=…|claimed=…|prop=…|reason=…` marker (`GATE3_WOULD_FIRE_MARKER`, `services/grading.js:176`/`:183`) — **zero new rows or columns**. Read it with `WHERE guards_failed LIKE '%GATE3_WOULD_FIRE%'` (+ `'%mode=enforce%'` etc.). The deduped rate query lives in PR #37's body; the read-and-decide follow-up is the **Gate 3 enforce flip** item next.
 
-### Gate 3 enforce flip (pending — shadow → enforce)
+### ✅ SHIPPED 2026-06-10 — Gate 3 enforce flip (shadow → enforce)
 
-Gate 3 runs in **shadow** (`QUOTE_BOUND_GRADING=shadow`). After ~1 day of shadow data: run the **deduped would-fire rate query** from PR #37's body against `grading_audit` (`guards_failed LIKE '%GATE3_WOULD_FIRE%'`), then **sample rows** to separate true hallucinations (grade should be blocked) from correct-but-unquotable evidence (grade is right, the quote check is too strict). Only then set `QUOTE_BOUND_GRADING=enforce` as a **Fly secret** and **verify it live** (staged ≠ live — confirm via `fly secrets list` + a real grader tick showing enforce). Do not flip on the staged default alone.
+Done. `QUOTE_BOUND_GRADING=enforce` is live on Fly (verified in-container, not just the staged default). The would-fire set was reviewed first: 7 distinct bets carried the `GATE3_WOULD_FIRE` marker (11 attempt-rows), all evidence-free VOIDs — zero false positives — so enforce blocks no correctly-grading bet. See the **2026-06-10 ops close-out → Gate 3 → enforce** block above for the full review and verification. (Historical plan, kept for the record: sample `guards_failed LIKE '%GATE3_WOULD_FIRE%'` to split true hallucinations from correct-but-unquotable evidence, then set the Fly secret and confirm live — staged ≠ live.)
 
 ### Grading gates Part B (remainder)
 
@@ -408,11 +437,31 @@ Cap removed by commit faa88208 ("remove ROI cap, harden bouncer"). The "+500%" p
 ### MLB backfill script using resolver
 Batch script that reads bets with `grading_state='backoff'` and MLB player prop descriptions, resets `grading_state='ready'` on those that the resolver would now handle, lets the normal grader pick them up. Dry-run mode mandatory. Use `resolver_events` and the new `GRADE_*` drop counts as success metric.
 
+## Search grading — source-path arc (2026-06-10 plan; supersedes the ad-hoc generic-search items below)
+
+The grader's web-search backends (Bing/Brave/DDG/Serper) are the weakest link: when they return garbage or nothing, the grader correctly emits repeated PENDING and bets age `backoff` → `quarantined`, or void via `shouldAutoVoidNoData`. Rather than keep patching individual backends, give each sport a **deterministic source path** and demote generic web search to last-resort. This sequence **supersedes** the scattered Brave/Bing search-tuning items below (Brave-402 is already resolved; the Brave quota probe + the Bing generic-news fix fold into S2).
+
+Live sizing (2026-06-10, `grading_state='backoff'`, n=**312**): Tennis **68**, MLB 70 (already has the StatsAPI resolver — *not* searchless), NBA 56, NHL 32, UFC 31, Soccer 29 (+ Serie A 4 / EPL 2 / UCL 1), Golf 7, MMA 6, Boxing 3.
+
+- **S1 — MEASURE.** Classify all ~300 backoff bets by gradeable source — structured adapter (`services/sportsdata/`), Odds API, or search-only — sized per sport. Read-only DB pull + code analysis; output a table. (Backoff queue is 312 live; the by-sport split above is the starting cut.)
+- **S2 — BREAKER HONESTY (COA audit M-3).** Each search backend must register **HTTP 4xx/5xx AND 200-with-unparseable-content** as circuit failures. Today any HTTP 200 records `ok` (parse-blind), so the broken-parse class never opens the breaker — `searchBing` returns 200 with MLB.com/ESPN homepage HTML (M-3). `/admin snapshot` must then show a real per-backend last-success. Folds in "Snapshot Brave health check" + the Bing generic-news detector below.
+- **S3 — TENNIS ADAPTER (largest searchless bucket, 68).** Deterministic results via the whitelisted sources the regrade skill already trusts (ESPN / ATP), following the `services/sportsdata/` adapter pattern. Tennis is the biggest bucket with **no** structured path today.
+- **S4 — PER-SPORT ROLLOUT by bucket size.** After Tennis: Soccer (~36 across Soccer / Serie A / EPL / UCL — also unblocks the 2 quarantined Soccer parlays from the close-out), UFC/MMA (~37), Golf (7). Then decide whether generic web search is retired to last-resort or removed entirely.
+- **S5 — EXHAUSTION POLICY (by design — do not "fix").** Bets with **no** source path age out via `GRADE_BACKOFF_EXHAUSTED` (capped at `RETRY_CAP=15`, then VOID in a transaction). This is intended terminal behavior, not a bug — stated explicitly so it is not "rediscovered" and reverted later.
+
+**In-flight, non-search workstreams to keep open** (do not bury under the arc):
+- **zonetracker-ocr COA pass** — the fifth ZoneTracker repo, still un-audited (see "COA audit pass for `zonetracker-ocr`" below).
+- **zonetracker-stats inventory pass** — the sixth on-box dir is cron-only (not a PM2 app) and not yet inventoried (flagged in `docs/SURFACE-PRO.md` crontab note).
+- *(S-01 arm-time observability PR — now shipped + deployed, see the 2026-06-10 close-out above; no longer in-flight.)*
+
+### Quarantined missing-legs parlays (manual leg reconstruction)
+2 of the 4 live-quarantined bets (2026-06-10) are parlays stored with only **1 recorded leg** in `parlay_legs`, so the grader can't evaluate them: *"Parlay has 1 recorded legs — cannot grade without leg data. Manual review required."* Both NBA: `7b04366b…` ("Jokic, Brunson & Donovan Mitchell to Combine for 100+ Pts, 25+ Reb & 25+ Ast", 22 att) and `b0140947…` ("Spurs/OKC Over 218.5 Points", 20 att). These are a *storage* gap (legs lost at ingest), not a search gap — the search arc above won't clear them. Action: reconstruct the legs from the original slip and re-stage, or VOID with a recorded reason. (The other 2 quarantined bets are Soccer awaiting a result source — handled by S4 above.)
+
 ### ~~Brave Search returning HTTP 402~~ — RESOLVED 2026-05-11 (2faaabd)
 Brave free tier was burned in 6 days. Resolved through three landed changes: (1) circuit breaker on 402 (services/grading.js:1213, quotaCooldownMs=1h); (2) waterfall reorder to Bing → Brave → DDG → Serper (commit aa7b030, comment fix 2faaabd); (3) /admin search-backends counter (search_backend_calls table, shipped 5/8). Last 24h: Bing 173/173 calls, 100% OK. Brave/DDG/Serper at 0 calls because Bing never returned empty. Remaining open thread: explicit 402-aware messaging in fmtBackend (cosmetic, deferred). See "Brave quota probe" below for optional follow-up.
 
 ### Brave quota probe (optional, deferred)
-Brave only gets called when Bing returns zero results, which over 173 calls happened zero times. Result: we never observe Brave quota resets. Add daily cron firing one fixed query at searchBrave() directly, logs to search_backend_calls. ~15 LOC. Low priority — Brave is a fallback, not load-bearing.
+**→ folds into S2 (Breaker honesty) of the search arc above.** Brave only gets called when Bing returns zero results, which over 173 calls happened zero times. Result: we never observe Brave quota resets. Add daily cron firing one fixed query at searchBrave() directly, logs to search_backend_calls. ~15 LOC. Low priority — Brave is a fallback, not load-bearing.
 
 ### Snapshot Brave health check — RESOLVED v344 (b9ca1f6)
 Fixed in `fmtBackend`: per-backend state, last success, last failure with reason now shown. `lastError` preserved across successes on `recordBackendResult`. Original diagnosis (tracker doesn't count HTTP errors) was wrong — tracker did count them, formatter ignored them.
@@ -922,7 +971,7 @@ The-odds-api.com free tier exhausted 2026-05-14 (498/500 credits used, returning
 ## Discovered 2026-05-19 (Phase 1 session)
 
 ### Bing scraper returns generic news (not just 402)
-Memory #30. `searchBing` (`services/grading.js:1645-1681`; `b_algo` split at `:1662` — prior `:1369-1404` ref was stale) parses `class="b_algo"` which Microsoft changed. Returns HTTP 200 with MLB.com/ESPN homepage HTML, not game recaps. Phase 1 (commit 9a19ba6) mitigates for MLB/NBA/NHL. Soccer/golf/tennis/MMA still affected. Fix: defensive multi-selector parsing + generic-news detector that returns "no reliable evidence" → PENDING instead of forcing a bad parse.
+**→ folds into S2 (Breaker honesty) of the search arc above** — the parse-blind breaker + generic-news detector are exactly S2's scope. Memory #30. `searchBing` (`services/grading.js:1645-1681`; `b_algo` split at `:1662` — prior `:1369-1404` ref was stale) parses `class="b_algo"` which Microsoft changed. Returns HTTP 200 with MLB.com/ESPN homepage HTML, not game recaps. Phase 1 (commit 9a19ba6) mitigates for MLB/NBA/NHL. Soccer/golf/tennis/MMA still affected. Fix: defensive multi-selector parsing + generic-news detector that returns "no reliable evidence" → PENDING instead of forcing a bad parse.
 
 > Audit 2026-06-10: still live — 84 Brave fallbacks/7d (vs 1262 Bing "ok"), and the circuit breaker is parse-blind (any HTTP 200 records `ok`, including 0-hit drifted markup and junk hits), so the broken-parse class never opens the breaker; see COA audit M-3 for the written-out resolution (PARSE_EMPTY + generic-news detector in `searchBing`).
 
@@ -1164,8 +1213,10 @@ the full inventory in `docs/SURFACE-PRO.md`.
 **Action:** run a COA-style track pass on `r88510179-collab/zonetracker-ocr` — code,
 docs (`README.md` + `CONTRACT.md`), prompts (if any), and resiliency (auth/`OCR_SERVICE_TOKEN`
 handling, `413`/`503` paths, model-load health gate, timeouts, image-size cap, logging/PII).
-Sibling note worth folding in: `ollama-proxy` on the same box is **not under version
-control** (no git repo/remote) — flag in the same pass.
+Sibling note (resolved 2026-06-10): `ollama-proxy` on the same box is **now under version
+control** — private repo `r88510179-collab/zonetracker-ollama-proxy`, box dir is a tracking
+clone (secrets excluded: `ecosystem.config.js`/logs gitignored, `ecosystem.config.example.js`
++ README committed). See `docs/SURFACE-PRO.md` → ollama-proxy.
 
 ### detectSport: SF Giants data gap
 `MLB_TEAMS` omits the Giants, so bare "Giants"/"SF Giants" resolves NFL. detectSport is nickname-only — needs a city-aware signal. Low frequency, but wrong sport poisons grading routing.
