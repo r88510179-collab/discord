@@ -2128,8 +2128,8 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
   // ── GUARD 2: Parse and validate event date (with normalization) ──
   const { normalizeEventDate } = require('./ai');
   const rawEventDate = bet.event_date || bet.created_at;
-  const eventDate = normalizeEventDate(rawEventDate) || rawEventDate;
-  const eventTime = new Date(eventDate).getTime();
+  let eventDate = normalizeEventDate(rawEventDate) || rawEventDate;
+  let eventTime = new Date(eventDate).getTime();
   if (!eventTime || isNaN(eventTime)) {
     console.log(`[AI Grader] SKIP bad date: ${bet.id?.slice(0, 8)} event_date="${rawEventDate}" normalized="${eventDate}"`);
     return earlyReturn({ status: 'PENDING', evidence: `Invalid event date: ${rawEventDate}` });
@@ -2142,7 +2142,21 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
   }
 
   // ── GUARD 3: Too recent — game may still be in progress ──
-  const hoursSinceEvent = (Date.now() - eventTime) / (1000 * 60 * 60);
+  let hoursSinceEvent = (Date.now() - eventTime) / (1000 * 60 * 60);
+  // Read-side defense: an event_date still resolving ahead of now beyond
+  // small clock skew is invalid — legacy time-only strings ("9:10PM ET")
+  // re-anchor to "today" on every poll and would stay "too soon" forever,
+  // burning attempts to quarantine. Date from created_at instead.
+  if (hoursSinceEvent < -0.25 && bet.event_date && bet.created_at) {
+    const fallbackDate = normalizeEventDate(bet.created_at) || bet.created_at;
+    const fallbackTime = new Date(fallbackDate).getTime();
+    if (fallbackTime && !isNaN(fallbackTime)) {
+      console.log(`grade.event_date_skew_fallback betId=${bet.id} event_date="${bet.event_date}" hours_since_event=${hoursSinceEvent.toFixed(2)} fallback=created_at`);
+      eventDate = fallbackDate;
+      eventTime = fallbackTime;
+      hoursSinceEvent = (Date.now() - eventTime) / (1000 * 60 * 60);
+    }
+  }
   console.log(`[AI Grader] Time check: ${bet.id?.slice(0, 8)} event=${eventDate} hours_since=${hoursSinceEvent.toFixed(2)}`);
   if (hoursSinceEvent < 3) {
     console.log(`grade.skip_too_recent betId=${bet.id} hours_since_event=${hoursSinceEvent.toFixed(2)}`);

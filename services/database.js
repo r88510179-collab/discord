@@ -2,6 +2,7 @@ const Database = require('better-sqlite3');
 const path = require('path');
 const crypto = require('crypto');
 const { runMigrations } = require('./migrator');
+const { normalizeEventDateForStorage } = require('./eventDate');
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'bettracker.db');
 
@@ -343,7 +344,10 @@ function createBet(betData) {
       betData.capper_id, betData.sport || 'Unknown', betData.league || null,
       betData.bet_type || 'straight', betData.description,
       betData.odds || null, betData.units || 1,
-      betData.event_date || null, betData.source || 'manual',
+      // Write-time gate: event_date is NULL or a parseable ISO datetime —
+      // time-only strings ("9:10PM ET") resolve against now (= created_at
+      // at insert), junk stores NULL. See services/eventDate.js.
+      normalizeEventDateForStorage(betData.event_date), betData.source || 'manual',
       betData.source_url || null, betData.source_channel_id || null,
       betData.source_message_id || null, fingerprint, betData.raw_text || null,
       betData.review_status || 'confirmed',
