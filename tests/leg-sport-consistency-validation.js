@@ -5,6 +5,14 @@
 // Fix: 'giants'/'cardinals'/'jets' added to MLB/NFL/NHL respectively,
 // and the validator now passes when the declared sport is among the
 // sports whose keyword list matched the leg.
+//
+// Repro 2: 2026-06-10 21:44 UTC · ingest twit_2064504565593219458 ·
+// @lockedin — a real 7-leg parlay declared sport "MLB/NHL" was dropped
+// with leg_sport_mismatch: 'Leg references team(s) "marlins" which exist
+// in MLB but not in declared parlay sport MLB/NHL' — self-contradictory.
+// Fix: the declared sport is parsed as a SET (split on / & ,) so a
+// compound declaration admits a leg from ANY of its sports; single-sport
+// declarations are a one-element set and behave exactly as before.
 // ═══════════════════════════════════════════════════════════
 
 const assert = require('assert');
@@ -107,6 +115,83 @@ run('Missing description → pass', () => {
 run('"Cleveland Browns -3" + MLB → fire (single-sport mismatch)', () => {
   const r = validateLegSportConsistency({ description: 'Cleveland Browns -3' }, 'MLB');
   assert.strictEqual(r.valid, false);
+});
+
+// ═══════════════════════════════════════════════════════════
+// Compound multi-sport declarations — declared sport is a SET.
+// Live repro: ingest twit_2064504565593219458 (declared "MLB/NHL").
+// A leg passes when its team's sport is ANY of the declared sports;
+// it still fires when none of the declared sports matches.
+// ═══════════════════════════════════════════════════════════
+console.log('\nCompound multi-sport declarations:');
+
+// ── The four prompt cases (marlins=MLB-only, bruins=NHL-only, lakers=NBA-only) ──
+run('LIVE BUG: "marlins" + MLB/NHL → pass (MLB ∈ {MLB,NHL})', () => {
+  const r = validateLegSportConsistency({ description: 'Miami Marlins ML' }, 'MLB/NHL');
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
+});
+
+run('"bruins" + MLB/NHL → pass (NHL ∈ {MLB,NHL})', () => {
+  const r = validateLegSportConsistency({ description: 'Boston Bruins ML' }, 'MLB/NHL');
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
+});
+
+run('"lakers" + MLB/NHL → fire (NBA ∉ {MLB,NHL}) — no loosening', () => {
+  const r = validateLegSportConsistency({ description: 'Los Angeles Lakers ML' }, 'MLB/NHL');
+  assert.strictEqual(r.valid, false);
+  assert.match(r.reason, /lakers/i);
+  assert.match(r.reason, /NBA/);
+  assert.match(r.reason, /MLB\/NHL/); // raw declared string preserved in message
+});
+
+run('"marlins" + MLB (single) → pass (behavior unchanged)', () => {
+  const r = validateLegSportConsistency({ description: 'Miami Marlins ML' }, 'MLB');
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
+});
+
+run('"lakers" + MLB (single) → fire (behavior unchanged)', () => {
+  const r = validateLegSportConsistency({ description: 'Los Angeles Lakers ML' }, 'MLB');
+  assert.strictEqual(r.valid, false);
+  assert.match(r.reason, /lakers/i);
+  assert.match(r.reason, /MLB/);
+});
+
+// ── Separator + normalization coverage ──
+run('"&" separator + spaces: "marlins" + "MLB & NHL" → pass', () => {
+  const r = validateLegSportConsistency({ description: 'Miami Marlins ML' }, 'MLB & NHL');
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
+});
+
+run('"," separator + spaces: "bruins" + "MLB, NHL" → pass', () => {
+  const r = validateLegSportConsistency({ description: 'Boston Bruins ML' }, 'MLB, NHL');
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
+});
+
+run('spaces around "/": "marlins" + "MLB / NHL" → pass', () => {
+  const r = validateLegSportConsistency({ description: 'Miami Marlins ML' }, 'MLB / NHL');
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
+});
+
+run('lowercase compound: "marlins" + "mlb/nhl" → pass', () => {
+  const r = validateLegSportConsistency({ description: 'Miami Marlins ML' }, 'mlb/nhl');
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
+});
+
+run('three-way compound: "lakers" + "NBA/MLB/NHL" → pass', () => {
+  const r = validateLegSportConsistency({ description: 'Los Angeles Lakers ML' }, 'NBA/MLB/NHL');
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
+});
+
+// ── Shared-nickname behavior is identical inside a compound ──
+run('"kings" (NBA+NHL) + NBA/MLB → pass (NBA ∈ matched)', () => {
+  const r = validateLegSportConsistency({ description: 'Los Angeles Kings ML' }, 'NBA/MLB');
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
+});
+
+run('"browns" (NFL-only) + MLB/NHL → fire (NFL ∉ {MLB,NHL})', () => {
+  const r = validateLegSportConsistency({ description: 'Cleveland Browns -3' }, 'MLB/NHL');
+  assert.strictEqual(r.valid, false);
+  assert.match(r.reason, /browns/i);
 });
 
 // ═══════════════════════════════════════════════════════════
