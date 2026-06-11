@@ -9,7 +9,7 @@
 // Flow:  OCR  →  empty/garbage check  →  SGP gate  →  Groq parse (retry once)
 //        →  two-tier validate  →  { action, reason, parsedBet, … }
 //
-// ISOLATION-ONLY: not imported by ai.js / messageHandler yet. See
+// Wired into Discord-slip ingest via services/ocrFirstWiring.js; runtime-gated by OCR_FIRST_MODE (off|shadow|cutover, default off). See
 // docs/specs/ocr-first.md. `deps` lets unit tests mock the network with no
 // live calls; production callers omit it.
 // ═══════════════════════════════════════════════════════════
