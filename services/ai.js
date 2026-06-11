@@ -433,8 +433,12 @@ function normalizeBet(bet) {
   }
   if (!rawDesc) return null;
 
-  // Run team and player normalization on description before storing
-  const description = normalizeDescription(rawDesc);
+  // Run team and player normalization on description before storing. Pass the
+  // declared sport so unmodeled-league slips (KBO, KHL, …) are never rewritten
+  // with a wrong same-nickname US team — see services/normalization.js
+  // shouldExpandAliases (incident 2026-06-11, ingest disc_1514481735335805030).
+  const declaredSport = bet.sport;
+  const description = normalizeDescription(rawDesc, declaredSport);
 
   const rawOdds = toSafeNumber(bet.odds, -110);
   const odds = Math.abs(rawOdds) > 9999 ? -110 : Math.trunc(rawOdds);
@@ -448,7 +452,7 @@ function normalizeBet(bet) {
           const legDesc = String(leg?.description || '').trim().slice(0, 200);
           if (!legDesc) return null;
           return {
-            description: normalizeDescription(legDesc),
+            description: normalizeDescription(legDesc, declaredSport),
             odds: toSafeNumber(leg?.odds, null),
             team: leg?.team ? String(leg.team).trim() : null,
             line: leg?.line ? String(leg.line).trim() : null,

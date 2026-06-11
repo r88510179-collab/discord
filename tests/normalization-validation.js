@@ -158,6 +158,78 @@ function testDescriptionPreservesOther() {
 }
 
 // ═══════════════════════════════════════════════════════════
+// TEST 6b: normalizeDescription — unmodeled-league sport gate
+//   A bet declared in a league we don't model (KBO/KHL/NPB/…) must NOT have its
+//   nicknames expanded: "Eagles"/"Lions" in a KBO slip are Hanwha Eagles /
+//   Samsung Lions, not Philadelphia Eagles / Detroit Lions. Expanding splices a
+//   real, wrong US team into the slip (incident 2026-06-11, ingest
+//   disc_1514481735335805030). Modeled leagues + the no-sport call must be
+//   byte-identical to the prior behavior.
+// ═══════════════════════════════════════════════════════════
+function testUnmodeledLeagueSportGate() {
+  // Unmodeled leagues → raw passthrough (suppression).
+  const suppress = [
+    ['Hanwha Eagles +1.5', 'KBO'],
+    ['Samsung Lions ML', 'KBO'],
+    ['Samsung Lions ML', 'kbo'], // case-insensitive
+    ['Hanwha Eagles +1.5 / SSG Landers +1.5 / Samsung Lions ML', 'KBO'], // live 3-leg repro
+    ['Kings ML', 'KHL'],
+    ['Giants -1.5', 'NPB'],
+    ['Eagles ML', 'MLB/KBO'], // compound with an unmodeled part → suppress
+  ];
+  for (const [input, sport] of suppress) {
+    const result = normalizeDescription(input, sport);
+    assert.strictEqual(result, input,
+      `normalizeDescription("${input}", "${sport}") must pass through unchanged but got "${result}"`);
+  }
+
+  // Modeled leagues → still expand exactly as before.
+  assert.strictEqual(normalizeDescription('Eagles ML', 'NFL'), 'Philadelphia Eagles ML');
+  assert.strictEqual(normalizeDescription('Lions -3.5', 'NFL'), 'Detroit Lions -3.5');
+  assert.strictEqual(normalizeDescription('Cards ML', 'MLB'), 'St. Louis Cardinals ML');
+  assert.strictEqual(normalizeDescription('Eagles ML', 'MLB/NHL'), 'Philadelphia Eagles ML');
+  // Long-form modeled labels expand via whole-word league CODE match.
+  assert.strictEqual(normalizeDescription('Lakers -3.5', 'NBA Basketball'), 'Los Angeles Lakers -3.5');
+  // Generic / full league NAMES for a modeled league expand ("Baseball" is a real
+  // stored sport — tests/s1b-measure-fixture.test.js). Bare "Football" is omitted
+  // on purpose (soccer-ambiguous), and foreign-qualified names never match.
+  assert.strictEqual(normalizeDescription('Cards ML', 'Baseball'), 'St. Louis Cardinals ML');
+  assert.strictEqual(normalizeDescription('Oilers ML', 'Hockey'), 'Edmonton Oilers ML');
+  assert.strictEqual(normalizeDescription('Cards ML', 'Major League Baseball'), 'St. Louis Cardinals ML');
+  assert.strictEqual(normalizeDescription('Eagles ML', 'American Football'), 'Philadelphia Eagles ML');
+  assert.strictEqual(normalizeDescription('Eagles ML', 'Football'), 'Eagles ML'); // soccer-ambiguous → suppress
+  assert.strictEqual(normalizeDescription('Cards ML', 'Korean Baseball'), 'Cards ML'); // foreign → suppress
+
+  // 'Unknown'/placeholder = NO league signal (detectSport's value for abbreviation/
+  // slang/player-prop text) → must keep expanding, else the common LAL/GSW/Dubs
+  // class silently loses canonicalization vs main.
+  assert.strictEqual(normalizeDescription('LAL -3.5 vs GSW', 'Unknown'),
+    'Los Angeles Lakers -3.5 vs Golden State Warriors');
+  assert.strictEqual(normalizeDescription('Dubs ML', 'Unknown'), 'Golden State Warriors ML');
+  assert.strictEqual(normalizeDescription('Cards ML', 'N/A'), 'St. Louis Cardinals ML');
+  assert.strictEqual(normalizeDescription('Cards ML', 'Pending'), 'St. Louis Cardinals ML');
+
+  // No declared sport → prior behavior preserved (expand). This is the shape
+  // every existing caller (and TEST 5/6) uses, so the param is purely additive.
+  assert.strictEqual(normalizeDescription('Eagles ML'), 'Philadelphia Eagles ML');
+  assert.strictEqual(normalizeDescription('LAL -3.5 vs GSW'),
+    'Los Angeles Lakers -3.5 vs Golden State Warriors');
+
+  // Sponsor-prefix guard (sport-independent): a KBO-club nickname right after a
+  // sponsor corporate name stays raw even when detectSport mislabels the sport as
+  // a modeled US league on the bare-text path. Real US teams are unaffected.
+  assert.strictEqual(normalizeDescription('Hanwha Eagles +1.5', 'NFL'), 'Hanwha Eagles +1.5');
+  assert.strictEqual(normalizeDescription('Hanwha Eagles +1.5'), 'Hanwha Eagles +1.5');
+  assert.strictEqual(normalizeDescription('Samsung Lions ML', 'NFL'), 'Samsung Lions ML');
+  assert.strictEqual(normalizeDescription('KT Wiz ML'), 'KT Wiz ML');
+  assert.strictEqual(normalizeDescription('Philadelphia Eagles ML', 'NFL'), 'Philadelphia Eagles ML');
+  // Guard is SAME-LINE only — a bare sponsor ending a leg never guards the next line.
+  assert.strictEqual(normalizeDescription('KT\nLions ML'), 'KT\nDetroit Lions ML');
+
+  console.log('  ✓ Unmodeled-league slips skip expansion; Unknown/placeholder + modeled expand; sponsor-prefix guard holds');
+}
+
+// ═══════════════════════════════════════════════════════════
 // TEST 7: Canonical names map to themselves
 // ═══════════════════════════════════════════════════════════
 function testCanonicalSelfMap() {
@@ -186,5 +258,6 @@ testCaseInsensitivity();
 testUnknownPassthrough();
 testDescriptionNormalization();
 testDescriptionPreservesOther();
+testUnmodeledLeagueSportGate();
 testCanonicalSelfMap();
 console.log('Normalization validation passed.');
