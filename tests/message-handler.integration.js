@@ -62,7 +62,16 @@ function countStage(events, stage) {
   return events.filter(e => e.stage === stage).length;
 }
 
-function makeMessage({ messageId = 'msg_1', withImage = false } = {}) {
+function makeMessage({
+  messageId = 'msg_1',
+  withImage = false,
+  content = 'Lakers -3.5 -110 1u lock',
+  channelId = 'channel_1',
+  channelName = 'picks',
+  webhookId = undefined,
+  bot = false,
+  authorId = 'user_1',
+} = {}) {
   const replyCalls = [];
   const reactCalls = [];
   const imageMap = new Map();
@@ -73,15 +82,16 @@ function makeMessage({ messageId = 'msg_1', withImage = false } = {}) {
   return {
     guild: { id: 'guild_1' },
     id: messageId,
-    content: 'Lakers -3.5 -110 1u lock',
-    channel: { id: 'channel_1', name: 'picks' },
+    webhookId,
+    content,
+    channel: { id: channelId, name: channelName },
     attachments: imageMap,
     embeds: [],
     reference: null,
     createdTimestamp: Date.now(),
     author: {
-      id: 'user_1',
-      bot: false,
+      id: authorId,
+      bot,
       displayName: 'Tester',
       displayAvatarURL: () => null,
     },
@@ -399,6 +409,104 @@ async function testGetImageAttachmentsTagsOrigin() {
   assert.strictEqual(eligibleImageCount(multi), 2, 'two real attachments stay multi');
 }
 
+// ── GUARD 5 human bare-total bypass (incident 2026-06-11) ───────────────────
+// A bare total ("MLB: Yankees Cleveland O7.5") scores 0 pick signals, so GUARD 5
+// would drop it. In a DUBCLUB_SPLIT_CHANNEL_IDS channel a human-typed bare total
+// IS a complete pick: the bypass must route it to processAggregatedMessage just
+// like a webhook post. Outside those channels the heuristic still drops it — now
+// with the queryable GUARD5_INSUFFICIENT_SIGNALS reason instead of a silent loss.
+
+// 1. Human bare total in a DubClub-split channel → bypasses GUARD 5, reaches the
+//    AI parser, persists. (channel is also in HUMAN_SUBMISSION so the human author
+//    is authorized — exactly the live #lockedin-slips config.)
+async function testDubclubHumanBareTotalBypassesGuard5() {
+  process.env.HUMAN_SUBMISSION_CHANNEL_IDS = 'dubclub_ch';
+  process.env.DUBCLUB_SPLIT_CHANNEL_IDS = 'dubclub_ch';
+  process.env.PURE_SLIP_CHANNEL_IDS = '';
+  process.env.PICKS_CHANNEL_IDS = '';
+
+  const events = [];
+  const writer = dedupeWriter();
+  const staged = [];
+  let parseCalls = 0;
+  const { handleMessage } = loadHandlerWithMocks({
+    parseBetText: async () => { parseCalls += 1; return { bets: [{ sport: 'MLB', bet_type: 'straight', description: 'Yankees/Cleveland Over 7.5', odds: null, units: 1, legs: [] }] }; },
+    parseBetSlipImage: async () => ({ bets: [] }),
+    createBetWithLegs: writer,
+    sendStagingEmbed: async (...args) => staged.push(args),
+    events,
+  });
+
+  const msg = makeMessage({ messageId: 'dub_human_total_1', content: 'MLB: Yankees Cleveland O7.5', channelId: 'dubclub_ch', channelName: 'lockedin-slips' });
+  await handleMessage(msg);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  assert.ok(!events.some(e => e.fn === 'drop' && e.dropReason === 'GUARD5_INSUFFICIENT_SIGNALS'), 'human bare total in a DubClub-split channel must NOT be dropped by GUARD 5');
+  assert.strictEqual(parseCalls, 1, 'human bare total must reach the AI parser (bypass routed it to processAggregatedMessage)');
+  assert.strictEqual(writer.insertedCount(), 1, 'human bare total must persist as a bet');
+  assert.strictEqual(staged.length, 1, 'human bare total must stage one War Room embed');
+}
+
+// 2. Human bare total in a NON-DubClub channel → still rejected, but now emits a
+//    DROP with the new GUARD5_INSUFFICIENT_SIGNALS reason (no silent loss).
+async function testHumanBareTotalNonCapperDropped() {
+  process.env.PICKS_CHANNEL_IDS = 'picks_ch';
+  process.env.HUMAN_SUBMISSION_CHANNEL_IDS = '';
+  process.env.DUBCLUB_SPLIT_CHANNEL_IDS = '';
+  process.env.PURE_SLIP_CHANNEL_IDS = '';
+
+  const events = [];
+  const writer = dedupeWriter();
+  let parseCalls = 0;
+  const { handleMessage } = loadHandlerWithMocks({
+    parseBetText: async () => { parseCalls += 1; return { bets: [] }; },
+    parseBetSlipImage: async () => ({ bets: [] }),
+    createBetWithLegs: writer,
+    sendStagingEmbed: async () => {},
+    events,
+  });
+
+  const msg = makeMessage({ messageId: 'noncapper_total_1', content: 'MLB: Reds Padres O8.5', channelId: 'picks_ch', channelName: 'general-picks' });
+  await handleMessage(msg);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  const drop = events.find(e => e.fn === 'drop' && e.dropReason === 'GUARD5_INSUFFICIENT_SIGNALS');
+  assert.ok(drop, 'human bare total in a non-DubClub channel must drop with GUARD5_INSUFFICIENT_SIGNALS');
+  assert.strictEqual(parseCalls, 0, 'GUARD 5 drop must happen before the AI parser');
+  assert.strictEqual(writer.insertedCount(), 0, 'rejected bare total must not persist a bet');
+}
+
+// 3. Webhook bare total in a DubClub-split channel → behavior unchanged: still
+//    bypasses GUARD 5 (empty image arg, exactly as ffddb09) and persists.
+async function testDubclubWebhookBareTotalUnchanged() {
+  process.env.HUMAN_SUBMISSION_CHANNEL_IDS = 'dubclub_ch';
+  process.env.DUBCLUB_SPLIT_CHANNEL_IDS = 'dubclub_ch';
+  process.env.PURE_SLIP_CHANNEL_IDS = '';
+  process.env.PICKS_CHANNEL_IDS = '';
+  process.env.ALLOWED_WEBHOOK_IDS = 'wh_1';
+
+  const events = [];
+  const writer = dedupeWriter();
+  const staged = [];
+  let parseCalls = 0;
+  const { handleMessage } = loadHandlerWithMocks({
+    parseBetText: async () => { parseCalls += 1; return { bets: [{ sport: 'MLB', bet_type: 'straight', description: 'Red Sox/Rays Over 7.5', odds: null, units: 1, legs: [] }] }; },
+    parseBetSlipImage: async () => ({ bets: [] }),
+    createBetWithLegs: writer,
+    sendStagingEmbed: async (...args) => staged.push(args),
+    events,
+  });
+
+  const msg = makeMessage({ messageId: 'dub_webhook_total_1', content: 'MLB: Red Sox Rays O7.5', channelId: 'dubclub_ch', channelName: 'lockedin-slips', webhookId: 'wh_1', bot: true, authorId: 'wh_user' });
+  await handleMessage(msg);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  assert.ok(!events.some(e => e.fn === 'drop' && e.dropReason === 'GUARD5_INSUFFICIENT_SIGNALS'), 'webhook bare total must keep bypassing GUARD 5 (unchanged)');
+  assert.strictEqual(parseCalls, 1, 'webhook bare total still routed through processAggregatedMessage');
+  assert.strictEqual(writer.insertedCount(), 1, 'webhook bare total persists as a bet (unchanged)');
+  assert.strictEqual(staged.length, 1, 'webhook bare total stages one War Room embed (unchanged)');
+}
+
 (async () => {
   await testGetImageAttachmentsTagsOrigin();
   await testReplayNoDuplicateSideEffects();
@@ -409,6 +517,9 @@ async function testGetImageAttachmentsTagsOrigin() {
   await testPureSlipValidBetsUnchanged();
   await testNonBypassChannelStillHolds();
   await testEmptyPureSlipUnchanged();
+  await testDubclubHumanBareTotalBypassesGuard5();
+  await testHumanBareTotalNonCapperDropped();
+  await testDubclubWebhookBareTotalUnchanged();
   console.log('messageHandler integration validation passed.');
   // Production handler installs a 10-minute alertCooldowns prune setInterval that
   // keeps the event loop alive. Force-exit so the test runner advances.

@@ -46,6 +46,7 @@ const DROP_REASONS = [
   'PRE_FILTER_NO_BET_CONTENT',
   'PRE_FILTER_PROMO',
   'PRE_FILTER_AI_EMPTY_RESULT', // post-Vision indeterminate branch (handlers/messageHandler.js:1302) — F-04 enum-drift registration
+  'GUARD5_INSUFFICIENT_SIGNALS', // GUARD 5 pre-buffer signal heuristic dropped a message (looksLikePick <2 signals, no celebration, no images) — distinct from PRE_FILTER_NO_BET_CONTENT so "a real bare total was discarded by the heuristic" is queryable apart from genuine non-bet text (handlers/messageHandler.js GUARD 5). Incident 2026-06-11.
   'BOUNCER_REJECTED',
   'VISION_EXTRACTION_FAILED',
   'TEXT_EXTRACTION_FAILED',     // parseBetText AI/parse failure (services/ai.js:1154,1173) — F-05 enum-drift registration

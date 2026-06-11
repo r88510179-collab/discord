@@ -72,6 +72,15 @@ run('every F-04/F-05 registered value is in its enum', () => {
   assert.ok(pe.STAGES.includes('MANUAL_REVIEW_RELEASED'), 'MANUAL_REVIEW_RELEASED missing from STAGES');
 });
 
+// GUARD 5 heuristic-drop reason (incident 2026-06-11). Registered so the
+// warn-only write-boundary tripwire stays quiet and dashboards can key on it.
+run('GUARD5_INSUFFICIENT_SIGNALS is registered in DROP_REASONS', () => {
+  assert.ok(
+    pe.DROP_REASONS.includes('GUARD5_INSUFFICIENT_SIGNALS'),
+    'GUARD5_INSUFFICIENT_SIGNALS missing from DROP_REASONS',
+  );
+});
+
 // ── (b) drift: unknown value warns ONCE, does NOT throw, does NOT skip ──
 run('unknown stage → warns, does NOT throw, row STILL written', () => {
   const before = countRows();
