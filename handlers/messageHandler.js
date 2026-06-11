@@ -754,7 +754,13 @@ async function handleMessage(message, { isUpdate = false } = {}) {
     }
   }
 
-  if (!message.guild) return;
+  // Non-guild surface (DM). RECEIVED already fired above, so close the trace
+  // with a DROP instead of a bare return (silent loss is what the 2026-06-11
+  // incident audit flagged). Not a capper channel → CHANNEL_UNAUTHORIZED.
+  if (!message.guild) {
+    recordDrop({ ingestId, sourceType: 'discord', sourceRef, stage: 'DROPPED', dropReason: 'CHANNEL_UNAUTHORIZED', payload: { guardReason: 'no_guild' } });
+    return;
+  }
 
   // ═══ PARTIAL FETCH: ensure forwarded/partial messages are fully loaded ═══
   if (message.partial) {
@@ -762,12 +768,18 @@ async function handleMessage(message, { isUpdate = false } = {}) {
       await message.fetch();
     } catch (err) {
       console.error('[PARTIAL_FETCH_ERROR]', err.message);
+      // RECEIVED already fired; record the fetch failure so the message isn't
+      // an untraceable dangling RECEIVED. Fire-and-forget, never rethrows.
+      recordError({ ingestId, sourceType: 'discord', sourceRef, stage: 'ERROR', error: err, payload: { where: 'partial_fetch' } });
       return;
     }
   }
 
   // ═══ DEDUP GUARD ═══
-  // For MessageUpdate (embed unfurl), use a separate key so it bypasses the Create dedup
+  // For MessageUpdate (embed unfurl), use a separate key so it bypasses the Create dedup.
+  // No DROP event here on purpose: a deduped hit is NOT a lost pick — the first
+  // delivery of this id already emitted RECEIVED + its terminal event and is in
+  // flight. Emitting a drop would double-count and misreport a non-loss.
   const dedupKey = isUpdate ? `update:${message.id}` : message.id;
   if (processedMessages.has(dedupKey)) return;
   processedMessages.add(dedupKey);
@@ -907,15 +919,29 @@ async function handleMessage(message, { isUpdate = false } = {}) {
   // and are one-pick-per-message. Bypass BOTH the GUARD 5 signal filter (which
   // drops bare totals like "Cubs Cardinals O8") AND the 4s aggregation buffer
   // (which would re-merge the split posts). Must run before GUARD 5.
+  //
+  // Fix 1 (incident 2026-06-11): the original ffddb09 bypass covered ONLY
+  // webhook/bot authors. A human typing a bare total in the SAME dedicated capper
+  // slip channel ("MLB: Yankees Cleveland O7.5") is just as much a complete pick,
+  // but GUARD 5's >=2-signal heuristic scores it 0 and silently discards it.
+  // Extend the bypass to human authors so they take the identical process-now,
+  // one-pick-per-message path (rapid pick dumps must NOT be re-merged by the
+  // buffer). The signal heuristic still guards every OTHER channel, and war-room
+  // needs_review still gates everything that gets through.
   const dubclubSplitChannels = (process.env.DUBCLUB_SPLIT_CHANNEL_IDS || '')
     .split(',').map((s) => s.trim()).filter(Boolean);
-  const isDubclubSplit =
-    (message.webhookId || message.author?.bot) &&
-    dubclubSplitChannels.includes(message.channel?.id);
-  if (isDubclubSplit) {
-    console.log(`[DubclubSplit] Bypassing buffer + GUARD 5 for webhook pick in #${message.channel?.name} (msg=${message.id})`);
+  const isDubclubSplitChannel = dubclubSplitChannels.includes(message.channel?.id);
+  const isWebhookOrBot = !!(message.webhookId || message.author?.bot);
+  if (isDubclubSplitChannel) {
+    // Webhook/bot DubClub posts are text-only one-pick-per-message — keep their
+    // image arg empty (byte-identical to ffddb09, so webhook behavior is
+    // unchanged). A human may attach a real slip image, so forward their
+    // attachments (same set the buffer would have collected) instead of dropping
+    // them; bare-total text posts simply forward [].
+    const bypassImages = isWebhookOrBot ? [] : images;
+    console.log(`[DubclubSplit] Bypassing buffer + GUARD 5 for ${isWebhookOrBot ? 'webhook' : 'human'} pick in #${message.channel?.name} (msg=${message.id})`);
     try {
-      await processAggregatedMessage(message, fullText, [], { ingestIds: [ingestId], primaryIngestId: ingestId });
+      await processAggregatedMessage(message, fullText, bypassImages, { ingestIds: [ingestId], primaryIngestId: ingestId });
     } catch (err) {
       console.error(`[DubclubSplit] processAggregatedMessage failed for ${message.id}: ${err.message}`);
     }
@@ -927,7 +953,13 @@ async function handleMessage(message, { isUpdate = false } = {}) {
   const textIsPick = looksLikePick(fullText);
   const textIsCelebration = looksLikeCelebration(fullText);
   if (!textIsPick && !textIsCelebration && !hasImages) {
-    recordDrop({ ingestId, sourceType: 'discord', sourceRef, stage: 'DROPPED', dropReason: 'PRE_FILTER_NO_BET_CONTENT', payload: { textLen: fullText.length } });
+    // GUARD5_INSUFFICIENT_SIGNALS (not PRE_FILTER_NO_BET_CONTENT): this is a
+    // heuristic rejection, not a confirmed non-bet. A bare total HAS bet content
+    // — it just scores <2 pick signals. The distinct reason makes "a real pick
+    // was discarded by the signal heuristic" queryable apart from genuine junk.
+    // DubClub-split channels never reach here (bypassed above), so this only
+    // fires outside the dedicated capper slip channels.
+    recordDrop({ ingestId, sourceType: 'discord', sourceRef, stage: 'DROPPED', dropReason: 'GUARD5_INSUFFICIENT_SIGNALS', payload: { textLen: fullText.length } });
     return;
   }
 

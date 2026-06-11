@@ -141,6 +141,8 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 
 **`pipeline_events.stage`**: `RECEIVED`, `AUTHORIZED`, `BUFFERED`, `EXTRACTED`, `PARSED`, `VALIDATED`, `STAGED`, `DROPPED`, `MANUAL_REVIEW_HOLD`, `MANUAL_REVIEW_DISMISSED`, `PURE_SLIP_SKIP_HOLD`, `GRADING_ENTER`, `GRADING_SEARCH`, `GRADING_AI`, `GRADING_GUARDS`, `GRADING_COMPLETE`, `GRADING_DROPPED`. Enum lives at `services/pipeline-events.js:18`. Note: `STAGE_ENTER` etc. listed here previously were `event_type` values, not stages — those are `STAGE_ENTER`, `STAGE_EXIT`, `DROP`, `ERROR` (line 32). Write-boundary enum validation shipped as #49: `warnUnknownEnums` (`services/pipeline-events.js:127`, called at the single write boundary L154) warn-only logs non-canonical values and still writes (fire-and-forget contract preserved; closes audit F-17).
 
+**`pipeline_events.drop_reason`**: closed source-of-truth list is `DROP_REASONS` at `services/pipeline-events.js:42` (not enumerated here — read it there; the warn-only tripwire above flags any unregistered value). New values must be added to that array (and CODEMAP §Enums) before a call site emits them. **`GUARD5_INSUFFICIENT_SIGNALS`** (added 2026-06-11): GUARD 5's pre-buffer signal heuristic dropped a message (`looksLikePick` <2 signals, no celebration, no images). Deliberately distinct from `PRE_FILTER_NO_BET_CONTENT` so "a real bare total was discarded by the heuristic" is queryable apart from genuine non-bet text. Only fires OUTSIDE DubClub-split channels — those bypass GUARD 5 for both webhook and human authors (incident 2026-06-11).
+
 **`hold_review_decisions.human_decision`**: `release`, `dismiss`, `edit`
 
 **`parlay_legs_dedup_events.decision`**: `kept`, `dropped_duplicate`, `near_miss`
