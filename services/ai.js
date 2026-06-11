@@ -1843,7 +1843,21 @@ function validateLegShape(leg) {
 // multiple sport lists — fire only when NONE of the matched sports is the declared sport.
 function validateLegSportConsistency(leg, parlaySport) {
   const desc = (leg.description || '').toLowerCase();
-  const declared = (parlaySport || '').toUpperCase();
+  // A declared sport may be COMPOUND for multi-sport parlays, e.g. "MLB/NHL"
+  // (also seen with "&" or "," separators). Treat the declaration as a SET of
+  // sports: a leg is consistent if its team's sport is ANY one of the declared
+  // sports. A single-sport declaration splits to a one-element set, so its
+  // behavior is identical to the previous exact-key match. Live drop fixed:
+  // ingest twit_2064504565593219458 (7-leg LockedIn parlay, sport "MLB/NHL",
+  // marlins leg) was self-contradictorily rejected because "MLB/NHL" never
+  // equalled the single key "MLB".
+  const declaredSet = new Set(
+    (parlaySport || '')
+      .toUpperCase()
+      .split(/[\/&,]/)
+      .map(s => s.trim())
+      .filter(Boolean)
+  );
   const matchedSports = new Map(); // sport → first keyword that matched
   for (const [sport, keywords] of Object.entries(SPORT_TEAM_MAP)) {
     for (const keyword of keywords) {
@@ -1854,7 +1868,10 @@ function validateLegSportConsistency(leg, parlaySport) {
     }
   }
   if (matchedSports.size === 0) return { valid: true };
-  if (matchedSports.has(declared)) return { valid: true };
+  // Pass when the leg's sport is in the declared set (intersection non-empty).
+  for (const sport of matchedSports.keys()) {
+    if (declaredSet.has(sport)) return { valid: true };
+  }
   const sports = [...matchedSports.keys()];
   const teams = [...matchedSports.values()];
   const sportsStr = sports.length === 1 ? sports[0] : `{${sports.join(',')}}`;
