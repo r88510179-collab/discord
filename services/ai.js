@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════
 // Multi-LLM AI Service — rotates between providers
-// Priority: Cerebras → Gemini → Groq → Mistral → OpenRouter
+// Provider order (getProviders() iterates PROVIDERS object order): Gemini → Groq → OpenRouter → Cerebras → Mistral → Ollama
 // ═══════════════════════════════════════════════════════════
 
 const { normalizeDescription, normalizePlayer } = require('./normalization');
