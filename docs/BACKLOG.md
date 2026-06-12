@@ -420,10 +420,19 @@ Cleanup/hardening left over from the gates 1–3 landing (Part A shipped as PR #
 ### Grading gates 4–5 (off-date reject + season-vs-game scope reject)
 
 Closes the remaining 2 of the original 5 grading bugs (wrong-date confirmation; season-vs-game stat confusion):
-- **Gate 4 — off-date reject.** Per-sport tolerance window + participant alias match; reject evidence whose date falls outside the bet's game window.
-- **Gate 5 — season-vs-game scope reject.** Reject season-total evidence used to grade a single-game prop (and the reverse).
 
-Both require a **dated + scope-tagged evidence-record layer** first (the grader needs structured date/scope on each evidence row). Ship each **shadow-first**, like Gate 3.
+- 🔧 **IN PROGRESS → PR #97 (`gate4-off-date-reject`)** — **evidence-record layer + Gate 4 (shadow).**
+  - **Proof case — incident `e5d27de0` (2026-06-12):** bet "USA Moneyline" (Soccer, capper Harry) finalized **LOSS** against the **June-6 USA–Germany friendly** ("FT USMNT 1-2 Germany") when the bet was the **June-12 USA–Paraguay World Cup opener**. Gate 3 (enforce) passed *legitimately*: attempt 2 lifted the quote verbatim from the source (`evidence_quote = "FT USMNT <strong>1-2 Germany</strong>"`, HTML tags and all), so quote-binding could not stop it. Right quote, wrong fixture — nothing validated the evidence **date**.
+  - **Evidence-record layer** (`services/evidenceRecords.js`): a parallel, structured array — one record per search hit `{ idx, backend, url/domain, snippet, char_start, char_end, dates[], scope:null }` — built *around* the existing evidence text. The model-visible `evidenceForModel` string is **byte-untouched** (Gate 3's quote contract; proven by a byte-identity test). Dependency-free date extractor (ISO, `Month D, YYYY` full+abbr, `M/D/YYYY`, `M/D/YY`, year-less → anchor year with >300d-future wrap; HTML-noise tolerant).
+  - **Gate 4 — off-date reject** (`applyGate4`, `DATE_BOUND_GRADING=off|shadow|enforce`, default **shadow**; `resolveGate4Mode` mirrors `resolveGate3Mode`). Anchor = the event date GUARD 1/2/3 resolves (`normalizeEventDate(event_date) || created_at`). Per-sport tolerance window (`GATE4_TOLERANCE_DAYS`, default ±1 for UTC/ET day skew). Runs **after** Gate 3 (needs a trusted quote): locate the quote-bearing record(s) via `normalizeQuoteWhitespace`, union their dates → none in `[anchor−tol, anchor+tol]` **fires**; ≥1 in-window → `GATE4:date_ok`; zero extractable dates → `GATE4:no_date_signal` (pass-through, we don't block on absence). **shadow** appends `GATE4_WOULD_FIRE|mode=|claimed=|anchor=|tol=|evdates=|participants=|reason=OFF_DATE_EVIDENCE` to the existing `grading_audit.guards_failed` row (**zero new rows/columns**, like Gate 3 B0) and leaves the grade; **enforce** forces PENDING (`OFF_DATE_EVIDENCE`) through Gate 3's `earlyReturn` path. Participant alias (`findMentionedTeams`) is a telemetry-only secondary signal this PR (`participants=hit|miss|na`) — the date check is the sole firing condition (see PR note on the spec's "+ participant alias match" co-firing reading, deferred to the enforce review).
+  - Measurement: `scripts/gate4-firing-check.js` (opens DB `{ readonly: true }` — the M-13 lesson gate3's script missed).
+- **Gate 5 — season-vs-game scope reject.** Reject season-total evidence used to grade a single-game prop (and the reverse). **Evidence-record layer now exists** (shipped with Gate 4 above) — the `scope: null` field on each record is its stub. Remaining work: **scope-tag** each record (season vs game) at build time, then the reject rule (shadow-first, like Gate 4). Forward motion only — do not collapse this into Gate 4.
+
+Ship each **shadow-first**, like Gate 3.
+
+**Follow-up — Gate 4 enforce flip** (mirrors the Gate 3 shadow→enforce flip): collect ≥ ~20–30 Gate-4-evaluated grades via `scripts/gate4-firing-check.js`, **manually classify** each `GATE4_WOULD_FIRE` row (genuinely off-date wrong-fixture vs a tolerance/anchor miss), then `fly secrets set DATE_BOUND_GRADING=enforce` and **verify live ≠ staged** (`printenv DATE_BOUND_GRADING` in-container, per PREFLIGHT Rule 2 / DEPLOY Step 5.5). Revisit per-sport tolerances (`GATE4_TOLERANCE_DAYS`) and the participant co-firing condition at the same review.
+
+> **Read-side vs write-side (cross-ref "🚨 P1 — 98%-empty event_date" below):** Gate 4 is the **read-side** guard — it rejects evidence dated outside the bet's window at grade time even when `event_date` is NULL (it anchors on `created_at`). The P1 item remains the **write-side** fix — extraction reliably populating `event_date` — which tightens Gate 4's anchor from "placement day" to "true game day". Together they close the wrong-date class.
 
 ### ✅ SHIPPED 2026-05-18 — Leg-explosion truncation root cause
 
@@ -911,6 +920,8 @@ Same parlay (bet `8ff7d273`, 2026-04-30 21:30): legs for Paul Skenes, Christophe
 Day 2 attempt 2 surfaced: 898 of 918 bets have empty event_date, 13 free-text (`Today`, `Game 6`, `9:10PM ET`, `4/6/26`, `May 03, 2026`), 7 ISO datetime. Slip extraction or `createBet` path isn't populating event_date reliably.
 
 Fingerprint-composition idempotency migration cannot ship until this is fixed — current state would cause the supersede step to dedupe legitimately distinct bets across days, hiding hundreds of real bets behind a `superseded_by_id` chain.
+
+> This is the **write-side** half of the wrong-date class; **Gate 4** (`gate4-off-date-reject`, under "Grading gates 4–5") is the read-side guard that already rejects off-date evidence at grade time — populating `event_date` here upgrades Gate 4's anchor from the bet's placement day to its true game day.
 
 **Investigation steps:**
 1. Trace event_date population path: slip extractor (Gemini Vision parse) → buffer → bouncer → `createBet` at `services/database.js:333`.
