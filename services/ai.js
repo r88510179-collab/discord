@@ -1223,7 +1223,8 @@ Output strictly valid JSON. Do not include markdown formatting, do not include \
 async function parseBetSlipImage(imageBase64, mediaType = 'image/png', opts = {}) {
   const sys = `Bet slip OCR expert. Recognize Hard Rock Bet, DraftKings, FanDuel, BetMGM, Caesars, Onyx.
 Return ONLY JSON: {"sportsbook":"Hard Rock Bet","bets":[{"sport":"UCL","league":"Champions League","bet_type":"straight","description":"Over 1.5 1H Goals - Corum vs Erokspor","odds":130,"units":1.0,"stake_amount":14.85,"potential_payout":34.15,"legs":[]}]}
-Use specific league names (UCL, EPL, La Liga, etc) not generic Soccer.`;
+Use specific league names (UCL, EPL, La Liga, etc) not generic Soccer.
+Transcribe team and player names EXACTLY as printed on the slip. Never expand a nickname to a fuller or more "official" name, and never add a city, region, or country that is not visible in the image (e.g. keep "Hanwha Eagles" — do NOT write "Hanwha Philadelphia Eagles"; keep "Samsung Lions" — do NOT write "Samsung Detroit Lions").`;
 
   // Image-only call: require image-capable providers. Text-only fallback
   // returns valid-looking empty-bets JSON ({"sportsbook":null,"bets":[]})
@@ -1697,6 +1698,86 @@ function inferLegSport(legDescription) {
   return null;
 }
 
+// ── KBO (Korean Baseball Organization) awareness ────────────────────────────
+// KBO is NOT modeled in SPORT_TEAM_MAP (which holds only NBA/NFL/MLB/NHL/…), and
+// six of its ten clubs share a nickname with a US franchise — Eagles/Tigers/
+// Twins/Lions/Giants/Bears. So a perfectly clean "Hanwha Eagles +1.5" leg in a
+// declared-KBO parlay would mis-fire leg_sport_mismatch ("eagles" → NFL ∉ {KBO})
+// and the whole slip would be dropped (incident 2026-06-11, ingest
+// disc_1514481735335805030). The corporate SPONSOR that prefixes every KBO club
+// name (Hanwha/Kia/LG/SSG/Samsung/KT/Lotte/Kiwoom/Doosan/NC — mirrors
+// services/normalization.js KBO_SPONSOR_PREFIX) is the decisive signal that the
+// club is Korean, not American.
+//
+// This also defends the observed Vision corruption where a US city is injected
+// between the sponsor and the nickname ("Hanwha Philadelphia Eagles", "Samsung
+// Detroit Lions"): the sponsor still wins, and normalizeKboLeg strips the
+// injected city so the stored description is the verbatim Korean club name.
+const KBO_TEAMS = [
+  { sponsor: 'hanwha',  nickname: 'eagles'  },
+  { sponsor: 'kia',     nickname: 'tigers'  },
+  { sponsor: 'lg',      nickname: 'twins'   },
+  { sponsor: 'ssg',     nickname: 'landers' },
+  { sponsor: 'samsung', nickname: 'lions'   },
+  { sponsor: 'kt',      nickname: 'wiz'     },
+  { sponsor: 'lotte',   nickname: 'giants'  },
+  { sponsor: 'kiwoom',  nickname: 'heroes'  },
+  { sponsor: 'doosan',  nickname: 'bears'   },
+  { sponsor: 'nc',      nickname: 'dinos'   },
+];
+
+// Per-club regex: the sponsor, then 0–2 intervening words (an injected US city
+// such as "Philadelphia" or "San Francisco"), then the club's own nickname. The
+// pairing of sponsor + matching nickname is what makes this safe — a bare 2-char
+// sponsor token like "NC" or "KT" never matches on its own (it must be followed
+// by "Dinos"/"Wiz"), so US strings like "NC State" can't false-positive. The
+// intervening group is captured so normalizeKboLeg can drop exactly the injected
+// city while preserving the rest of the leg (line/odds). Cached on the fn.
+function _kboTeamMatchers() {
+  if (!_kboTeamMatchers._cache) {
+    _kboTeamMatchers._cache = KBO_TEAMS.map(({ sponsor, nickname }) => ({
+      sponsor,
+      nickname,
+      re: new RegExp(`\\b(${sponsor})\\b((?:\\s+[A-Za-z.]+){0,2}?)\\s+(${nickname})\\b`, 'i'),
+    }));
+  }
+  return _kboTeamMatchers._cache;
+}
+
+// True when the description names a KBO club (clean "Hanwha Eagles" OR the
+// city-injected corruption "Hanwha Philadelphia Eagles"). Used by the
+// leg-sport-consistency validator to pass a KBO leg under a declared-KBO parlay
+// before the US-league nickname scan can mis-fire.
+function matchesKboTeam(description) {
+  const d = String(description == null ? '' : description);
+  return _kboTeamMatchers().some(({ re }) => re.test(d));
+}
+
+// Strip a US city/region that Vision (or any upstream) injected between a KBO
+// sponsor and its nickname: "Hanwha Philadelphia Eagles +1.5" → "Hanwha Eagles
+// +1.5". Casing of the real sponsor/nickname tokens is preserved verbatim; only
+// the intervening words are dropped. A description that names no KBO club, or a
+// clean KBO club with nothing injected, is returned BYTE-IDENTICAL.
+function normalizeKboLeg(description) {
+  let out = String(description == null ? '' : description);
+  for (const { re } of _kboTeamMatchers()) {
+    out = out.replace(re, (full, sponsor, mid, nickname) =>
+      (mid && mid.trim()) ? `${sponsor} ${nickname}` : full);
+  }
+  return out;
+}
+
+// The declared parlay sport is treated as a SET (split on / & ,) exactly like
+// validateLegSportConsistency, so a compound declaration like "MLB/KBO" counts
+// as KBO too. Used to gate KBO leg-cleanup so non-KBO parlays are untouched.
+function declaredSportIncludesKbo(parlaySport) {
+  return String(parlaySport || '')
+    .toUpperCase()
+    .split(/[\/&,]/)
+    .map((s) => s.trim())
+    .includes('KBO');
+}
+
 function validateParsedBet(pick, sourceText, opts = {}) {
   const issues = [];
   const desc = (pick.description || '').toLowerCase();
@@ -1811,6 +1892,26 @@ function validateParsedBet(pick, sourceText, opts = {}) {
     }
   }
 
+  // KBO defensive normalization: when the parlay declares KBO, strip any US city
+  // that Vision injected between a KBO sponsor and its (US-shared) nickname so
+  // the STORED description/legs carry the verbatim Korean club name ("Hanwha
+  // Philadelphia Eagles" → "Hanwha Eagles"). Gated on declared-KBO so non-KBO
+  // parlays are byte-identical (a real "Philadelphia Eagles" NFL pick is never
+  // touched). Runs before the leg-sport loop, which is itself KBO-aware below.
+  if (declaredSportIncludesKbo(pick.sport)) {
+    if (typeof pick.description === 'string') {
+      const cleanedDesc = normalizeKboLeg(pick.description);
+      if (cleanedDesc !== pick.description) pick.description = cleanedDesc;
+    }
+    if (pick.legs && pick.legs.length > 0) {
+      for (const leg of pick.legs) {
+        if (!leg || typeof leg.description !== 'string') continue;
+        const cleanedLeg = normalizeKboLeg(leg.description);
+        if (cleanedLeg !== leg.description) leg.description = cleanedLeg;
+      }
+    }
+  }
+
   // Bug A: Wrong-sport team contamination in parlay legs
   if (pick.legs && pick.legs.length > 0 && pick.sport) {
     for (const leg of pick.legs) {
@@ -1862,6 +1963,13 @@ function validateLegSportConsistency(leg, parlaySport) {
       .map(s => s.trim())
       .filter(Boolean)
   );
+  // KBO awareness: KBO clubs aren't in SPORT_TEAM_MAP and six of them share a US
+  // nickname (Eagles/Tigers/Twins/Lions/Giants/Bears). When the parlay declares
+  // KBO and the leg names a KBO club (sponsor prefix is decisive), pass BEFORE
+  // the US-league scan below can mis-fire on the shared nickname. Tolerates the
+  // city-injected corruption "Hanwha Philadelphia Eagles" directly, so this is
+  // correct even if the description hasn't been run through normalizeKboLeg.
+  if (declaredSet.has('KBO') && matchesKboTeam(desc)) return { valid: true };
   const matchedSports = new Map(); // sport → first keyword that matched
   for (const [sport, keywords] of Object.entries(SPORT_TEAM_MAP)) {
     for (const keyword of keywords) {
@@ -2002,4 +2110,4 @@ function normalizeEventDate(raw) {
   return null;
 }
 
-module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, evaluateTweet, validateParsedBet, validateLegSportConsistency, validateLegShape, isSportsbookBrand, reclassifySport, inferLegSport, disambiguateAmbiguousTeam, isInSeason, normalizeEventDate, AMBIGUITY_THRESHOLD, tryVisionGemma, parseGemmaOutputWithCerebras, runGemmaVisionFallback, logVisionFailure, GEMMA_SLIP_PROMPT, gemmaHealth, isGemmaHealthy, recordGemmaResult, callLLM, callLLMResult, callGemini, callOpenAI, AdapterError, FALLBACK_ELIGIBLE };
+module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, evaluateTweet, validateParsedBet, validateLegSportConsistency, validateLegShape, isSportsbookBrand, reclassifySport, inferLegSport, disambiguateAmbiguousTeam, matchesKboTeam, normalizeKboLeg, declaredSportIncludesKbo, isInSeason, normalizeEventDate, AMBIGUITY_THRESHOLD, tryVisionGemma, parseGemmaOutputWithCerebras, runGemmaVisionFallback, logVisionFailure, GEMMA_SLIP_PROMPT, gemmaHealth, isGemmaHealthy, recordGemmaResult, callLLM, callLLMResult, callGemini, callOpenAI, AdapterError, FALLBACK_ELIGIBLE };

@@ -175,7 +175,9 @@ function dismissHold(ingestId, actor) {
 //   hold already released / dismissed     → { ok:false, status:'already_resolved' }
 //   message unreachable / no client       → { ok:false, status:'message_unreachable' }
 //   fetched but not unfurled yet (0 imgs) → { ok:false, status:'no_image_yet' }   (creates nothing)
-//   vision returned no bet                → { ok:false, status:'no_bet_found' }    (leaves the hold)
+//   vision extracted nothing at all       → { ok:false, status:'no_bet_found' }    (leaves the hold)
+//   vision extracted a bet, validator     → { ok:false, status:'validator_drop',   (leaves the hold)
+//     killed it (e.g. leg_sport_mismatch)     dropReason, reason, issues }
 //   bet created                           → { ok:true,  status:'recovered', betId }
 //
 // The bet-exists check runs BEFORE the terminal-stage check so a re-run after a
@@ -251,13 +253,15 @@ async function _defaultExtract({ client, message, ingestId, channelId, messageId
   const capperInfo = handler.resolveCapper(message);
   const capper = await getOrCreateCapper(capperInfo.discordId, capperInfo.name, capperInfo.avatar);
   const bets = [];
+  const drops = [];
   for (const img of images) {
     const res = await handler.processSlipImage(client, img.url, capper.id, capperInfo.name, {
       channelId, messageId, sourceUrl: messageUrl, ingestId,
     });
     for (const b of (res && res.bets ? res.bets : [])) bets.push(b);
+    for (const d of (res && res.drops ? res.drops : [])) drops.push(d);
   }
-  return { bets };
+  return { bets, drops };
 }
 
 // channelId from the hold payload (or the messageUrl's middle segment);
@@ -451,9 +455,11 @@ async function _recoverHoldInner(id, actorStr, deps) {
 
   // 7. run the existing vision_slip extraction + create path
   let bets = [];
+  let extractDrops = [];
   try {
     const out = await extract({ client, message, ingestId: id, channelId, messageId, messageUrl, images });
     bets = (out && out.bets) ? out.bets : [];
+    extractDrops = (out && out.drops) ? out.drops : [];
   } catch (err) {
     // A bet may have been created before a late throw (e.g. the staging embed
     // post failed after createBetWithLegs). Recover idempotently.
@@ -474,6 +480,13 @@ async function _recoverHoldInner(id, actorStr, deps) {
     if (after) {
       if (_latestHoldStage(id) === 'MANUAL_REVIEW_HOLD') _resolveRecoveredHold(id, payload, [after.id], actorStr);
       return { ok: true, status: 'already_recovered', ingestId: id, betId: after.id };
+    }
+    // Vision DID extract a bet but a validator killed it (e.g. leg_sport_mismatch).
+    // Surface the real reason — "No bet found" misleads the operator into thinking
+    // the slip was blank. Hold stays open (no resolve), same as no_bet_found.
+    const vDrop = extractDrops.find((d) => d && d.reason);
+    if (vDrop) {
+      return { ok: false, status: 'validator_drop', ingestId: id, dropReason: vDrop.dropReason || null, reason: vDrop.reason || null, issues: vDrop.issues || [] };
     }
     return { ok: false, status: 'no_bet_found', ingestId: id }; // leave the hold open
   }

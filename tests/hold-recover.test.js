@@ -137,6 +137,19 @@ function extractCreates(rows) {
   });
 }
 const extractNoBet = async () => ({ bets: [] });
+// Vision extracted a bet but a validator killed it (the KBO leg_sport_mismatch
+// incident: vision yielded the parlay, the leg-sport validator dropped it). The
+// real _defaultExtract surfaces these via processSlipImage's `drops`; here we
+// inject the same shape so recoverHold's own branch is what's under test.
+const extractValidatorDrop = async () => ({
+  bets: [],
+  drops: [{
+    reason: 'leg_sport_mismatch',
+    dropReason: 'VALIDATOR_SPORT_MISMATCH',
+    issues: ['Leg references team(s) "eagles" which exist in NFL but not in declared parlay sport KBO'],
+    description: 'Hanwha Eagles +1.5 (-170)',
+  }],
+});
 
 // deps for a happy-path recover (image present + bet extracted)
 function depsCreates(rows, images) {
@@ -287,6 +300,23 @@ function depsScripted(script, rows, sleepCalls, images) {
     assert.strictEqual(countStage(f.ingestId, 'MANUAL_REVIEW_RELEASED'), 0, 'hold not advanced');
     assert.strictEqual(countDecisions(f.ingestId), 0);
     assert.strictEqual(latestStage(f.ingestId), 'MANUAL_REVIEW_HOLD', 'hold still open');
+  });
+
+  // ── CORE: vision extracted a bet but a validator killed it → validator_drop ──
+  await run('extract yields a validator drop → validator_drop w/ reason+issues, hold left open', async () => {
+    const f = holdFixture();
+    seedHold(f);
+    const deps = { client: {}, fetchMessage: async () => fakeMessage(ATTACH_IMG), getImageAttachments: (m) => m._images, extract: extractValidatorDrop };
+    const r = await recoverHold(f.ingestId, 'dashboard', deps);
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.status, 'validator_drop', 'distinct from no_bet_found — vision DID extract a bet');
+    assert.strictEqual(r.dropReason, 'VALIDATOR_SPORT_MISMATCH', 'surfaces the mapped pipeline drop reason');
+    assert.strictEqual(r.reason, 'leg_sport_mismatch', 'surfaces the validator reason');
+    assert.ok(Array.isArray(r.issues) && r.issues.length >= 1, 'surfaces the validator issues');
+    assert.strictEqual(betsForMessage(f.messageId).length, 0, 'creates nothing');
+    assert.strictEqual(countStage(f.ingestId, 'MANUAL_REVIEW_RELEASED'), 0, 'hold not advanced');
+    assert.strictEqual(countDecisions(f.ingestId), 0, 'no decision row');
+    assert.strictEqual(latestStage(f.ingestId), 'MANUAL_REVIEW_HOLD', 'hold still open for a retry after the fix');
   });
 
   // ── CORE: unknown ingestId → not_found ──
@@ -514,6 +544,18 @@ function depsScripted(script, rows, sleepCalls, images) {
     await handleRecoverRoute({ params: { ingestId: f.ingestId }, body: {} }, res, deps);
     assert.strictEqual(res._code, 422);
     assert.strictEqual(res._json.status, 'no_bet_found');
+  });
+
+  await run('API route: validator_drop → 422, body carries dropReason+issues', async () => {
+    const f = holdFixture();
+    seedHold(f);
+    const deps = { client: {}, fetchMessage: async () => fakeMessage(ATTACH_IMG), getImageAttachments: (m) => m._images, extract: extractValidatorDrop };
+    const res = mockRes();
+    await handleRecoverRoute({ params: { ingestId: f.ingestId }, body: {} }, res, deps);
+    assert.strictEqual(res._code, 422);
+    assert.strictEqual(res._json.status, 'validator_drop');
+    assert.strictEqual(res._json.dropReason, 'VALIDATOR_SPORT_MISMATCH');
+    assert.ok(Array.isArray(res._json.issues) && res._json.issues.length >= 1);
   });
 
   await run('API route: message_unreachable → 502', async () => {

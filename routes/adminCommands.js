@@ -19,8 +19,11 @@
 //     → recoverHold(ingestId, actor) — re-fetch the held (now-unfurled)
 //       message and run the existing vision_slip extraction+create path.
 //     200 recovered | 200 already_recovered | 409 already_resolved
-//     404 not_found | 422 no_image_yet | 422 no_bet_found
+//     404 not_found | 422 no_image_yet | 422 no_bet_found | 422 validator_drop
 //     502 message_unreachable | 400 malformed | 500 internal
+//     (validator_drop = vision extracted a bet but a validator killed it — the
+//      dashboard should surface the dropReason/issues; an unknown status falls
+//      through its classifier's default "refresh", so this is back-compatible.)
 //
 //   POST /handles/:handle           body: { enabled: 0|1, note?: string }
 //     → UPDATE scraper_handles SET enabled, note=COALESCE(note) WHERE handle
@@ -86,6 +89,7 @@ const RECOVER_STATUS_CODE = {
   not_found: 404,
   no_image_yet: 422,
   no_bet_found: 422,
+  validator_drop: 422, // vision extracted a bet but a validator killed it
   message_unreachable: 502,
 };
 
