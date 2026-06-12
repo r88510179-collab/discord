@@ -32,7 +32,7 @@ process.env.DB_PATH = DB_FILE;
 
 const { recordStage } = require('../services/pipeline-events');
 const { db, createBetWithLegs, getOrCreateCapper } = require('../services/database');
-const { recoverHold, _recoveredDatesFromTimestamp, FETCH_MAX_ATTEMPTS, FETCH_RETRY_BACKOFF_MS } = require('../services/holdReview');
+const { recoverHold, _recoveredDatesFromTimestamp, FETCH_MAX_ATTEMPTS, FETCH_RETRY_BACKOFF_MS, RECOVERY_RETRY_CAP } = require('../services/holdReview');
 const { handleRecoverRoute } = require('../routes/adminCommands');
 
 // A real capper to satisfy the bets FK (createBetWithLegs enforces it).
@@ -205,6 +205,37 @@ function depsScripted(script, rows, sleepCalls, images) {
     extract: extractCreates(rows),
     sleep: async (ms) => { sleepCalls.push(ms); },
   };
+}
+
+// ── retry-cap seams (quota guard) ────────────────────────────
+// Counter reads + a direct seeder so exhaustion tests don't have to loop five
+// real recovers; the loop-based test below proves recording+gating integrate.
+function countFailedAttempts(id) { return countStage(id, 'RECOVERY_ATTEMPT_FAILED'); }
+function latestFailedAttemptPayload(id) {
+  const row = db.prepare("SELECT payload FROM pipeline_events WHERE ingest_id = ? AND stage = 'RECOVERY_ATTEMPT_FAILED' ORDER BY id DESC LIMIT 1").get(id);
+  return row ? JSON.parse(row.payload) : null;
+}
+function seedFailedAttempts(f, n) {
+  for (let i = 0; i < n; i++) {
+    recordStage({
+      ingestId: f.ingestId, sourceType: 'discord', sourceRef: f.messageId,
+      stage: 'RECOVERY_ATTEMPT_FAILED', eventType: 'STAGE_ENTER',
+      payload: { where: 'test-seed', attempt: i + 1, cap: RECOVERY_RETRY_CAP, status: 'no_bet_found' },
+    });
+  }
+}
+// deps whose fetch/extract count their invocations — proves the exhausted
+// refusal spends NEITHER the Discord fetch NOR the vision call.
+function depsSpy(extractImpl) {
+  const d = {
+    client: {},
+    fetchMessage: async () => { d.fetchCalls += 1; return fakeMessage(ATTACH_IMG); },
+    getImageAttachments: (m) => m._images,
+    extract: async (args) => { d.extractCalls += 1; return extractImpl(args); },
+  };
+  d.fetchCalls = 0;
+  d.extractCalls = 0;
+  return d;
 }
 
 (async () => {
@@ -403,6 +434,131 @@ function depsScripted(script, rows, sleepCalls, images) {
     assert.strictEqual(betsForMessage(f.messageId).length, 1);
   });
 
+  // ════════════════ RETRY CAP (quota guard) ════════════════
+  // Every attempt that reaches extraction burns vision+OCR. After
+  // RECOVERY_RETRY_CAP vision-burning failures (validator_drop / no_bet_found,
+  // incl. extract throw) recoverHold refuses BEFORE the fetch with
+  // recovery_exhausted — zero quota spent — unless opts.force. Live motivation:
+  // ingest disc_1514481735335805030 burned ~12 cycles re-failing
+  // VALIDATOR_SPORT_MISMATCH before the validator fix (#90).
+
+  // ── each vision-burning failure records ONE RECOVERY_ATTEMPT_FAILED event ──
+  await run('validator_drop records one failed attempt (payload carries status/dropReason/attempt/cap)', async () => {
+    const f = holdFixture();
+    seedHold(f);
+    const deps = { client: {}, fetchMessage: async () => fakeMessage(ATTACH_IMG), getImageAttachments: (m) => m._images, extract: extractValidatorDrop };
+    const r = await recoverHold(f.ingestId, 'dashboard', deps);
+    assert.strictEqual(r.status, 'validator_drop');
+    assert.strictEqual(countFailedAttempts(f.ingestId), 1, 'one attempt event recorded');
+    const p = latestFailedAttemptPayload(f.ingestId);
+    assert.strictEqual(p.status, 'validator_drop');
+    assert.strictEqual(p.dropReason, 'VALIDATOR_SPORT_MISMATCH');
+    assert.strictEqual(p.attempt, 1);
+    assert.strictEqual(p.cap, RECOVERY_RETRY_CAP);
+    assert.strictEqual(p.forced, false);
+    assert.strictEqual(latestStage(f.ingestId), 'MANUAL_REVIEW_HOLD', 'hold still open');
+  });
+
+  await run('no_bet_found counts too; a later SUCCESS below the cap still recovers (count untouched)', async () => {
+    const f = holdFixture();
+    seedHold(f);
+    const failing = { client: {}, fetchMessage: async () => fakeMessage(ATTACH_IMG), getImageAttachments: (m) => m._images, extract: extractNoBet };
+    await recoverHold(f.ingestId, 'dashboard', failing);
+    await recoverHold(f.ingestId, 'dashboard', failing);
+    assert.strictEqual(countFailedAttempts(f.ingestId), 2, 'two failures recorded');
+
+    const r = await recoverHold(f.ingestId, 'dashboard', depsCreates([{ description: 'Third try Knicks ML' }]));
+    assert.strictEqual(r.status, 'recovered', 'below the cap the path is unchanged');
+    assert.strictEqual(countFailedAttempts(f.ingestId), 2, 'success records no attempt event');
+    assert.strictEqual(latestStage(f.ingestId), 'MANUAL_REVIEW_RELEASED');
+  });
+
+  await run('extract throw (no bet surfaced) counts as a vision-burning failure', async () => {
+    const f = holdFixture();
+    seedHold(f);
+    const deps = { client: {}, fetchMessage: async () => fakeMessage(ATTACH_IMG), getImageAttachments: (m) => m._images, extract: async () => { throw new Error('vision provider 500'); } };
+    const r = await recoverHold(f.ingestId, 'dashboard', deps);
+    assert.strictEqual(r.status, 'no_bet_found');
+    assert.strictEqual(r.reason, 'extract_error');
+    assert.strictEqual(countFailedAttempts(f.ingestId), 1);
+    assert.strictEqual(latestFailedAttemptPayload(f.ingestId).reason, 'extract_error');
+  });
+
+  // ── pre-extraction bails never count (they cost no vision quota) ──
+  await run('no_image_yet and message_unreachable do NOT count toward the cap', async () => {
+    const f = holdFixture();
+    seedHold(f);
+    const noImg = { client: {}, fetchMessage: async () => fakeMessage([]), getImageAttachments: (m) => m._images, extract: extractNoBet };
+    assert.strictEqual((await recoverHold(f.ingestId, 'dashboard', noImg)).status, 'no_image_yet');
+    const unreachable = { client: {}, fetchMessage: async () => null, getImageAttachments: (m) => m._images, extract: extractNoBet, sleep: noSleep };
+    assert.strictEqual((await recoverHold(f.ingestId, 'dashboard', unreachable)).status, 'message_unreachable');
+    assert.strictEqual(countFailedAttempts(f.ingestId), 0, 'neither bail recorded an attempt');
+  });
+
+  // ── INTEGRATION: cap reached through real failing recovers → exhausted, zero spend ──
+  await run(`cap reached via ${RECOVERY_RETRY_CAP} real failures → recovery_exhausted refuses with NO fetch and NO vision`, async () => {
+    const f = holdFixture();
+    seedHold(f);
+    for (let i = 0; i < RECOVERY_RETRY_CAP; i++) {
+      const deps = { client: {}, fetchMessage: async () => fakeMessage(ATTACH_IMG), getImageAttachments: (m) => m._images, extract: extractValidatorDrop };
+      const r = await recoverHold(f.ingestId, 'dashboard', deps);
+      assert.strictEqual(r.status, 'validator_drop', `attempt ${i + 1} still runs (below cap)`);
+    }
+    assert.strictEqual(countFailedAttempts(f.ingestId), RECOVERY_RETRY_CAP);
+
+    const spy = depsSpy(extractValidatorDrop);
+    const r = await recoverHold(f.ingestId, 'dashboard', spy);
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.status, 'recovery_exhausted');
+    assert.strictEqual(r.attempts, RECOVERY_RETRY_CAP, 'surfaces the attempt count');
+    assert.strictEqual(r.cap, RECOVERY_RETRY_CAP, 'surfaces the cap');
+    assert.strictEqual(spy.fetchCalls, 0, 'refusal spends NO Discord fetch');
+    assert.strictEqual(spy.extractCalls, 0, 'refusal spends NO vision/OCR');
+    assert.strictEqual(countFailedAttempts(f.ingestId), RECOVERY_RETRY_CAP, 'the refusal itself records nothing');
+    assert.strictEqual(latestStage(f.ingestId), 'MANUAL_REVIEW_HOLD', 'hold stays OPEN (dismiss/release/force still possible)');
+  });
+
+  // ── ORDERING: bet-exists self-heal beats the cap gate ──
+  await run('exhausted hold with an existing bet → already_recovered self-heal still wins', async () => {
+    const f = holdFixture();
+    seedHold(f);
+    seedFailedAttempts(f, RECOVERY_RETRY_CAP);
+    const bet = createBetWithLegs({
+      capper_id: CAPPER_ID, sport: 'NBA', bet_type: 'straight', description: 'Exhausted partial leg',
+      odds: -110, units: 1, source: 'vision_slip', source_channel_id: f.channelId,
+      source_message_id: f.messageId, source_url: f.messageUrl, raw_text: 'x', review_status: 'needs_review',
+    }, []);
+    const r = await recoverHold(f.ingestId, 'dashboard', depsSpy(extractNoBet));
+    assert.strictEqual(r.status, 'already_recovered', 'self-heal runs before the cap gate');
+    assert.strictEqual(r.betId, bet.id);
+    assert.strictEqual(latestStage(f.ingestId), 'MANUAL_REVIEW_RELEASED', 'hold healed despite exhaustion');
+  });
+
+  // ── FORCE: the operator escape hatch ──
+  await run('force bypasses the cap: forced failure still records; forced success recovers + resolves', async () => {
+    const f = holdFixture();
+    seedHold(f);
+    seedFailedAttempts(f, RECOVERY_RETRY_CAP);
+
+    // un-forced → refused
+    const refused = await recoverHold(f.ingestId, 'dashboard', depsSpy(extractValidatorDrop));
+    assert.strictEqual(refused.status, 'recovery_exhausted');
+
+    // forced but still failing → attempt runs, fails, and is recorded past the cap
+    const failSpy = depsSpy(extractValidatorDrop);
+    const rFail = await recoverHold(f.ingestId, 'smokke', failSpy, { force: true });
+    assert.strictEqual(rFail.status, 'validator_drop', 'force reaches extraction');
+    assert.strictEqual(failSpy.extractCalls, 1);
+    assert.strictEqual(countFailedAttempts(f.ingestId), RECOVERY_RETRY_CAP + 1, 'forced failure still recorded');
+    assert.strictEqual(latestFailedAttemptPayload(f.ingestId).forced, true);
+
+    // forced after the fix → recovered, hold resolved
+    const rOk = await recoverHold(f.ingestId, 'smokke', depsCreates([{ description: 'Forced Hanwha Eagles +1.5', sport: 'KBO' }]), { force: true });
+    assert.strictEqual(rOk.status, 'recovered');
+    assert.strictEqual(latestStage(f.ingestId), 'MANUAL_REVIEW_RELEASED');
+    assert.strictEqual(countFailedAttempts(f.ingestId), RECOVERY_RETRY_CAP + 1, 'success records nothing');
+  });
+
   // ── CORE: self-heals a partial run (bet exists, hold still open) ──
   await run('self-heals a partial run: bet exists + hold open → already_recovered + resolves', async () => {
     const f = holdFixture();
@@ -556,6 +712,41 @@ function depsScripted(script, rows, sleepCalls, images) {
     assert.strictEqual(res._json.status, 'validator_drop');
     assert.strictEqual(res._json.dropReason, 'VALIDATOR_SPORT_MISMATCH');
     assert.ok(Array.isArray(res._json.issues) && res._json.issues.length >= 1);
+  });
+
+  await run('API route: recovery_exhausted → 429, body carries attempts+cap', async () => {
+    const f = holdFixture();
+    seedHold(f);
+    seedFailedAttempts(f, RECOVERY_RETRY_CAP);
+    const spy = depsSpy(extractValidatorDrop);
+    const res = mockRes();
+    await handleRecoverRoute({ params: { ingestId: f.ingestId }, body: {} }, res, spy);
+    assert.strictEqual(res._code, 429);
+    assert.strictEqual(res._json.status, 'recovery_exhausted');
+    assert.strictEqual(res._json.attempts, RECOVERY_RETRY_CAP);
+    assert.strictEqual(res._json.cap, RECOVERY_RETRY_CAP);
+    assert.strictEqual(spy.extractCalls, 0, 'no vision spent on the 429');
+  });
+
+  await run('API route: force must be boolean true / 1 — string "true" does NOT bypass the cap', async () => {
+    const f = holdFixture();
+    seedHold(f);
+    seedFailedAttempts(f, RECOVERY_RETRY_CAP);
+    const res = mockRes();
+    await handleRecoverRoute({ params: { ingestId: f.ingestId }, body: { force: 'true' } }, res, depsSpy(extractValidatorDrop));
+    assert.strictEqual(res._code, 429, 'string force is ignored (sloppy poller cannot bypass)');
+    assert.strictEqual(res._json.status, 'recovery_exhausted');
+  });
+
+  await run('API route: body {force:true} bypasses the cap → 200 recovered on an exhausted hold', async () => {
+    const f = holdFixture();
+    seedHold(f);
+    seedFailedAttempts(f, RECOVERY_RETRY_CAP);
+    const res = mockRes();
+    await handleRecoverRoute({ params: { ingestId: f.ingestId }, body: { actor: 'smokke@dashboard', force: true } }, res, depsCreates([{ description: 'Route-forced Mets ML' }]));
+    assert.strictEqual(res._code, 200);
+    assert.strictEqual(res._json.status, 'recovered');
+    assert.strictEqual(latestStage(f.ingestId), 'MANUAL_REVIEW_RELEASED');
   });
 
   await run('API route: message_unreachable → 502', async () => {

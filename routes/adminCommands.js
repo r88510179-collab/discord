@@ -15,15 +15,19 @@
 //     200 dismissed | 200 already_dismissed | 409 already_released
 //     404 not_found  | 400 malformed     | 500 internal
 //
-//   POST /holds/:ingestId/recover   body: { actor?: string }   (Phase 2b-2)
-//     → recoverHold(ingestId, actor) — re-fetch the held (now-unfurled)
-//       message and run the existing vision_slip extraction+create path.
+//   POST /holds/:ingestId/recover   body: { actor?: string, force?: boolean }   (Phase 2b-2)
+//     → recoverHold(ingestId, actor, {}, { force }) — re-fetch the held
+//       (now-unfurled) message and run the existing vision_slip
+//       extraction+create path.
 //     200 recovered | 200 already_recovered | 409 already_resolved
 //     404 not_found | 422 no_image_yet | 422 no_bet_found | 422 validator_drop
-//     502 message_unreachable | 400 malformed | 500 internal
+//     429 recovery_exhausted | 502 message_unreachable | 400 malformed | 500 internal
 //     (validator_drop = vision extracted a bet but a validator killed it — the
 //      dashboard should surface the dropReason/issues; an unknown status falls
-//      through its classifier's default "refresh", so this is back-compatible.)
+//      through its classifier's default "refresh", so this is back-compatible.
+//      recovery_exhausted = ≥ RECOVERY_RETRY_CAP prior vision-burning failures;
+//      the refusal spends NO vision/OCR. body {force:true} bypasses the cap —
+//      operator escape hatch after a fix lands; pollers must never send it.)
 //
 //   POST /handles/:handle           body: { enabled: 0|1, note?: string }
 //     → UPDATE scraper_handles SET enabled, note=COALESCE(note) WHERE handle
@@ -90,6 +94,7 @@ const RECOVER_STATUS_CODE = {
   no_image_yet: 422,
   no_bet_found: 422,
   validator_drop: 422, // vision extracted a bet but a validator killed it
+  recovery_exhausted: 429, // retry cap reached — refusal spent no vision; force to override
   message_unreachable: 502,
 };
 
@@ -106,18 +111,23 @@ async function handleRecoverRoute(req, res, deps) {
 
   const bodyActor = req.body && typeof req.body.actor === 'string' ? req.body.actor.trim() : '';
   const actor = bodyActor || 'dashboard';
+  // force is the retry-cap override (boolean true / integer 1 only — anything
+  // else, including "true", is treated as not forced so a sloppy poller can't
+  // accidentally bypass the quota guard).
+  const rawForce = req.body ? req.body.force : undefined;
+  const force = rawForce === true || rawForce === 1;
 
   let result;
   try {
     const { recoverHold } = require('../services/holdReview');
-    result = await recoverHold(ingestId, actor, deps || {});
+    result = await recoverHold(ingestId, actor, deps || {}, { force });
   } catch (err) {
     console.error(`[AdminAPI] recover error for ${ingestId}: ${err.message}`);
     return res.status(500).json({ ok: false, status: 'error', error: 'Internal error' });
   }
 
   const code = RECOVER_STATUS_CODE[result.status] || 500;
-  console.log(`[AdminAPI] recover ${ingestId} by "${actor}" → ${result.status} (${code})`);
+  console.log(`[AdminAPI] recover ${ingestId} by "${actor}"${force ? ' [force]' : ''} → ${result.status} (${code})`);
   return res.status(code).json(result);
 }
 

@@ -173,12 +173,18 @@ function dismissHold(ingestId, actor) {
 //   same ingest already being recovered   → { ok:false, status:'in_flight' }    (creates nothing)
 //   a bet already exists for this message → { ok:true,  status:'already_recovered', betId }
 //   hold already released / dismissed     → { ok:false, status:'already_resolved' }
+//   ≥ RECOVERY_RETRY_CAP failed attempts  → { ok:false, status:'recovery_exhausted', (leaves the hold;
+//     and not forced                          attempts, cap }                          NO fetch/vision spent)
 //   message unreachable / no client       → { ok:false, status:'message_unreachable' }
 //   fetched but not unfurled yet (0 imgs) → { ok:false, status:'no_image_yet' }   (creates nothing)
-//   vision extracted nothing at all       → { ok:false, status:'no_bet_found' }    (leaves the hold)
-//   vision extracted a bet, validator     → { ok:false, status:'validator_drop',   (leaves the hold)
+//   vision extracted nothing at all       → { ok:false, status:'no_bet_found' }    (leaves the hold; +1 attempt)
+//   vision extracted a bet, validator     → { ok:false, status:'validator_drop',   (leaves the hold; +1 attempt)
 //     killed it (e.g. leg_sport_mismatch)     dropReason, reason, issues }
 //   bet created                           → { ok:true,  status:'recovered', betId }
+//
+// opts.force (4th arg; API body {force:true}) bypasses ONLY the retry cap —
+// every other guard above still applies. Forced attempts that fail still
+// record toward the counter (the ledger stays honest).
 //
 // The bet-exists check runs BEFORE the terminal-stage check so a re-run after a
 // successful recover reports `already_recovered` (not `already_resolved`). If a
@@ -381,6 +387,58 @@ function _graceMarkRecoveredBets(id, betIds) {
   console.log(`[HoldRecover] ${id.slice(0, 16)} grace-marked ${betIds.length} bet(s) sweep_exempt_until=now+${GRACE_DAYS}d`);
 }
 
+// ── Recovery retry cap (quota guard) ─────────────────────────
+// Every recovery attempt that reaches extraction burns Gemini vision + RapidOCR
+// quota. A hold whose extraction persistently fails (validator kill, blank/
+// unreadable slip) used to be retryable FOREVER — live ingest
+// disc_1514481735335805030 (IgDave KBO slip) burned ~12 cycles re-failing
+// VALIDATOR_SPORT_MISMATCH before the validator fix (#90) landed. Mirroring the
+// grading_attempts → quarantined pattern (services/grading.js, attempts ≥ 20):
+// each vision-burning failure (validator_drop / no_bet_found, incl. extract
+// throw) records a RECOVERY_ATTEMPT_FAILED pipeline event, and once an ingest
+// has RECOVERY_RETRY_CAP of them recoverHold refuses BEFORE the Discord fetch
+// with status 'recovery_exhausted' — zero quota spent. There is no hold row
+// (a hold's state IS its pipeline_events trail), so the counter is COUNT(*)
+// of those events — no schema change, and it purges with the hold itself.
+//
+// The cap gates only the cheap automatic path: an explicit force
+// (opts.force / API body {force:true}) still attempts, so an operator can
+// retry after a fix lands. Failures that DON'T reach extraction
+// (no_image_yet, message_unreachable) never count — they cost no quota and
+// often self-resolve (late unfurl, Discord blip). A capped hold stays OPEN
+// (dismiss / Release-as-Bet / force-recover all still work).
+const RECOVERY_RETRY_CAP = 5;
+
+function _failedRecoveryAttempts(id) {
+  return db.prepare(
+    "SELECT COUNT(*) AS c FROM pipeline_events WHERE ingest_id = ? AND stage = 'RECOVERY_ATTEMPT_FAILED'"
+  ).get(id).c;
+}
+
+// One row per vision-burning failed attempt. recordStage is fire-and-forget,
+// so a write failure can only under-count (more retries), never block recovery.
+function _recordFailedRecoveryAttempt(id, actorStr, forced, outcome) {
+  const attempt = _failedRecoveryAttempts(id) + 1;
+  recordStage({
+    ingestId: id,
+    sourceType: 'discord',
+    sourceRef: id.replace(/^disc_/, ''),
+    stage: 'RECOVERY_ATTEMPT_FAILED',
+    eventType: 'STAGE_ENTER',
+    payload: {
+      where: 'recoverHold',
+      by: actorStr,
+      forced,
+      attempt,
+      cap: RECOVERY_RETRY_CAP,
+      status: outcome.status,
+      dropReason: outcome.dropReason || null,
+      reason: outcome.reason || null,
+    },
+  });
+  console.log(`[HoldRecover] ${id.slice(0, 16)} failed attempt ${attempt}/${RECOVERY_RETRY_CAP} recorded (${outcome.status}${outcome.reason ? `: ${outcome.reason}` : ''})${forced ? ' [forced]' : ''}`);
+}
+
 // TOCTOU guard: the source_message_id pre-check below runs at ENTRY, but the
 // bet insert lands seconds later (fetch retries + vision). Two rapid dashboard
 // clicks both pass the pre-check before either inserts → duplicate bets
@@ -389,7 +447,7 @@ function _graceMarkRecoveredBets(id, betIds) {
 // window; the pre-check stays for sequential re-clicks.
 const inFlightRecoveries = new Set();
 
-async function recoverHold(ingestId, actor, deps = {}) {
+async function recoverHold(ingestId, actor, deps = {}, opts = {}) {
   const id = String(ingestId == null ? '' : ingestId).trim();
   if (!id) return { ok: false, status: 'not_found', ingestId: id };
   const actorStr = (actor == null || String(actor).trim() === '') ? 'unknown' : String(actor);
@@ -400,13 +458,14 @@ async function recoverHold(ingestId, actor, deps = {}) {
   }
   inFlightRecoveries.add(id);
   try {
-    return await _recoverHoldInner(id, actorStr, deps);
+    return await _recoverHoldInner(id, actorStr, deps, opts);
   } finally {
     inFlightRecoveries.delete(id);
   }
 }
 
-async function _recoverHoldInner(id, actorStr, deps) {
+async function _recoverHoldInner(id, actorStr, deps, opts = {}) {
+  const force = !!(opts && opts.force);
   const client = ('client' in deps) ? deps.client : global._discordClient;
   const fetchMessage = deps.fetchMessage || _defaultFetchMessage;
   const getImages = deps.getImageAttachments || _defaultGetImages;
@@ -436,6 +495,16 @@ async function _recoverHoldInner(id, actorStr, deps) {
   const latest = _latestHoldStage(id);
   if (latest === 'MANUAL_REVIEW_RELEASED' || latest === 'MANUAL_REVIEW_DISMISSED') {
     return { ok: false, status: 'already_resolved', ingestId: id };
+  }
+
+  // 4b. retry cap — refuse BEFORE the fetch/vision so an exhausted hold costs
+  //     nothing per poll. Runs AFTER the bet-exists check (3) so the
+  //     already_recovered self-heal still wins on an exhausted hold. An
+  //     explicit force bypasses (operator retry after a fix lands).
+  const failedAttempts = _failedRecoveryAttempts(id);
+  if (failedAttempts >= RECOVERY_RETRY_CAP && !force) {
+    console.warn(`[HoldRecover] ${id.slice(0, 16)} recovery_exhausted: ${failedAttempts} failed attempts ≥ cap ${RECOVERY_RETRY_CAP} — refusing without vision (pass force to override)`);
+    return { ok: false, status: 'recovery_exhausted', ingestId: id, attempts: failedAttempts, cap: RECOVERY_RETRY_CAP };
   }
 
   // 5. fetch the (now-unfurled) Discord message, retrying transient misses. No
@@ -469,6 +538,9 @@ async function _recoverHoldInner(id, actorStr, deps) {
       if (_latestHoldStage(id) === 'MANUAL_REVIEW_HOLD') _resolveRecoveredHold(id, payload, [after.id], actorStr);
       return { ok: true, status: 'already_recovered', ingestId: id, betId: after.id };
     }
+    // Extraction ran (vision quota burned) and surfaced no bet → counts
+    // toward the retry cap like any other vision-burning failure.
+    _recordFailedRecoveryAttempt(id, actorStr, force, { status: 'no_bet_found', reason: 'extract_error' });
     return { ok: false, status: 'no_bet_found', ingestId: id, reason: 'extract_error' };
   }
   const created = bets.filter(b => b && !b._deduped && b.id);
@@ -484,10 +556,13 @@ async function _recoverHoldInner(id, actorStr, deps) {
     // Vision DID extract a bet but a validator killed it (e.g. leg_sport_mismatch).
     // Surface the real reason — "No bet found" misleads the operator into thinking
     // the slip was blank. Hold stays open (no resolve), same as no_bet_found.
+    // Both outcomes burned vision, so both count toward the retry cap.
     const vDrop = extractDrops.find((d) => d && d.reason);
     if (vDrop) {
+      _recordFailedRecoveryAttempt(id, actorStr, force, { status: 'validator_drop', dropReason: vDrop.dropReason || null, reason: vDrop.reason || null });
       return { ok: false, status: 'validator_drop', ingestId: id, dropReason: vDrop.dropReason || null, reason: vDrop.reason || null, issues: vDrop.issues || [] };
     }
+    _recordFailedRecoveryAttempt(id, actorStr, force, { status: 'no_bet_found' });
     return { ok: false, status: 'no_bet_found', ingestId: id }; // leave the hold open
   }
 
@@ -703,4 +778,4 @@ async function handleReleaseModal(interaction, ingestId) {
   }
 }
 
-module.exports = { handleHoldInteraction, dismissHold, recoverHold, _recoveredDatesFromTimestamp, _graceMarkRecoveredBets, GRACE_DAYS, FETCH_MAX_ATTEMPTS, FETCH_RETRY_BACKOFF_MS };
+module.exports = { handleHoldInteraction, dismissHold, recoverHold, _recoveredDatesFromTimestamp, _graceMarkRecoveredBets, GRACE_DAYS, FETCH_MAX_ATTEMPTS, FETCH_RETRY_BACKOFF_MS, RECOVERY_RETRY_CAP };

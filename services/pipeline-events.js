@@ -21,6 +21,7 @@ const STAGES = [
   'MANUAL_REVIEW_DISMISSED', // human reviewer dismissed a held slip (services/holdReview.js:64)
   'MANUAL_REVIEW_RELEASED',  // human reviewer released a held slip back into the pipeline (services/holdReview.js:221) — F-04/F-05 enum-drift registration
   'PURE_SLIP_SKIP_HOLD', // PR #2: pure-slip channel skipped MANUAL_REVIEW_HOLD staging (trace-only marker, NOT a drop; like MANUAL_REVIEW_HOLD it is intentionally absent from pipelineHealth.EXPECTED_STAGES)
+  'RECOVERY_ATTEMPT_FAILED', // hold-recovery attempt burned vision+OCR but yielded no bet (validator_drop / no_bet_found / extract threw) — services/holdReview.js records one per failed attempt; COUNT(*) per ingest_id is the retry-cap counter (RECOVERY_RETRY_CAP). Trace-only marker, NOT a drop (the hold stays open); intentionally absent from pipelineHealth.EXPECTED_STAGES.
   'OCR_FIRST',           // OCR-first wiring observability marker (services/ocrFirstWiring.js): shadow compare + cutover route. Trace-only, NOT a drop; intentionally absent from pipelineHealth.EXPECTED_STAGES.
   // Grading-side stages (added alongside BetService skeleton — migration 020)
   'GRADING_ENTER',
