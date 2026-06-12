@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const { getPendingBets, gradeBet, updateBankroll, saveDailySnapshot, getBankroll, db, payoutTailers } = require('./database');
 const { gradeBetAI } = require('./ai');
 const bets = require('./bets');
+const { buildEvidenceRecords, evaluateOffDate } = require('./evidenceRecords');
 const delay = ms => new Promise(res => setTimeout(res, ms));
 
 // ═══════════════════════════════════════════════════════════
@@ -9,6 +10,7 @@ const delay = ms => new Promise(res => setTimeout(res, ms));
 //   Gate 1 — reduceParlayResult: pure parlay reducer (keystone)
 //   Gate 2 — GRADER_VERSION / computeEvidenceHash / decideFinalGradeWrite
 //   Gate 3 — validateEvidenceQuote: quote-bound, code-enforced grading
+//   Gate 4 — applyGate4: off-date evidence reject (services/evidenceRecords.js)
 // See docs/CODEMAP.md §grading.js and prompts/phase1-grading-gates.md.
 // ═══════════════════════════════════════════════════════════
 
@@ -181,6 +183,122 @@ function buildGate3WouldFireMarker(g3, bet) {
   const claimed = String(g3.claimed || '').toUpperCase() || 'UNKNOWN';
   const reason = g3.reason || 'UNVERIFIED_QUOTE';
   return `${GATE3_WOULD_FIRE_MARKER}|mode=${g3.mode}|claimed=${claimed}|prop=${isProp ? 1 : 0}|reason=${reason}`;
+}
+
+// ── Gate 4: off-date evidence reject (code-enforced date binding) ──
+// Gate 3 proves the model copied a REAL quote; Gate 4 proves that quote came
+// from a source dated inside the bet's game window. The 2026-06-12 incident
+// (bet e5d27de0): a verbatim quote "FT USMNT <strong>1-2 Germany</strong>" from
+// the June-6 friendly graded the June-12 USA–Paraguay World Cup opener LOSS —
+// right quote, wrong fixture. Gate 3 (enforce) passed legitimately; NOTHING
+// validated the evidence DATE. Gate 4 does, against the dated evidence-record
+// layer (services/evidenceRecords.js, built around — never altering — the exact
+// evidence string the model graded on).
+//
+// DATE_BOUND_GRADING selects how off-date evidence is handled (mirrors
+// QUOTE_BOUND_GRADING / resolveGate3Mode exactly):
+//   off     — skip entirely (no eval, no log, grade unchanged).
+//   shadow  — evaluate; on off-date evidence emit one [GATE4 would-fire] line
+//             and mark the audit row, grade UNCHANGED (measure the would-fire
+//             rate in prod before flipping, like Gate 3 B0).
+//   enforce — evaluate; on off-date evidence force PENDING (OFF_DATE_EVIDENCE).
+// DEFAULT = shadow. Unknown/legacy values fail safe to shadow — NEVER silently
+// enforce.
+const GATE4_MODES = new Set(['off', 'shadow', 'enforce']);
+function resolveGate4Mode(raw) {
+  const m = String(raw == null ? '' : raw).trim().toLowerCase();
+  return GATE4_MODES.has(m) ? m : 'shadow';
+}
+
+// Per-sport tolerance window in DAYS (±tol around the anchor). default ±1 covers
+// the UTC/ET day-boundary skew that makes a same-night game read as the next
+// calendar day. A small const so per-sport overrides (e.g. a multi-day tennis
+// round) are a one-line edit at the enforce-flip review.
+const GATE4_TOLERANCE_DAYS = { default: 1 };
+function gate4ToleranceFor(sport) {
+  const key = String(sport == null ? '' : sport).toUpperCase().trim();
+  return Object.prototype.hasOwnProperty.call(GATE4_TOLERANCE_DAYS, key)
+    ? GATE4_TOLERANCE_DAYS[key]
+    : GATE4_TOLERANCE_DAYS.default;
+}
+
+const GATE4_WOULD_FIRE_MARKER = 'GATE4_WOULD_FIRE';
+const OFF_DATE_EVIDENCE_REASON = 'OFF_DATE_EVIDENCE';
+
+// Apply Gate 4 over a parsed grade + the dated evidence-record layer. Pure (no
+// env read, no DB, no logging) so it is unit-testable; the CALLER does the
+// console.warn(logLine) + audit-row marker push + earlyReturn, exactly like
+// applyGate3. (findMentionedTeams is an in-memory pure lookup — no I/O — so the
+// participant tag stays deterministic.)
+//
+// Returns { mode, evaluated, ok, wouldFire, forcePending, status, anchorISO,
+//           tol, evdates, participants, claimed, passLabel, logLine }:
+//   off / PENDING-claim → evaluated:false, never fires, passLabel:null.
+//   off_date            → wouldFire:true, forcePending:(mode===enforce).
+//   date_ok             → passLabel 'GATE4:date_ok'.
+//   no_date_signal      → passLabel 'GATE4:no_date_signal' (pass-through; we do
+//                         NOT block on absence of a date signal).
+// participants ∈ hit | miss | na — secondary signal, telemetry-only this PR
+// (the date check is the sole firing condition; see PR notes for the spec's
+// "+ participant alias match" co-firing reading deferred to the enforce review).
+function applyGate4(parsed, records, { mode, betId, anchorISO, sport, betTeamList, sportContext } = {}) {
+  const resolved = resolveGate4Mode(mode);
+  const claimed = String(parsed && parsed.status != null ? parsed.status : '').toUpperCase();
+  if (resolved === 'off' || claimed === '' || claimed === 'PENDING') {
+    return {
+      mode: resolved, evaluated: false, ok: true, wouldFire: false, forcePending: false,
+      status: resolved === 'off' ? 'off' : 'pending_exempt',
+      anchorISO, tol: null, evdates: [], participants: 'na', claimed, passLabel: null, logLine: null,
+    };
+  }
+
+  const tol = gate4ToleranceFor(sport);
+  const ev = evaluateOffDate(records, parsed && parsed.evidence_quote, anchorISO, tol, normalizeQuoteWhitespace);
+
+  // Participant alias (secondary signal) — reuse findMentionedTeams over the
+  // quote-bearing record text. na when the bet names no participants.
+  let participants = 'na';
+  const teamList = Array.isArray(betTeamList) ? betTeamList : [];
+  if (teamList.length > 0) {
+    const quoteText = (Array.isArray(records) ? records : [])
+      .filter(r => ev.quoteIdxs.includes(r.idx))
+      .map(r => r.snippet || '')
+      .join(' ');
+    const { matchedTeams } = findMentionedTeams(quoteText, sportContext || null);
+    const evTeams = [...matchedTeams];
+    participants = teamList.some(t => evTeams.includes(t)) ? 'hit' : 'miss';
+  }
+
+  if (ev.status === 'off_date') {
+    const logLine = `[GATE4 would-fire] bet=${betId == null ? 'unknown' : betId} claimed=${claimed} anchor=${anchorISO} tol=${tol} evdates=${ev.evdates.join(',')} participants=${participants} reason=${OFF_DATE_EVIDENCE_REASON}`;
+    return {
+      mode: resolved, evaluated: true, ok: false, wouldFire: true, forcePending: resolved === 'enforce',
+      status: 'off_date', anchorISO, tol, evdates: ev.evdates, participants, claimed, passLabel: null, logLine,
+    };
+  }
+
+  const passLabel = ev.status === 'date_ok' ? 'GATE4:date_ok' : 'GATE4:no_date_signal';
+  return {
+    mode: resolved, evaluated: true, ok: true, wouldFire: false, forcePending: false,
+    status: ev.status, anchorISO, tol, evdates: ev.evdates, participants, claimed, passLabel, logLine: null,
+  };
+}
+
+// ── B0: Gate 4 would-fire audit marker (pure; mirrors buildGate3WouldFireMarker) ──
+// Persists each off-date would-fire so the would-be false-PENDING rate that
+// gates the off→shadow→enforce flip is queryable by SQL over any window. The
+// caller pushes this token onto the EXISTING attempt's audit.guards_failed array
+// — adds ZERO rows (a dedicated row would land in shouldAutoVoidNoData's recent-5
+// window + the daily cap, both of which gate grading) and is never read to gate
+// grading (display-only at commands/admin.js). Returns null unless the gate
+// would-fired. One greppable token packs the event + its splits:
+//   GATE4_WOULD_FIRE|mode=|claimed=|anchor=|tol=|evdates=|participants=|reason=
+// Query with: WHERE guards_failed LIKE '%GATE4_WOULD_FIRE%'.
+function buildGate4WouldFireMarker(g4) {
+  if (!g4 || !g4.wouldFire) return null;
+  const claimed = String(g4.claimed || '').toUpperCase() || 'UNKNOWN';
+  const evdates = (g4.evdates || []).join(',');
+  return `${GATE4_WOULD_FIRE_MARKER}|mode=${g4.mode}|claimed=${claimed}|anchor=${g4.anchorISO}|tol=${g4.tol}|evdates=${evdates}|participants=${g4.participants}|reason=${OFF_DATE_EVIDENCE_REASON}`;
 }
 
 // ── Gate 1: deterministic parlay reducer (keystone) ──
@@ -2536,6 +2654,17 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
   // quote validator checks evidence_quote against THIS (not the full snippets).
   const evidenceForModel = searchSnippets.slice(0, 1500);
 
+  // ── Evidence-record layer (Gate 4 precondition) ──
+  // Structured, dated metadata built AROUND the evidence string above — the
+  // model-visible `evidenceForModel` is byte-untouched (rule: the Gate 3 quote
+  // contract depends on it; see tests/gate4-evidence-records.test.js byte-
+  // identity). Each record carries the hit's char span in `evidenceForModel`
+  // plus the dates extracted from that visible span; Gate 4 date-checks the
+  // quote-bearing record. anchorISO = the same event date GUARD 1/2/3 resolved.
+  // scope: TODO(Gate 5).
+  const anchorISO = new Date(eventDate).toISOString().split('T')[0];
+  const evidenceRecords = buildEvidenceRecords(searchResults, evidenceForModel, anchorISO, { defaultBackend: audit.search_backend });
+
   const prompt = `You MUST respond with valid JSON only. No prose, no markdown, no code fences.
 Grade this bet ONLY using the search results below. Today: ${today}. Bet placed: ${betDate}.
 Bet: "${bet.description}" | Sport: ${bet.sport || '?'}
@@ -2649,6 +2778,34 @@ CRITICAL RULES:
     });
   }
   if (g3.validated && g3.ok) guardsLog.push('GATE3:quote_ok');
+
+  // ── GATE 4: Off-date evidence reject ──
+  // Runs AFTER Gate 3 (we need a trusted quote to attribute): Gate 3 proved the
+  // quote is real, Gate 4 proves it came from a source dated inside the bet's
+  // game window (anchorISO ± per-sport tol). Off-date evidence (right quote,
+  // wrong fixture — incident e5d27de0, 2026-06-12) → shadow marks the audit row
+  // and leaves the grade; enforce forces PENDING (OFF_DATE_EVIDENCE) through the
+  // SAME earlyReturn path Gate 3's UNVERIFIED_QUOTE uses. Tri-state via
+  // DATE_BOUND_GRADING (off | shadow | enforce); DEFAULT shadow. The marker
+  // rides this attempt's existing audit row (zero extra rows), like Gate 3 B0.
+  const g4 = applyGate4(parsed, evidenceRecords, {
+    mode: process.env.DATE_BOUND_GRADING,
+    betId: bet.id,
+    anchorISO,
+    sport: bet.sport,
+    betTeamList,
+    sportContext,
+  });
+  if (g4.logLine) console.warn(g4.logLine);
+  const g4Marker = buildGate4WouldFireMarker(g4);
+  if (g4Marker) audit.guards_failed.push(g4Marker);
+  if (g4.forcePending) {
+    return earlyReturn({
+      status: 'PENDING',
+      evidence: `OFF_DATE_EVIDENCE: evidence dated ${g4.evdates.join(',')} outside ${g4.anchorISO}±${g4.tol}d — forced PENDING (model claimed ${parsed.status})`,
+    });
+  }
+  if (g4.passLabel) guardsLog.push(g4.passLabel);
 
   if (parsed.status === 'WIN' || parsed.status === 'LOSS') {
     // ── GUARD 5: Score hallucination — fabricated scores ──
@@ -2912,6 +3069,8 @@ module.exports = {
     computeEvidenceHash, decideFinalGradeWrite, GRADER_VERSION, // Gate 2
     validateEvidenceQuote, normalizeQuoteWhitespace, resolveGate3Mode, applyGate3,   // Gate 3
     buildGate3WouldFireMarker, writeGradingAudit,      // Gate 3 — B0 would-fire audit persistence
+    resolveGate4Mode, applyGate4, buildGate4WouldFireMarker, gate4ToleranceFor, GATE4_TOLERANCE_DAYS, // Gate 4 — off-date evidence reject
+    buildEvidenceRecords, evaluateOffDate,             // evidence-record layer (re-exported from services/evidenceRecords.js)
     evaluateSweep, sweepGraceUntil,                    // Phase 2b-2 — 7-day sweeper grace for recovered bets
   },
   // Exported for tests + observability — these are called from
