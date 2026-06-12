@@ -61,7 +61,7 @@ PK is `id` (TEXT, hex hash — **NOT** `bet_id`, common memory error).
 | drop_reason_set_at | INTEGER | epoch sec |
 | grader_version | TEXT | mig 026 (Gate 2) — code-constant grading-logic version that produced the final grade |
 | evidence_hash | TEXT | mig 026 (Gate 2) — sha256 of canonicalized grade evidence; idempotency key with grader_version |
-| sweep_exempt_until | TEXT | mig 028 (Phase 2b-2) — self-expiring sweeper-grace marker. `datetime('now','+3 days')` stamped by `recoverHold`; NULL for every normal bet. While set + future, the 7-Day Sweeper leaves the bet pending instead of auto-LOSS. See §7-Day Sweeper + recovery grace |
+| sweep_exempt_until | TEXT | mig 028 (Phase 2b-2) — self-expiring sweeper-grace marker. `datetime('now','+3 days')` stamped by TWO writers: `recoverHold` (recovery moment) and `approveBet` (approval moment — review-queue dwell can exceed SWEEP_DAYS). NULL only for bets that were never recovered nor war-room-approved. While set + future, the 7-Day Sweeper leaves the bet pending instead of auto-LOSS. See §7-Day Sweeper + recovery grace |
 
 ### `pipeline_events`
 
@@ -342,9 +342,9 @@ The grading cron's **7-Day Smart Sweeper** auto-grades any pending **non-prop** 
 | `sweepGraceUntil(betId)` — returns `sweep_exempt_until` iff set AND `datetime('now') < sweep_exempt_until` (comparison runs in SQLite, same clock/format the marker was written with), else null; reads the column fresh by id | `services/grading.js:1141` |
 | `evaluateSweep(bet, now)` — pure policy → `{eligible, reason: 'fresh'\|'prop'\|'grace'\|'eligible'}` (age cutoff → prop exemption → grace check); `now` injectable, unit-tested (`tests/sweeper-grace.test.js`) | `services/grading.js:1154` |
 | `runAutoGrade(client)` — calls `evaluateSweep`; a `reason='grace'` bet is left **pending** (skip, never drop/finalize) + logged `[Sweeper] Grace skip …` (L1267). Past the window it sweeps normally. Exports `evaluateSweep`/`sweepGraceUntil` L2653 | `services/grading.js:1165` |
-| `GRACE_DAYS=3` + `_graceMarkRecoveredBets` — stamp `sweep_exempt_until = datetime('now','+3 days')` on every recovery (recovery moment, NOT backdated) | `services/holdReview.js:333` / 334 (see holdReview.js above) |
+| `GRACE_DAYS=3` + `_graceMarkRecoveredBets` — stamp `sweep_exempt_until = datetime('now','+3 days')` on every recovery (recovery moment, NOT backdated). `approveBet` (`services/database.js`) stamps the same +3d window on every approval of a still-pending bet | `services/holdReview.js:333` / 334 (see holdReview.js above) |
 
-`migrations/028_add_sweep_exempt_until.sql`: `ALTER TABLE bets ADD COLUMN sweep_exempt_until TEXT DEFAULT NULL;` — no index (the sweeper probes the column by PK). NULL = "no grace, sweep normally" (every existing row + every normal bet). Grace is measured from recovery, so a genuinely un-gradeable recovered bet still sweeps once the 3 days lapse.
+`migrations/028_add_sweep_exempt_until.sql`: `ALTER TABLE bets ADD COLUMN sweep_exempt_until TEXT DEFAULT NULL;` — no index (the sweeper probes the column by PK). NULL = "no grace, sweep normally". Grace is measured from the stamping moment — recovery (`_graceMarkRecoveredBets`) or war-room approval (`approveBet`, `services/database.js`) — so a genuinely un-gradeable bet still sweeps once the 3 days lapse.
 
 ### routes/ — Admin HTTP API
 | What | Line(s) |

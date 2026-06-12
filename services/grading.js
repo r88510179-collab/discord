@@ -1156,9 +1156,12 @@ const SWEEP_CUTOFF_MS = SWEEP_DAYS * 24 * 60 * 60 * 1000;
 // A recovered bet (services/holdReview.recoverHold) has its created_at
 // backdated to the original slip post time (PR #59), which would make it older
 // than SWEEP_DAYS the instant it lands and sweep it to a FALSE loss before the
-// grader gets a pass. recoverHold stamps bets.sweep_exempt_until = now +
-// GRACE_DAYS (recovery time, NOT backdated); this returns that timestamp while
-// the window is open so the sweeper leaves the bet pending, else null. The
+// grader gets a pass. TWO writers stamp bets.sweep_exempt_until = now +
+// GRACE_DAYS: recoverHold (recovery time, NOT backdated) and approveBet
+// (approval time — a bet that dwelled >SWEEP_DAYS in the review queue is
+// otherwise sweep-eligible in its first visible cycle). This returns that
+// timestamp while the window is open so the sweeper leaves the bet pending,
+// else null. The
 // comparison runs in SQLite so 'now' uses the same clock + format the marker
 // was written with (datetime('now','+N days') → UTC 'YYYY-MM-DD HH:MM:SS').
 // Reads the column fresh by id, so it does not depend on which SELECT built
@@ -1289,7 +1292,7 @@ async function runAutoGrade(client) {
   const expiredBets = pending.filter(bet => {
     const verdict = evaluateSweep(bet);
     if (verdict.reason === 'grace') {
-      console.log(`[Sweeper] Grace skip "${(bet.description || '').slice(0, 40)}" — sweep_exempt_until=${verdict.graceUntil} (recovered bet, not yet sweep-eligible)`);
+      console.log(`[Sweeper] Grace skip "${(bet.description || '').slice(0, 40)}" — sweep_exempt_until=${verdict.graceUntil} (grace window from recovery/approval, not yet sweep-eligible)`);
     }
     return verdict.eligible;
   });
