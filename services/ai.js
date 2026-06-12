@@ -3,7 +3,7 @@
 // Provider order (getProviders() iterates PROVIDERS object order): Gemini → Groq → OpenRouter → Cerebras → Mistral → Ollama
 // ═══════════════════════════════════════════════════════════
 
-const { normalizeDescription, normalizePlayer } = require('./normalization');
+const { normalizeDescription, normalizePlayer, declaresOnlyUnmodeledLeagues } = require('./normalization');
 const sharp = require('sharp');
 const crypto = require('crypto');
 const { recordDrop } = require('./pipeline-events');
@@ -1963,12 +1963,28 @@ function validateLegSportConsistency(leg, parlaySport) {
       .map(s => s.trim())
       .filter(Boolean)
   );
+  // Unmodeled-league declarations: when EVERY declared element names a league
+  // we don't model (KBO, KHL, NPB, Soccer, … — complement of teams.json keys,
+  // same canonicalization as shouldExpandAliases/#85), skip leg-team matching
+  // entirely. SPORT_TEAM_MAP covers only the modeled US leagues, so a nickname
+  // hit under such a declaration can only be a same-nickname foreign club, not
+  // cross-sport contamination — the scan below can ONLY false-positive there;
+  // war-room review is the gate for unmodeled slips. Live repro: ingest
+  // disc_1514481735335805030 (declared "KBO", "Hanwha Eagles +1.5 / SSG Landers
+  // +1.5 / Samsung Lions ML") re-dropped VALIDATOR_SPORT_MISMATCH on every
+  // hold-recovery retry because "eagles" resolves to NFL ∉ {KBO}. Placeholders
+  // ("Unknown") and declarations with ANY modeled element ("MLB/KBO",
+  // generic "Baseball") keep full validation — nothing else is loosened.
+  if (declaresOnlyUnmodeledLeagues(parlaySport)) return { valid: true };
   // KBO awareness: KBO clubs aren't in SPORT_TEAM_MAP and six of them share a US
   // nickname (Eagles/Tigers/Twins/Lions/Giants/Bears). When the parlay declares
   // KBO and the leg names a KBO club (sponsor prefix is decisive), pass BEFORE
   // the US-league scan below can mis-fire on the shared nickname. Tolerates the
   // city-injected corruption "Hanwha Philadelphia Eagles" directly, so this is
   // correct even if the description hasn't been run through normalizeKboLeg.
+  // (With the unmodeled-declaration skip above, this carve-out now matters only
+  // for COMPOUND declarations mixing KBO with a modeled league, e.g. "MLB/KBO" —
+  // a pure-KBO declaration already passed.)
   if (declaredSet.has('KBO') && matchesKboTeam(desc)) return { valid: true };
   const matchedSports = new Map(); // sport → first keyword that matched
   for (const [sport, keywords] of Object.entries(SPORT_TEAM_MAP)) {
