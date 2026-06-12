@@ -241,8 +241,13 @@ sweep grace and re-arms grading. Edit exists ONLY on the War Room staging
 card (`/review` can only Approve/Reject — no Edit); if the card is gone
 (deleted at original approval, or the bet predates staging), fix the
 offending column (e.g. `sport`) via guarded explicit-id SQL **before**
-approving, or Approve just re-arms the same auto-void. Also note: `/review`
-shows only the 25 newest needs_review rows, and its **Reject All
+approving, or Approve just re-arms the same auto-void. To Approve a parked
+bet with no clickable surface — `/review` shows only the 25 newest
+needs_review rows, and a reverted swept loss is ≥7 days old by construction,
+buried below a week of newer arrivals — use **`/admin approve-by-id
+<bet_id>`** (explicit-id, OWNER-gated, atomic approveBet; refuses non-pending
+bets with revert-first guidance; does NOT post to #slip-feed). Also note:
+`/review`'s **Reject All
 hard-DELETEs every listed needs_review row — including a parked revert
 mid-repair** (`rejectBet` is a DELETE gated only on
 `review_status='needs_review'`). Don't flush vision junk while an incident
