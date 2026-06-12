@@ -347,6 +347,29 @@ function declaresOnlyUnmodeledLeagues(declaredSport) {
 }
 
 /**
+ * True when the declared sport carries NO league signal — it is null/empty or a
+ * non-committal placeholder (one of SPORT_PLACEHOLDERS: 'Unknown', 'N/A', 'TBD',
+ * …). detectSport (services/ai.js) emits the literal 'Unknown' for abbreviation/
+ * slang/player-prop text, so this is the dominant "no declared sport" value.
+ *
+ * Used by validateLegSportConsistency to decide when a single-sport leg signal
+ * may be ADOPTED as the parlay's sport rather than dropped: a placeholder has no
+ * declared sport X for a leg's team to contradict, so the wrong-sport DROP path
+ * is structurally inapplicable. NARROWER than `!declaresOnlyUnmodeledLeagues`: a
+ * real unmodeled league ("Soccer", "KBO") is not a placeholder (it already
+ * short-circuits to valid earlier), nor is a modeled league ("MLB").
+ *
+ * @param {string} [declaredSport]
+ * @returns {boolean}
+ */
+function isSportPlaceholder(declaredSport) {
+  if (declaredSport == null) return true;
+  const whole = String(declaredSport).trim().toUpperCase();
+  if (!whole) return true;
+  return SPORT_PLACEHOLDERS.has(whole);
+}
+
+/**
  * Scan a bet description and replace any known team aliases
  * with their canonical names. Preserves the rest of the text.
  *
@@ -427,4 +450,4 @@ function reloadMappings() {
   playerIndex = loadPlayerMappings();
 }
 
-module.exports = { normalizeTeam, normalizeDescription, normalizePlayer, reloadMappings, declaresOnlyUnmodeledLeagues };
+module.exports = { normalizeTeam, normalizeDescription, normalizePlayer, reloadMappings, declaresOnlyUnmodeledLeagues, isSportPlaceholder };
