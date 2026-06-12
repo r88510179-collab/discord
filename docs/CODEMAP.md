@@ -179,6 +179,13 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 | `handleSlipFeed` (gated to `SLIP_FEED_CHANNEL_ID`) — loops `selectSlipImages(images)`, one `processSlipImage` per image with the same other args; overflow past the cap is `console.warn`-only (no new drop enum). Only N≥2 real attachments changes behavior. | 605 (fn); per-image loop 635 |
 | OCR-first slip seam (`processAggregatedMessage`): `imageCount = ocrFirstWiring.eligibleImageCount(combinedImages)` — counts REAL attachments only so an HRB slip+embed = 1 (scope=single), a true 2-attachment post = 2. Fails safe to total. | 1076 (guard), 1077 (call), 1084 (count); helper `services/ocrFirstWiring.js:176` |
 | ADMIN_LOG send (path B) | 1313 (guard L1311) |
+| **DubClub split bypass — author-agnostic (#84)** — gates on channel membership ALONE (`isDubclubSplitChannel`); both webhook/bot AND human authors bypass GUARD 5. `isWebhookOrBot` now only selects `bypassImages` (webhook → `[]`, human → real `images`). Routes straight to `processAggregatedMessage` | 945 (`if (isDubclubSplitChannel)`; channel-list L943, `isWebhookOrBot`/`bypassImages` L944/951, `processAggregatedMessage` call L954) |
+| **GUARD 5 signal gate (#84)** — drops a message scoring `looksLikePick` <2 signals with no celebration + no images, now as `GUARD5_INSUFFICIENT_SIGNALS` (was the misleading `PRE_FILTER_NO_BET_CONTENT`) | 965 (`if (!textIsPick && !textIsCelebration && !hasImages)`); `recordDrop` emit 972; `looksLikePick` def 231 (`signals >= 2` L237) |
+| `!message.guild` → `CHANNEL_UNAUTHORIZED` drop (#84 — was a silent `return`) | 770–772 (`recordDrop` `guardReason:'no_guild'` L771) |
+| partial-fetch failure → `recordError` (#84 — was a silent `return`) | 776–786 (`recordError` `where:'partial_fetch'` L783) |
+| dedup short-circuit — intentionally still silent (#84 comment) | 794 (`processedMessages.has(dedupKey)` return; rationale L790–792) |
+
+> **Note (#84):** the pre-existing rows above this block carry some line drift unrelated to #84 (e.g. `processedMessages` decl, `processAggregatedMessage` start) — a full `messageHandler.js` table refresh is owed separately; the five rows just added are verified against `main`@94e3175.
 
 **`raw_text` semantics — two ingest paths, inconsistent by history (NOT a bug):**
 - Pure-slip / HRB path (`processAggregatedMessage`, L1288): `raw_text` = the scrubbed Discord message *body* (`cleanText`, defined L683). For HRB shares that body is share-card boilerplate (e.g. "Check out this bet I placed on Hard Rock Bet!"), **not** the Vision extraction.
@@ -202,6 +209,27 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 | MAG7/sheet detector emit per-sport straights (v423) | 984 (prompt-level SHEET-vs-PARLAY rule in `GEMMA_SLIP_PROMPT` — model emits per-sport straights; no separate JS detector) |
 | `disambiguateAmbiguousTeam(text)` (P1 sport-disambiguation, PR #36) — returns the sport for a contiguous `"<city> <nickname>"` ambiguous-team phrase; abstains (returns `null`) when the string matches 0 or >1 distinct franchises, so multi-franchise strings are never force-classified | 549 (fn); export L1984; called from `detectSport` L582, `reclassifySport` L1639, `inferLegSport` L1674 |
 | `AMBIGUOUS_TEAMS` — table of the 6 shared nicknames (cardinals, giants, rangers, kings, panthers, jets) mapping each city → its sport | 530 |
+| `validateLegSportConsistency(leg, parlaySport)` — Bug-A wrong-sport leg guard. **#82** (`b4f4097`): the declared parlay sport is parsed as a **SET** — `(parlaySport).toUpperCase().split(/[/&,]/).map(trim).filter(Boolean)` — so a compound declaration (`MLB/NHL`) admits a leg from ANY of its sports (intersection of `matchedSports` ∩ `declaredSet` non-empty). A single-sport string → one-element set → verdict + reject-reason bytes **identical** to the prior exact-key match; mismatch not loosened. **#86** later layered a declared-KBO early-pass (`declaredSet.has('KBO') && matchesKboTeam(desc)`) on top, before the US-league scan | 1949 (fn); call from `validateParsedBet` 1918; set-split 1959–1965; intersection loop 1983–1986; KBO early-pass (#86) 1972; reject reason 1992 |
+| `KBO_TEAMS` / `matchesKboTeam` / `normalizeKboLeg` / `declaredSportIncludesKbo` — the **only** KBO team data in the repo (10 sponsor/nickname pairs); used by the parse-time validator. **Not** in `data/mappings/teams.json` (NBA/NFL/MLB/NHL only) and **not** in grading `SUPPORTED_SPORTS` → KBO bets are ungradeable downstream (see §grading.js `isSupportedSport`) | `KBO_TEAMS` 1716; `matchesKboTeam` 1751; `normalizeKboLeg` 1761; `declaredSportIncludesKbo` 1773 |
+
+### services/normalization.js (unmodeled-league sport gate, #85)
+
+Team/player nickname-alias expansion for stored bet descriptions. `normalizeDescription(text, declaredSport)` (the `text`-only form is the historical, still-supported shape) canonicalizes nicknames (`"Eagles"`→`"Philadelphia Eagles"`) using the alias index built from `data/mappings/teams.json` (modeled leagues today = **NBA/NFL/MLB/NHL**). **#85** (`1bfb053`) added the optional `declaredSport` arg + a gate so a slip declared in a league we **don't** model (KBO/KHL/NPB/soccer/tennis/NCAAF/WNBA…) is returned **byte-identical** — a bare `"Eagles"`/`"Lions"`/`"Giants"` in a KBO slip is a Korean club (Hanwha Eagles, Samsung Lions), not the US team (incident 2026-06-11). `services/ai.js normalizeBet` passes `bet.sport` into **both** the parent-desc and per-leg `normalizeDescription` calls.
+
+`shouldExpandAliases(declaredSport)` is the gate. It **EXPANDS** (prior behavior) when the sport is absent/empty/null, a non-committal placeholder (`SPORT_PLACEHOLDERS`: UNKNOWN/N-A/PENDING/TBD/… — `detectSport` emits the literal `Unknown` for abbreviation/slang/player-prop text, which must keep canonicalizing), a teams.json league **code** as a whole word (`"NBA"`, `"NBA Basketball"`), or a generic/full league **name** for a modeled league (`"Baseball"`, `"Major League Baseball"` — `LEAGUE_NAME_ALIASES`). It **SUPPRESSES** otherwise. Compound declarations split on `/ & ,` and expand only when **every** part qualifies, so `"MLB/KBO"` suppresses. The modeled set / code-regex / name-set are derived from teams.json keys at load (`loadTeamMappings`), so the gate tracks the data; `"Football"` (soccer-ambiguous) and foreign-qualified names (`"Korean Baseball"`) deliberately do **not** match (and `WNBA`/`NCAAF` carry no whole-word `\bNBA\b`/modeled code → suppress).
+
+`hasSponsorPrefix(result, offset)` is a sport-**independent** backstop applied inside `normalizeDescription`'s replace callback: a nickname immediately preceded on the **same line** by a KBO corporate sponsor (`KBO_SPONSOR_PREFIX`: Hanwha/Samsung/LG/Lotte/Doosan/KIA/SSG/KT/NC/Kiwoom) is never expanded, even when `detectSport` mislabels the bare text as a US league. Same-line only (`[^\S\n]+`) with a 16-char lookback, so `"KT\nLions ML"` still expands the next-line Lions.
+
+> The KBO *validator* helpers `matchesKboTeam`/`normalizeKboLeg`/`declaredSportIncludesKbo` are NOT here — they live in `services/ai.js` (#86, separate). The single-arg `normalizeDescription(text)` in `services/database.js:280` is an unrelated parlay-leg dedup helper — do not conflate.
+
+| What | Line(s) |
+| --- | --- |
+| `normalizeDescription(text, declaredSport)` (2nd param added #85; passthrough short-circuit L316–317; sponsor guard call L335) | 314 |
+| `shouldExpandAliases(declaredSport)` (the unmodeled-league gate) | 285 |
+| `SPORT_PLACEHOLDERS` (Unknown/N-A/Pending/… → keep expanding) | 248 |
+| `hasSponsorPrefix` / `KBO_SPONSOR_PREFIX` / `ZERO_WIDTH` (sport-independent sponsor guard; same-line, 16-char lookback) | 217 / 210 / 211 |
+| `mappedLeagues` / `modeledLeagueCodeRe` / `modeledLeagueNames` / `LEAGUE_NAME_ALIASES` (built in `loadTeamMappings` L52–57 from teams.json keys; modeled set today = {NBA,NFL,MLB,NHL}) | 22 / 26 / 45 / 39 |
+| Caller wiring — `normalizeBet` passes `bet.sport` (`declaredSport`) into both the parent-desc and per-leg `normalizeDescription` calls | `services/ai.js` |
 
 ### services/grading.js
 
@@ -247,6 +275,7 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 | `canFinalizeBet` (RETRY_CAP=15 → stamps `GRADE_BACKOFF_EXHAUSTED` + VOID in a txn) | 557 (`RETRY_CAP` 636; cap-void 640) |
 | `scheduleRecheckAfterDenial` | 631 |
 | `shouldAutoVoidNoData` — **the *other* void path**: recent-5 `grading_audit` rows all `PENDING` + no-data evidence, `grading_attempts ≥ 5`, age ≥ 12h → VOID (`auto_void_no_searchable_data`). Keys on audit *content*, not raw attempt count — why a 7-attempt bet can void while a 35-attempt bet does not (see BACKLOG "non-uniform auto-void"). | 708 (MIN_ATTEMPTS 710; MIN_AGE_MS 709) |
+| `isSupportedSport(sport)` / `SUPPORTED_SPORTS` — exact single-key membership (`toUpperCase().trim()` → `SUPPORTED_SPORTS.has(s)`; rejects null/`UNKNOWN`/`N/A`). **OPEN FOLLOW-UP (#82 downstream):** does **not** split or normalize the stored sport, so a compound (`MLB/NHL`) or unmodeled (`KBO`) sport string is not in the flat set → returns false → the bet is **auto-voided** at the grade gate (`review_status='auto_void_unscoped_bet'`, skips ESPN+AI). #82 fixed the *parse-time* compound-sport leg validator, but a parlay whose stored `sport` survives as `MLB/NHL`, and all KBO bets, are still ungradeable here. Possible fix: split/normalize compound sport at this gate + add KBO to `SUPPORTED_SPORTS` and KBO team data to teams.json | `isSupportedSport` 387; `SUPPORTED_SPORTS` 267; auto-void gate 2022 (VOID write 2025–2037, `AUTO_VOIDED` return 2043) |
 | `calcProfit` | 1011 |
 | `gradeFromCelebration` | 1331 |
 | `extractSubject` — **ordinal/period sentinel protection (#74)** + **slash/dash query fixes (#76)**. #74: stashes `1st`–`4th` / `1H`/`2H` / `1Q`–`4Q` / `F5` behind a U+0001 sentinel (`String.fromCharCode(1)`) *before* the `\d+\.?\d*` + market strips, then restores them in order, so `"1st Quarter"` survives while odds/lines still strip. #76: slash/backslash between tokens → **space** (`.replace(/[/\\]/g, ' ')`, runs *before* the symbol strip so it can't be eaten) — `"McGhee/Yannis ITD"` → `"McGhee Yannis ITD"`; and **orphan dash-runs** isolated by whitespace/boundary are dropped (`.replace(/(^\|\s)-+(?=\s\|$)/g, '$1')`) — `"Joanderson Brito ML (-165)"` → `"Joanderson Brito"`, while intra-word hyphens (`Saint-Denis`) survive (the ASCII `-` is deliberately kept out of the symbol class) | 1425 (fn); sentinel stash 1438; `SENT` const 1439; slash→space 1453; restore-in-chain 1459; orphan-dash drop 1466 |
@@ -482,6 +511,9 @@ Pre-filter drops between RECEIVED and PARSED emit DROPPED (not a named stage): `
 | AUTOGRADER_DISABLED | autograder cron | If true, no auto-grading runs |
 | TWITTER_POLLER_DISABLED | Fly Twitter poller | Currently paused; Surface Playwright replaces |
 | QUOTE_BOUND_GRADING | `gradeSingleBet` Gate 3 (`resolveGate3Mode`) | unset → `shadow` (log-only). **Live on Fly = `enforce`** (2026-06-10): a failed quote check forces PENDING (`UNVERIFIED_QUOTE`) |
+| ALLOWED_WEBHOOK_IDS | `globalPipelineGuard` bot/webhook author allow-list (`handlers/messageHandler.js:315`; matches `webhook.id` first, `author.id` second) | Every bot/webhook author is denied `bot_not_whitelisted` (`:318`) → **all relay ingestion stops** (DubClub + TweetShift) |
+
+> **ALLOWED_WEBHOOK_IDS — 6 IDs (restored 2026-06-11).** Carries the 2 DubClub-bridge relay webhooks (LockedIn → #lockedin-slips, GNP → #gnp-slips) + the 4 TweetShift relay webhooks (gambling-twitter dan/cody/gavin/harry — the same four cappers in §Channels "Human-submission only — hold gated"). The 4 TweetShift IDs were dropped in the **May 31 secret rotation**, so those relay channels went **dark May 31 → Jun 11** (their webhook authors hit `bot_not_whitelisted` at `messageHandler.js:318`); restored 2026-06-11. The ID set itself is a Fly secret — not in code. See BACKLOG "SHIPPED — 2026-06-11" for the ~860-post loss accounting.
 
 ## Channels — ingestion routing (verified 2026-05-21 via `fly ssh`)
 
@@ -571,16 +603,17 @@ Active known issue: parser drops real picks shaped as `<emoji> <category> / <pla
 4. Run `PRAGMA table_info` on any table you query for the first time in a session.
 5. Update this file in the same PR as any change that moves or adds the locations above.
 
-## DubClub split bypass (handlers/messageHandler.js, 2026-05-31)
+## DubClub split bypass (handlers/messageHandler.js, 2026-05-31; author-agnostic since 2026-06-11 / #84)
 
-DubClub bridge webhooks post one independent pick per message into split channels. handleMessage has a DUBCLUB SPLIT BYPASS block placed ABOVE GUARD 5:
-- Detects: `(message.webhookId || message.author?.bot)` AND channel in `DUBCLUB_SPLIT_CHANNEL_IDS` env CSV.
-- Effect: routes the message straight to processAggregatedMessage as a single-message batch — skips BOTH the 4s aggregation buffer (would re-merge split posts) AND GUARD 5 looksLikePick (would drop bare totals like "Cubs Cardinals O8" that score <2 PICK_SIGNALS).
+DubClub bridge webhooks post one independent pick per message into split channels. handleMessage has a DUBCLUB SPLIT BYPASS block placed ABOVE GUARD 5 (`if (isDubclubSplitChannel)`, ~L945):
+- Detects: channel in `DUBCLUB_SPLIT_CHANNEL_IDS` env CSV — **author-agnostic** (`isDubclubSplitChannel`, L943). Both webhook/bot AND human authors bypass. **Pre-#84** the gate also required `(message.webhookId || message.author?.bot)`, so a human-typed bare total in #lockedin-slips was silently dropped by GUARD 5 (incident 2026-06-11).
+- Effect: routes the message straight to processAggregatedMessage (L954) as a single-message batch — skips BOTH the 4s aggregation buffer (would re-merge split posts) AND GUARD 5 looksLikePick (would drop bare totals like "Cubs Cardinals O8" that score <2 PICK_SIGNALS).
+- The image arg is author-dependent (`bypassImages`, L951): webhook/bot → `[]` (byte-identical to ffddb09); human → real `images` (forward an attached slip the buffer would have collected).
 - Must stay above GUARD 5. Auth/bouncer guards (1-4) still run before it.
 - Env: DUBCLUB_SPLIT_CHANNEL_IDS=1473343783876821198(LockedIn),1473343838587457626(GNP)
-- Commits: 34ea903 (buffer bypass), ffddb09 (moved above GUARD 5).
+- Commits: 34ea903 (buffer bypass), ffddb09 (moved above GUARD 5, webhook-only), 4c2ed71 / #84 (author-agnostic + GUARD 5 drops now `GUARD5_INSUFFICIENT_SIGNALS`).
 
-Note: looksLikePick (PICK_SIGNALS, ~line 199) has no bare over/under total signal — "O8"/"O212.5" only match the half-point pattern, scoring <2. Latent bug for any non-DubClub total-only pick. Not fixed (DubClub bypasses the gate instead).
+Note: looksLikePick (PICK_SIGNALS, ~line 231) has no bare over/under total signal — "O8"/"O212.5" only match the half-point pattern, scoring <2. Latent bug for any non-DubClub total-only pick. Not fixed (DubClub bypasses the gate instead); **#84** at least made the resulting drop queryable as `GUARD5_INSUFFICIENT_SIGNALS` rather than the indistinguishable `PRE_FILTER_NO_BET_CONTENT`.
 
 ## #admin-log event catalog (channel 1486825605105192960)
 Read path: routes/admin.js GET /api/admin/logs tails this channel (dashboard Admin Log tab).

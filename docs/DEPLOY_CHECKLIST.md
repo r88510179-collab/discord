@@ -114,6 +114,18 @@ If `git branch --show-current` prints anything other than `main`, or `git status
 
 This is distinct from Step 5's "confirm the merge is local" check: that one catches `main` failing to advance after a merge; this one catches the working tree not being `main` at all. **Near-miss this prevents:** a chained `git checkout main && git pull && fly deploy` shipped from `feat/dedup-leak-check` because the `git checkout main` had aborted on an untracked-file conflict — HEAD never moved to `main`, so `--local-only` built the feature branch's tree. A one-line `git branch --show-current` before the build would have caught it.
 
+### 4b. The merged PR is actually the top commit (post-merge landing gate)
+
+After merging the PR on GitHub and pulling, confirm the merge actually landed on your local working tree **before** building:
+
+```bash
+git log --oneline -1
+```
+
+The top commit must be the PR you just merged (its squash-merge subject / `(#NN)`). If it shows an older commit — or `git pull` printed **"Already up to date"** right after you merged — the merge did **not** land locally (you pulled too early, or pulled the wrong remote/branch). **STOP** and re-pull/re-merge before deploying; `flydeploy` builds from the working tree, so deploying here ships the *prior* code.
+
+This complements Step 4a and Step 5: 4a checks *which branch* (`main`, clean), 4b checks *which commit* (the PR you merged is on top), Step 5 checks *that `main` advanced* on pull. **2026-06-11:** two deploys shipped stale trees exactly this way — #84 and #85 were **both initially deployed as phantoms** (built before the merge commit was on the local tree), caught only after the fact. A one-line `git log --oneline -1` before each build would have caught both.
+
 ### 5. Fly deploy ran and succeeded
 
 **Before deploying, confirm the merge is local:** `git checkout main && git pull` MUST show main advancing (e.g. `05400f3..db52a8c`). If it says **"Already up to date"** and you just merged a PR, the merge isn't on your local main — **stop and re-pull/merge**. `fly deploy` builds from local `main`, so deploying here ships the *prior* state. After deploy, verify the change is actually in the running image (`fly ssh console -C 'ls /app/<changed-file>'` or `grep -c <new-symbol> /app/<file>`) before trusting it.

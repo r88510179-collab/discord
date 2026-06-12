@@ -105,6 +105,42 @@ The dead `TeamLockTalk` handle was retired and `lockedin_sportz` wired in across
 ---
 
 
+## ✅ SHIPPED — 2026-06-11 (KBO normalization + validator, GUARD 5 human bypass, relay restoration)
+
+PRs #82 (`b4f4097`), #84 (`4c2ed71`), #85 (`1bfb053`) merged to `main`. **Deploy note:** #84 and #85 were each **initially deployed as phantoms** (the `--local-only` build shipped a stale working tree — `git pull` read "Already up to date" after the merge); caught and re-deployed correctly. This is the motivating incident for the new **DEPLOY_CHECKLIST.md step 4b** (post-merge top-commit gate).
+
+### #82 (`b4f4097`) — compound multi-sport declared sport treated as a set
+`validateLegSportConsistency` (`services/ai.js:1949`) now parses the declared parlay sport as a **set** (`split(/[/&,]/)`, trim, drop empties; intersection with `matchedSports`), so a compound declaration like `MLB/NHL` no longer self-contradictorily drops a valid MLB *or* NHL leg. Single-sport verdicts + reject-reason bytes are **identical** (one-element set), and the mismatch check is not loosened. Tests folded into `tests/leg-sport-consistency-validation.js` (31/31). Mapped in docs/CODEMAP.md §services/ai.js. **Downstream gap (open):** the *grade-time* `isSupportedSport` (`services/grading.js:387`) still does an exact single-key `SUPPORTED_SPORTS.has()` check, so a parlay whose stored `sport` survives as `MLB/NHL` is auto-voided (`auto_void_unscoped_bet`) at `:2022` — see "Open follow-ups — 2026-06-11" below.
+
+### #84 (`4c2ed71`) — GUARD 5 human bare-total bypass + silent-drop instrumentation
+Incident 2026-06-11: human-typed bare totals in #lockedin-slips (a DubClub-split channel) were dropped by GUARD 5 (`looksLikePick` <2 signals, no celebration, no images). Two-part fix in `handlers/messageHandler.js`:
+- **Author-agnostic DubClub bypass** (`:945`): the split-channel bypass now gates on channel membership ALONE (`isDubclubSplitChannel`), so human authors bypass GUARD 5 just like the webhook relays. Humans forward their real attached images; the webhook image arg stays `[]` (byte-identical to ffddb09). Pre-#84 the gate also required `webhookId || author.bot`.
+- **New drop reason `GUARD5_INSUFFICIENT_SIGNALS`** (registered `services/pipeline-events.js:49`, added to CODEMAP §Enums, asserted by `tests/pipeline-events-enums.test.js`) replaces the misleading `PRE_FILTER_NO_BET_CONTENT` at GUARD 5 (`:972`), so "a real bare total was discarded by the heuristic" is queryable apart from genuine non-bet text. Also closed two previously-**silent** returns: `!message.guild` → `CHANNEL_UNAUTHORIZED` drop (`:771`), and a partial-fetch failure → `recordError` (`:783`). The dedup short-circuit (`:794`) stays silent on purpose. **The `is_bet === false` hard rule is UNTOUCHED.** 3 new integration tests. Mapped in docs/CODEMAP.md §messageHandler.js + §"DubClub split bypass".
+
+### #85 (`1bfb053`) — KBO nickname-injection gate + sponsor-prefix guard
+`normalizeDescription(text, declaredSport)` (`services/normalization.js:314`) gained a `shouldExpandAliases` gate (`:285`) that **suppresses** nickname-alias expansion for any league not modeled in `data/mappings/teams.json` (KBO/KHL/NPB/… — NBA/NFL/MLB/NHL are the modeled set), so a bare "Eagles"/"Lions" in a KBO slip is no longer corrupted into "Philadelphia Eagles" (a Korean club, Hanwha Eagles). `Unknown`/placeholder/generic modeled-league NAMEs still expand (preserves the LAL/Dubs class). A sport-**independent** `hasSponsorPrefix` backstop (`:217`) blocks expansion when a KBO sponsor (Hanwha/Samsung/LG/Lotte/Doosan/KIA/SSG/KT/NC/Kiwoom) immediately precedes the nickname **on the same line**, even when `detectSport` mislabels the bare text as a US league. `services/ai.js normalizeBet` passes `bet.sport` into both the parent-desc and per-leg calls. New `tests/normalization-validation.js` TEST 6b; the disambiguation harness now exits nonzero on regression. Mapped in docs/CODEMAP.md §services/normalization.js.
+
+### ALLOWED_WEBHOOK_IDS relay restoration (env-only, no code change)
+The Fly secret `ALLOWED_WEBHOOK_IDS` was restored to **6 IDs** on 2026-06-11: the 2 DubClub-bridge relay webhooks (LockedIn, GNP) + the 4 TweetShift relay webhooks (gambling-twitter dan/cody/gavin/harry). The 4 TweetShift IDs had been dropped in the **May 31 secret rotation**, so the bot's `globalPipelineGuard` denied those webhook authors as `bot_not_whitelisted` (`handlers/messageHandler.js:318`) and the four relay channels were **dark May 31 → Jun 11**. **Historical: ~860 relay posts were lost in that window and are unrecoverable** (relay re-posts are not re-fetchable after the fact). Secret-only change; mapped in docs/CODEMAP.md §"Env vars that gate behavior".
+
+### Cross-repo — zonetracker-dubclub splitter hardening (box-side)
+`zonetracker-dubclub` (Surface Pro PM2 service, NOT this repo) shipped splitter improvements: **pick'em** + **bare-decimal** leg parsing + a **UNIT backstop**, **`auditSplit` drop alerts**, and `normalizePick` **Pickem→ML** normalization. Recorded here for cross-repo traceability; see that repo's own docs for detail.
+
+## Open follow-ups — 2026-06-11
+
+### Scraper `fetchTweets` renders only ~4 articles for some profiles (opened 2026-06-11)
+The Surface Pro scraper's `fetchTweets` surfaced only **~4 articles** for some profiles in a poll cycle and **missed the 2026-06-10 LockedIn slip tweet `2064909737662247302`**. Suspected: the timeline DOM renders fewer `article` nodes than expected before the scrape reads them (lazy-render / insufficient scroll depth), so recent tweets past the first few are never seen. **Probe owed:** instrument the per-profile article count per cycle and confirm whether a scroll/wait or a larger render window recovers the missed tweets. Cross-ref the LockedIn handle swap (above) and the `page.waitForSelector` timeout item under the search-arc "Handle review".
+
+### Grade-time compound / unsupported sport — `isSupportedSport` auto-void risk (opened 2026-06-11, #82 downstream)
+`isSupportedSport` (`services/grading.js:387`) does an exact single-key `SUPPORTED_SPORTS.has(uppercased)` membership test (`SUPPORTED_SPORTS` `:267`). It does **not** split or normalize the stored sport, so:
+- **Stored multi-sport parlays** whose `sport` survives as a compound string (`MLB/NHL`) fail the check → **auto-voided** (`auto_void_unscoped_bet`) at `:2022`, skipping ESPN+AI. #82 fixed only the *parse-time* leg validator; the grade gate is the unfixed downstream half.
+- **KBO bets are ungradeable** — `KBO` is not in `SUPPORTED_SPORTS`, there is no `services/sportsdata/` KBO adapter, and KBO team data lives only as `KBO_TEAMS` in `services/ai.js:1716` (the parse-time validator), **not** in `data/mappings/teams.json`. Adding KBO team data to teams.json + a result source is a possible follow-up.
+**Action:** split/normalize the stored sport at the grade gate (mirror #82's set logic), and decide whether to add KBO to `SUPPORTED_SPORTS` + a source path. Pairs with the search-arc per-sport rollout (S4).
+
+### War-room "Bet not found or already confirmed" on message `1514639924660539442` (opened 2026-06-11, parked)
+A war-room action on message `1514639924660539442` returned **"Bet not found or already confirmed"** — **unreproduced** this session. Parked: on the next recurrence, capture the full interaction timeline (which button, the staged bet's `review_status`, whether a prior confirm/edit had already resolved it) before investigating. Low signal until it repeats.
+
+
 ## ✅ SHIPPED - Weekend 1 (Apr 20)
 
 ### MLB StatsAPI Resolver — live in production
