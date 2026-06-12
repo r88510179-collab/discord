@@ -81,6 +81,16 @@ run('GUARD5_INSUFFICIENT_SIGNALS is registered in DROP_REASONS', () => {
   );
 });
 
+// Hold-recovery retry-cap marker (services/holdReview.js): one row per
+// vision-burning failed recovery attempt; COUNT(*) per ingest is the cap
+// counter. Registered so the tripwire stays quiet on every failed attempt.
+run('RECOVERY_ATTEMPT_FAILED is registered in STAGES', () => {
+  assert.ok(
+    pe.STAGES.includes('RECOVERY_ATTEMPT_FAILED'),
+    'RECOVERY_ATTEMPT_FAILED missing from STAGES',
+  );
+});
+
 // ── (b) drift: unknown value warns ONCE, does NOT throw, does NOT skip ──
 run('unknown stage → warns, does NOT throw, row STILL written', () => {
   const before = countRows();
