@@ -636,14 +636,20 @@ function gradeBetRecord(betId, result, profitUnits, grade, gradeReason, allowAut
 
 // P0 state-machine selector: only rows eligible for the current grading cycle.
 // Kill-switch env var reverts to the old broad query.
+// Bets awaiting human review (review_status='needs_review') are invisible to
+// the grader and every auto-void path until approveBet() confirms them —
+// otherwise the AutoGrader races the war-room queue and stales its buttons.
 function getPendingBets() {
   if ((process.env.GRADING_STATE_MACHINE_ENABLED || 'true') === 'false') {
-    return stmts.pendingBets.all();
+    // stmts.pendingBets is shared with getAllPendingBets (dashboards/admin),
+    // so the review-queue exclusion is applied here, not in the statement.
+    return stmts.pendingBets.all().filter(b => b.review_status !== 'needs_review');
   }
   return db.prepare(`
     SELECT b.*, c.display_name AS capper_name, c.discord_id AS capper_discord_id
     FROM bets b LEFT JOIN cappers c ON b.capper_id = c.id
     WHERE b.result = 'pending'
+      AND (b.review_status IS NULL OR b.review_status != 'needs_review')
       AND b.grading_state IN ('ready','backoff')
       AND (b.grading_lock_until IS NULL OR b.grading_lock_until < datetime('now'))
       AND (b.grading_next_attempt_at IS NULL OR b.grading_next_attempt_at <= datetime('now'))

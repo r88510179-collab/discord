@@ -534,6 +534,12 @@ module.exports = {
                           grading_lock_until=NULL, grading_next_attempt_at=NULL,
                           grading_last_failure_reason=NULL WHERE id = ?`).run(target.id);
             forceMsg = `\n🔄 Forced \`${target.id.slice(0, 8)}\` → state=ready, attempts=0`;
+            // getPendingBets also excludes the human review queue — force-ready
+            // alone cannot make a needs_review bet gradeable.
+            const rs = db.prepare('SELECT review_status FROM bets WHERE id = ?').get(target.id)?.review_status;
+            if (rs === 'needs_review') {
+              forceMsg += `\n⚠️ Bet is \`needs_review\` — still invisible to the grader until approved in the war room`;
+            }
           }
         }
       }
