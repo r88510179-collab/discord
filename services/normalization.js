@@ -249,6 +249,16 @@ const SPORT_PLACEHOLDERS = new Set([
   'UNKNOWN', 'UNK', 'N/A', 'NA', '?', 'TBD', 'NONE', 'NULL', '-', 'PENDING', 'UNDETERMINED',
 ]);
 
+// Per-element check shared by shouldExpandAliases and
+// declaresOnlyUnmodeledLeagues: true when a single declared-sport element
+// CONFIDENTLY names a league/sport we do NOT model — it is not a non-committal
+// placeholder, not a generic/full NAME for a modeled league, and contains no
+// modeled league CODE as a whole word. "KBO"/"KHL"/"SOCCER"/"KOREAN BASEBALL"
+// are unmodeled; "UNKNOWN", "BASEBALL", "MLB", "NBA BASKETBALL" are not.
+function isUnmodeledSportPart(p) {
+  return !(SPORT_PLACEHOLDERS.has(p) || modeledLeagueNames.has(p) || modeledLeagueCodeRe.test(p));
+}
+
 /**
  * Decide whether normalizeDescription may expand nickname aliases for a bet
  * whose declared/contextual sport is `declaredSport`.
@@ -292,9 +302,48 @@ function shouldExpandAliases(declaredSport) {
   if (SPORT_PLACEHOLDERS.has(whole) || modeledLeagueNames.has(whole)) return true;
   const parts = whole.split(/[/&,]/).map((s) => s.trim()).filter(Boolean);
   if (parts.length === 0) return true;
-  return parts.every(
-    (p) => SPORT_PLACEHOLDERS.has(p) || modeledLeagueNames.has(p) || modeledLeagueCodeRe.test(p)
-  );
+  return !parts.some(isUnmodeledSportPart);
+}
+
+/**
+ * True when the declared sport CONFIDENTLY names ONLY leagues/sports we don't
+ * model — every element of the declaration (split on / & , exactly like
+ * validateLegSportConsistency's declared-sport set) is a real league label
+ * that maps to no teams.json league ("KBO", "KHL", "NPB", "Soccer",
+ * "Korean Baseball", compounds like "KBO/KHL", …).
+ *
+ * Used by validateLegSportConsistency (services/ai.js) to SKIP leg-team
+ * validation for such declarations: our team data covers only modeled leagues,
+ * so a nickname hit under an unmodeled declaration can only be a same-nickname
+ * collision with a foreign club ("Eagles" → NFL vs KBO Hanwha Eagles) — a
+ * structural false positive. Live repro: ingest disc_1514481735335805030
+ * (declared "KBO", "Hanwha Eagles +1.5 / SSG Landers +1.5 / Samsung Lions ML")
+ * was re-dropped VALIDATOR_SPORT_MISMATCH on every hold-recovery retry.
+ *
+ * Deliberately conservative — false (validation proceeds) when:
+ *   • declaredSport is absent/empty (no signal), or
+ *   • any element is a non-committal placeholder ("Unknown", "N/A", … — the
+ *     same set shouldExpandAliases treats as no-signal), or
+ *   • any element names a modeled league by CODE or NAME ("MLB/KBO";
+ *     generic "Baseball" counts as modeled, mirroring shouldExpandAliases).
+ *
+ * Quantifier duality with shouldExpandAliases (same canonicalization, same
+ * per-element predicate): alias expansion is suppressed when ANY element is
+ * unmodeled; leg-team validation is skipped only when EVERY element is.
+ *
+ * @param {string} [declaredSport]
+ * @returns {boolean}
+ */
+function declaresOnlyUnmodeledLeagues(declaredSport) {
+  if (declaredSport == null) return false;
+  const whole = String(declaredSport).trim().toUpperCase();
+  if (!whole) return false;
+  // Whole-label pre-check BEFORE splitting (mirrors shouldExpandAliases): "N/A"
+  // contains the separator "/" and "MAJOR LEAGUE BASEBALL" is a single name.
+  if (SPORT_PLACEHOLDERS.has(whole) || modeledLeagueNames.has(whole)) return false;
+  const parts = whole.split(/[/&,]/).map((s) => s.trim()).filter(Boolean);
+  if (parts.length === 0) return false;
+  return parts.every(isUnmodeledSportPart);
 }
 
 /**
@@ -378,4 +427,4 @@ function reloadMappings() {
   playerIndex = loadPlayerMappings();
 }
 
-module.exports = { normalizeTeam, normalizeDescription, normalizePlayer, reloadMappings };
+module.exports = { normalizeTeam, normalizeDescription, normalizePlayer, reloadMappings, declaresOnlyUnmodeledLeagues };

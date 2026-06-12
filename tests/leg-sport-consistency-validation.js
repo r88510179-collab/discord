@@ -13,6 +13,15 @@
 // Fix: the declared sport is parsed as a SET (split on / & ,) so a
 // compound declaration admits a leg from ANY of its sports; single-sport
 // declarations are a one-element set and behave exactly as before.
+//
+// Repro 3: 2026-06-12 14:06 UTC · ingest disc_1514481735335805030 ·
+// held IgDave KBO slip re-dropped VALIDATOR_SPORT_MISMATCH on every
+// hold-recovery retry: 'Leg references team(s) "eagles" which exist in
+// NFL but not in declared parlay sport KBO'. The leg-team matcher only
+// knows teams.json's leagues, so ANY unmodeled-league slip with a
+// colliding nickname failed forever. Fix: when the declared set contains
+// NO modeled league (declaresOnlyUnmodeledLeagues, mirroring #85's
+// derivation), leg-team matching is skipped — war-room review is the gate.
 // ═══════════════════════════════════════════════════════════
 
 const assert = require('assert');
@@ -199,10 +208,12 @@ run('"browns" (NFL-only) + MLB/NHL → fire (NFL ∉ {MLB,NHL})', () => {
 // US nickname (Eagles/Tigers/Twins/Lions/Giants/Bears). A declared-KBO
 // parlay leg naming a KBO club (sponsor prefix is decisive) must PASS,
 // even against the city-injected Vision corruption "Hanwha Philadelphia
-// Eagles". The escape is KBO-gated, so non-KBO parlays are unchanged and
-// genuine cross-sport contamination still drops.
+// Eagles". The escape is KBO-gated, so non-KBO parlays are unchanged.
 // Incident: 2026-06-11, ingest disc_1514481735335805030 (3-leg KBO parlay
 // dropped as 'eagles exist in NFL but not declared sport KBO').
+// NOTE: pure-KBO declarations now pass earlier via the unmodeled-
+// declaration skip (Repro 3); the sponsor-table carve-out remains load-
+// bearing for COMPOUND declarations like "MLB/KBO".
 // ═══════════════════════════════════════════════════════════
 console.log('\nKBO awareness (declared-KBO + shared-nickname clubs):');
 
@@ -280,18 +291,110 @@ run('corrupted leg + MLB → FIRE (KBO escape does not leak to non-KBO declared 
   assert.match(r.reason, /MLB/);
 });
 
-// ── A genuine US team in a declared-KBO parlay STILL drops (no blanket pass) ──
-run('genuine cross-sport: "Los Angeles Lakers ML" + KBO → FIRE (KBO ≠ blanket pass)', () => {
+// ── SUPERSEDED (was #86: "KBO ≠ blanket pass" — Lakers + KBO fired) ──
+// The unmodeled-declaration skip supersedes that: declared "KBO" contains no
+// modeled league, so leg-team matching is skipped entirely. We carry no team
+// data that could distinguish a genuine Lakers leg from a foreign club under
+// an unmodeled declaration — war-room review is the gate for those slips.
+// Compound declarations that mix in a modeled league still validate fully
+// (see "MLB/KBO + Lakers → FIRE" below).
+run('"Los Angeles Lakers ML" + KBO → pass (unmodeled declaration skips leg-team matching; supersedes the #86 fire)', () => {
   const r = validateLegSportConsistency({ description: 'Los Angeles Lakers ML' }, 'KBO');
-  assert.strictEqual(r.valid, false);
-  assert.match(r.reason, /lakers/i);
-  assert.match(r.reason, /NBA/);
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
 });
 
 // ── Compound declaration "MLB/KBO" admits a KBO leg too ──
 run('compound "MLB/KBO" + Hanwha Eagles → pass (KBO ∈ declared set)', () => {
   const r = validateLegSportConsistency({ description: 'Hanwha Eagles +1.5' }, 'MLB/KBO');
   assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
+});
+
+// ═══════════════════════════════════════════════════════════
+// Unmodeled-league declarations — when EVERY declared element names a
+// league we don't model (no element maps to a teams.json league under
+// #85's canonicalization — declaresOnlyUnmodeledLeagues), leg-team
+// matching is SKIPPED: SPORT_TEAM_MAP knows only the modeled US leagues,
+// so a nickname hit under such a declaration can only be a same-nickname
+// foreign club — a structural false positive. War-room review is the
+// gate for these slips.
+// Live repro: 2026-06-12 14:06 UTC, ingest disc_1514481735335805030
+// (declared "KBO") re-dropped on every hold-recovery retry, ~12 cycles.
+// ═══════════════════════════════════════════════════════════
+console.log('\nUnmodeled-league declarations (leg-team matching skipped):');
+
+// ── The live repro — exact leg strings from the Jun 12 14:06 drop payload ──
+const LIVE_KBO_LEGS = ['Hanwha Eagles +1.5', 'SSG Landers +1.5', 'Samsung Lions ML'];
+for (const desc of LIVE_KBO_LEGS) {
+  run(`LIVE: "${desc}" + KBO → pass (no modeled league declared)`, () => {
+    const r = validateLegSportConsistency({ description: desc }, 'KBO');
+    assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
+  });
+}
+
+// ── Generalizes beyond KBO: no sponsor table needed for other leagues ──
+run('"KHL" + bare colliding nickname "Eagles ML" → pass (unmodeled league)', () => {
+  const r = validateLegSportConsistency({ description: 'Eagles ML' }, 'KHL');
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
+});
+
+run('"NPB" + "Yomiuri Giants ML" → pass (giants collides with MLB/NFL; NPB unmodeled)', () => {
+  const r = validateLegSportConsistency({ description: 'Yomiuri Giants ML' }, 'NPB');
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
+});
+
+run('"Korean Baseball" + Hanwha Eagles → pass (foreign-qualified name is NOT generic "Baseball" — #85-consistent)', () => {
+  const r = validateLegSportConsistency({ description: 'Hanwha Eagles +1.5' }, 'Korean Baseball');
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
+});
+
+run('all-unmodeled compound "KBO/KHL" + Eagles ML → pass (no modeled element)', () => {
+  const r = validateLegSportConsistency({ description: 'Eagles ML' }, 'KBO/KHL');
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
+});
+
+// ── Boundaries: the skip engages ONLY for confidently-unmodeled sets ──
+run('"NBA" + marlins → still FIRES (modeled declaration, unchanged)', () => {
+  const r = validateLegSportConsistency({ description: 'Miami Marlins ML' }, 'NBA');
+  assert.strictEqual(r.valid, false);
+  assert.match(r.reason, /marlins/i);
+  assert.match(r.reason, /MLB/);
+  assert.match(r.reason, /NBA/);
+});
+
+run('mixed compound "MLB/KBO" + Lakers → still FIRES (a modeled element keeps full validation)', () => {
+  const r = validateLegSportConsistency({ description: 'Los Angeles Lakers ML' }, 'MLB/KBO');
+  assert.strictEqual(r.valid, false);
+  assert.match(r.reason, /lakers/i);
+  assert.match(r.reason, /NBA/);
+});
+
+// Generic "Baseball" is a MODELED-league signal per #85 (LEAGUE_NAME_ALIASES →
+// MLB), so the unmodeled skip does NOT engage and the pre-existing exact-key
+// set matching is unchanged: "BASEBALL" ∉ matched {MLB} → fire, same as before
+// this fix. (Not loosened here on purpose — see PR notes.)
+run('"Baseball" + marlins → still FIRES (modeled-generic name, #85-consistent; behavior unchanged)', () => {
+  const r = validateLegSportConsistency({ description: 'Miami Marlins ML' }, 'Baseball');
+  assert.strictEqual(r.valid, false);
+  assert.match(r.reason, /marlins/i);
+});
+
+// Placeholders carry NO league signal — never treated as confidently-unmodeled.
+run('placeholder "Unknown" + lakers → still FIRES (no-signal labels keep validating)', () => {
+  const r = validateLegSportConsistency({ description: 'Los Angeles Lakers ML' }, 'Unknown');
+  assert.strictEqual(r.valid, false);
+  assert.match(r.reason, /lakers/i);
+});
+
+run('placeholder "N/A" + lakers → still FIRES (whole-label check beats the "/" split)', () => {
+  const r = validateLegSportConsistency({ description: 'Los Angeles Lakers ML' }, 'N/A');
+  assert.strictEqual(r.valid, false);
+  assert.match(r.reason, /lakers/i);
+});
+
+run('empty declared sport + lakers → still FIRES (no signal ≠ unmodeled)', () => {
+  const r = validateLegSportConsistency({ description: 'Los Angeles Lakers ML' }, '');
+  assert.strictEqual(r.valid, false);
+  assert.match(r.reason, /lakers/i);
 });
 
 // ═══════════════════════════════════════════════════════════
