@@ -1381,3 +1381,7 @@ Discovery ran (prompts/relay-hold-link-recovery-discovery.md). Findings:
 **Decision: SHELVED.** Poor ROI vs. post-P0 roadmap — requires persistence rework just to *measure*, with a ~4/day ceiling mostly paywalled. NO parser, NO expander, NO persistence change at this time.
 
 **Cheap kill-check (manual, ~10 min):** open 5 of Dan's "Load here:" messages in Discord, see where the t.co link redirects (DubClub / Whop / free page) and whether it's gated. All paywalled → item is permanently dead. Some free → revisit, and the DubClub bridge is the likely lever, not a per-message expander.
+
+## Hold-queue hygiene (2026-06-12)
+- Dedupe holds per source message: relay edit/update path creates a second hold with a new ingest_id for the same messageUrl (observed: 2 Dan messages → 4 holds). Hold staging should upsert on source message id.
+- GET /holds: expose recoverAttempts + lastRecoverStatus so the dashboard dismiss modal shows real history (flagged in zonetracker-dashboard#6).
