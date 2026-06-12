@@ -1138,6 +1138,25 @@ Empty-text image-only posts (DatDude HRB pattern) keep hitting MANUAL_REVIEW_HOL
 **Tracking:** First spotted 2026-05-20 when 25-hold backlog audit showed recap/promo/sweat were 60%+ of the queue.
 ## Playwright shortlink expander (high value)
 
+**2026-06-12 — probe + phased plan (refines the DOM-scrape "Fix path" below; that plan preserved for audit).**
+
+45-day MANUAL_REVIEW_HOLD probe — **259 unique holds**:
+- **Link-gated: 48.** `hrb_share` **38** (DatDude 25, IgDave 9, Smokke 4) + `fanduel` **10** + `gamescript` **4** (capper portal — sign-up wall, manual-only, no public DOM).
+- **Unmatched: 189** — text-parser class: the legs are *in the message text* and the parser is fumbling them. Separate P1, **not** a link problem.
+
+(Probe figures as reported. The per-domain counts 38+10+4 sum to 52, above the 48 unique link-gated headline — overlapping/approximate probe bucketing, not a strict partition; likewise link-gated 48 + text-parser 189 don't cover all 259, the remainder being mixed/dup/other.)
+
+**Decision: screenshot → vision, not per-book DOM scrape.** Render the share page on the Surface Pro and feed the screenshot to the existing `parseBetSlipImage` vision path (the same machinery that already reads HRB image slips). One renderer covers every book whose share page paints legs on screen — no per-book selector maintenance (supersedes the FanDuel/DK/HRB selector hints below).
+
+**Phased plan:**
+- **A — shadow (this PR, `feat/link-reader-shadow`, no deploy).** `services/linkReader.js` detects allow-listed book/shortlink URLs in messages headed for MANUAL_REVIEW_HOLD and, under `LINK_READER_MODE=shadow`, annotates the *existing* hold event with an additive `share_link: {url, domain, kind}` field. `LINK_READER_MODE` unset/off → no annotation (feature dormant, no behavior change). Also bumps the hold `sample` slice 80→400 chars so reviewers see more body text. Allow-list: `share.hardrock.bet`, `sportsbook.fanduel.com`, `sportsbook.draftkings.com`, `dkng.co`, `bit.ly`, `tinyurl.com`.
+- **B — Surface Pro `zonetracker-link-reader` service.** New microservice (sibling to `zonetracker-ocr` / scraper): takes a share URL, follows redirects, renders headless, returns a screenshot. Tailscale-fronted; ~10s timeout; any failure falls back to the existing MANUAL_REVIEW_HOLD path (never blocks ingest).
+- **C — cutover.** On a (shadow-confirmed) share link: Surface Pro service → screenshot → `parseBetSlipImage` → save legs as if the bot read the slip directly. Gated by `LINK_READER_MODE=cutover` (strict; treated as off until C ships).
+
+**Twitter-side caveat:** the Surface scraper's *display text* mangles URLs — injected spaces + ellipsis truncation (`bit.ly/Din… ger`) — so Twitter-relayed links are unusable for detection until the scraper captures the anchor **href** instead of the rendered text. Promo domains (dubclub/whop/linktr) never expand to a slip; **allow-list only**.
+
+---
+
 **Problem:** Cappers post a substantial fraction of their picks as "Load here: bit.ly/X" tweets where the actual legs are behind a sportsbook share link or capper portal. Bot text-parses "$10 → $413 if these two guys go yard" and gets nothing extractable. Currently these slips hit MANUAL_REVIEW_HOLD and get dismissed because the human reviewer would also have to click through, and that's not scalable.
 
 Confirmed examples from 2026-05-19 audit:

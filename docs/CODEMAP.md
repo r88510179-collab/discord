@@ -201,6 +201,18 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 - `review-holds.js` re-fetches the live Discord message per walk (`channel.messages.fetch` from `payload.messageUrl`, L547–554) and reads attachments fresh (L80, L91) → always a current signed image url, so no stored snapshot is needed.
 - `EXTRACTED.imageUrl` (single-image branch, L1009) is `imageUrl.slice(0, 120)` — a truncated, HMAC-stripped debug breadcrumb, NOT an openable link. The multi-image branch (L1014) stores no url at all. Treat neither as a usable image link; do not add imageUrl-persistence to the multi-image branch — no consumer reads it (closed; see BACKLOG.md).
 
+### services/linkReader.js (sportsbook share-link shadow detection, Phase A)
+
+Detects allow-listed sportsbook book/shortlink URLs in a message body before it is staged as `MANUAL_REVIEW_HOLD`, so a held slip whose legs live behind a share link is identifiable in shadow mode. Gated by `LINK_READER_MODE` (see §Env vars). No new pipeline_events rows, stages, or drop reasons — the `share_link` is an additive field on the *existing* hold event. See BACKLOG "Playwright shortlink expander" for the A/B/C plan.
+
+| What | Line(s) |
+| --- | --- |
+| `MODE` — `'shadow'` iff `LINK_READER_MODE==='shadow'`, else `'off'` (Phase-C `'cutover'` reserved, treated as off) | 31 |
+| `BOOK_HOSTS` (share.hardrock.bet / sportsbook.fanduel.com / sportsbook.draftkings.com / dkng.co), `SHORTLINK_HOSTS` (bit.ly / tinyurl.com) | 34, 42 |
+| `detectShareLink(text)` — pure, never-throws, allow-list-only; returns `null` or `{ url(≤200), domain, kind:'book'\|'shortlink' }`. Suffix host-match (`host===h \|\| host.endsWith('.'+h)`) so promo/social/Discord links and look-alike hosts (`share.hardrock.bet.evil.com`) → null | 68 |
+| `attachShareLink(payload, text)` — wiring helper. **Off-mode short-circuit:** `MODE!=='shadow'` → returns `payload` untouched, `detectShareLink` never called. Shadow → adds additive `share_link` field | 111 |
+| Wiring + sample bump: both MANUAL_REVIEW_HOLD writes in `handlers/messageHandler.js` (is_bet=false branch + indeterminate branch); `sample` slice bumped 80→400 at the same two sites | messageHandler.js 1238/1239 (is_bet=false), 1308/1309 (indeterminate) |
+
 ### services/ai.js
 | What | Line(s) |
 | --- | --- |
@@ -520,6 +532,7 @@ Pre-filter drops between RECEIVED and PARSED emit DROPPED (not a named stage): `
 | QUOTE_BOUND_GRADING | `gradeSingleBet` Gate 3 (`resolveGate3Mode`) | unset → `shadow` (log-only). **Live on Fly = `enforce`** (2026-06-10): a failed quote check forces PENDING (`UNVERIFIED_QUOTE`) |
 | DATE_BOUND_GRADING | `gradeSingleBet` Gate 4 (`resolveGate4Mode`) | unset → `shadow` (would-fire marker only). shadow stamps `GATE4_WOULD_FIRE` and leaves the grade; `enforce` forces PENDING (`OFF_DATE_EVIDENCE`) when the quote-bearing evidence is dated outside anchor±tol; unknown/legacy → shadow. **Staged shadow; not yet flipped** (`gate4-off-date-reject`) |
 | ALLOWED_WEBHOOK_IDS | `globalPipelineGuard` bot/webhook author allow-list (`handlers/messageHandler.js:315`; matches `webhook.id` first, `author.id` second) | Every bot/webhook author is denied `bot_not_whitelisted` (`:318`) → **all relay ingestion stops** (DubClub + TweetShift) |
+| LINK_READER_MODE | `services/linkReader.js` (load-time `MODE`); wiring at the two `MANUAL_REVIEW_HOLD` writes in `handlers/messageHandler.js` | unset/off → no `share_link` annotation on holds (Phase A feature dormant; sample-400 bump still applies). `shadow` → adds additive `share_link: {url,domain,kind}` to MANUAL_REVIEW_HOLD payloads (no behavior change). `cutover` reserved for Phase C, treated as off (strict `'shadow'` compare) |
 
 > **ALLOWED_WEBHOOK_IDS — 6 IDs (restored 2026-06-11).** Carries the 2 DubClub-bridge relay webhooks (LockedIn → #lockedin-slips, GNP → #gnp-slips) + the 4 TweetShift relay webhooks (gambling-twitter dan/cody/gavin/harry — the same four cappers in §Channels "Human-submission only — hold gated"). The 4 TweetShift IDs were dropped in the **May 31 secret rotation**, so those relay channels went **dark May 31 → Jun 11** (their webhook authors hit `bot_not_whitelisted` at `messageHandler.js:318`); restored 2026-06-11. The ID set itself is a Fly secret — not in code. See BACKLOG "SHIPPED — 2026-06-11" for the ~860-post loss accounting.
 
