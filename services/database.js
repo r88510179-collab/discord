@@ -910,12 +910,34 @@ function getPendingReviews() {
 function approveBet(betId) {
   const info = stmts.approveBet.run(betId);
   if (info.changes === 0) return null;
-  // Ensure state machine can pick up freshly-approved bets. Only touch rows
-  // where grading_state is still the insert-time or migration default.
+  // A freshly-approved bet re-enters the grader queue with a clean slate.
+  // Grading state accrued while the bet sat in needs_review (attempts from
+  // the pre-2026-06-12 era when the grader still claimed review-queue bets,
+  // backoff schedules, even attempts>=20 quarantine) would otherwise keep it
+  // invisible to getPendingBets — 'quarantined' is not in IN ('ready','backoff')
+  // — or insta-void it via the retry-cap (15) / no-data (5) attempt
+  // thresholds. Mirrors revertBetToPending's reset; result/grade untouched.
+  // sweep_exempt_until: a bet older than SWEEP_DAYS=7 (review-queue dwell, or
+  // a recovered bet's backdated created_at) would be 7-day-swept to a FALSE
+  // loss in the first cycle it becomes visible after approval; stamp the same
+  // 3-day grace recoverHold uses, measured from the APPROVAL moment, so the
+  // grader gets real cycles first. Never shortens an existing window — the
+  // only other writer is recovery (+3d), and approval post-dates recovery.
   try {
-    db.prepare(`UPDATE bets SET grading_state = 'ready'
-      WHERE id = ? AND result = 'pending' AND grading_state = 'done'`).run(betId);
-  } catch (_) {}
+    db.prepare(`UPDATE bets SET
+      grading_state = 'ready',
+      grading_attempts = 0,
+      grading_lock_until = NULL,
+      grading_next_attempt_at = NULL,
+      grading_last_failure_reason = NULL,
+      sweep_exempt_until = datetime('now', '+3 days')
+      WHERE id = ? AND result = 'pending'`).run(betId);
+  } catch (e) {
+    // The bet is already confirmed at this point — a swallowed reset failure
+    // would silently revert to the incident behavior (invisible after
+    // Approve / insta-void), so make it loud enough to triage.
+    console.error(`[approveBet] grading-state reset FAILED for ${String(betId).slice(0, 8)}: ${e.message} — bet is confirmed but may keep damaged grading state`);
+  }
   return stmts.getReviewBetWithCapper.get(betId);
 }
 

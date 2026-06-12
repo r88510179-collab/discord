@@ -154,6 +154,93 @@ preserved). BEFORE distribution: 3..35 attempts.
 
 ---
 
+## Worked example — incident-era grading damage on review-queue bets (2026-06-12)
+
+Before the grader-skips-needs_review fix (PR #89), the AutoGrader claimed
+`review_status='needs_review'` bets, accruing `grading_attempts` (and
+`grading_state='quarantined'` at attempts ≥ 20 via `applyBackoff`). Two row
+classes carry that damage; they need **different** handling:
+
+**Class 1 — still `pending` + `needs_review`: DO NOT repair by hand.** Once the
+approveBet clean-slate fix is deployed, these self-heal the moment a human
+clicks Approve (`approveBet` resets `grading_state='ready'`,
+`grading_attempts=0`, clears lock/backoff/failure, and stamps a 3-day
+`sweep_exempt_until` grace). A manual reset would only re-expose them to the
+grader **while still un-reviewed** — recreating the original incident.
+
+**Class 2 — `pending` + `confirmed` + damaged state: judgment required.** Bets
+approved *during* the broken era went through the old `'done'`-only branch, so
+Approve never repaired them — they sit invisible (`quarantined`) or one honest
+attempt from the retry-cap/no-data void thresholds. These **cannot be
+mechanically distinguished** from legitimately-quarantined bets (attempts ≥ 20
+accrued honestly *after* confirmation), so inspect before writing:
+
+```js
+const db = require('/app/node_modules/better-sqlite3')('/data/bettracker.db', { readonly: true });
+console.log(JSON.stringify(db.prepare(`
+  SELECT id, substr(description,1,50) AS d, grading_state, grading_attempts,
+         substr(grading_last_failure_reason,1,60) AS why, created_at
+  FROM bets
+  WHERE result='pending' AND review_status='confirmed'
+    AND (grading_state='quarantined' OR grading_attempts >= 5)
+    AND created_at < '2026-06-12'  -- era bound: post-fix bets accrue attempts HONESTLY and must not pollute this set
+  ORDER BY created_at
+`).all(), null, 2));
+```
+
+Judgment rubric: failure reasons from the broken-search era (`parse_empty`,
+`no_result`, provider errors) on bets that *should* be gradeable → repair;
+attempts accrued honestly on genuinely unsearchable events → leave quarantined
+(or void deliberately). Then reset **explicit ids only**, with a count guard,
+mirroring `approveBet`'s reset — **including the sweep grace stamp**: a > 7-day
+old bet reset to `ready` *without* `sweep_exempt_until` is 7-day-swept to a
+FALSE loss in its first visible cycle (the PR #62 trap).
+
+```js
+const db = require('/app/node_modules/better-sqlite3')('/data/bettracker.db'); // write mode
+const ids = ['<full id 1>', '<full id 2>']; // from the readonly pass — FULL ids, never 8-char prefixes
+const upd = db.prepare(`UPDATE bets SET
+  grading_state='ready', grading_attempts=0, grading_lock_until=NULL,
+  grading_next_attempt_at=NULL, grading_last_failure_reason=NULL,
+  sweep_exempt_until=datetime('now','+3 days')
+  WHERE id = ? AND result='pending' AND review_status='confirmed'`);
+let changed = 0;
+db.transaction(() => { for (const id of ids) changed += upd.run(id).changes; })();
+if (changed !== ids.length) console.error(`WARNING: reset ${changed}/${ids.length} — re-check ids`);
+console.log(`reset ${changed} bet(s) to ready with 3d sweep grace`);
+```
+
+**Class 3 — already FINALIZED while still `needs_review`: the incident's
+visible casualties.** The broken-era writers had no review_status guard, so
+some review-queue bets were terminally graded without ever being confirmed:
+`result='void'` + `review_status` still `'needs_review'` (retry-cap void), or
+`review_status` flipped to `auto_void_unscoped_bet` / swept to a LOSS (which
+auto-confirms as it grades). Inspect with:
+
+```js
+const db = require('/app/node_modules/better-sqlite3')('/data/bettracker.db', { readonly: true });
+console.log(JSON.stringify(db.prepare(`
+  SELECT id, substr(description,1,50) AS d, result, review_status,
+         substr(grade_reason,1,60) AS why, created_at, graded_at
+  FROM bets
+  WHERE created_at < '2026-06-12'
+    AND ((result != 'pending' AND review_status = 'needs_review')
+         OR review_status LIKE 'auto_void%')
+  ORDER BY graded_at
+`).all(), null, 2));
+```
+
+Repair, where the underlying pick is real and judgeable, is **revert + requeue
+via existing tooling** — `/admin revert-by-id` (`revertBetToPending`: result
+back to pending, full grading-state reset) — NOT raw SQL. CAVEAT: neither
+`revertBetToPending` nor raw UPDATEs unwind a swept LOSS's bankroll/snapshot
+impact (`updateBankroll` already ran at sweep time); if the bet had
+`result='loss'` + a capper bankroll, reverse the `profit_units × unit_size`
+delta by hand and re-run `saveDailySnapshot` — voids stamped `profit_units=0`
+need no unwind.
+
+---
+
 ## Case study 1 — wrong column name (aborted, no write)
 
 A nudge script intended to re-ready one bet referenced a column `attempts`. The
