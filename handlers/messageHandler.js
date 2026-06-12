@@ -472,7 +472,11 @@ async function safeReact(message, emoji) {
 
 // ── Shared OCR slip processing pipeline ──────────────────────
 // Used by both the /slip command and the slip feed channel listener.
-// Returns { bets: [...saved], ocrText } or null on failure.
+// Returns { bets: [...saved], drops: [...validator rejections of EXTRACTED
+// bets] }. `drops` lets recoverHold distinguish "a validator killed the parse"
+// (status validator_drop) from "vision extracted nothing" (no_bet_found); every
+// other caller reads only `.bets`. (NOTE: an `ocrText` field was never actually
+// returned despite older callers/comment referencing it — pre-existing.)
 async function processSlipImage(client, imageUrl, capperId, capperName, opts = {}) {
   const { channelId, messageId, sourceUrl, contextHints } = opts;
   const ingestId = opts.ingestId || makeIngestId('discord', messageId || imageUrl || 'slip');
@@ -532,6 +536,11 @@ async function processSlipImage(client, imageUrl, capperId, capperName, opts = {
 
   // ── Stage 4: Save to DB + send to War Room ──
   const saved = [];
+  // Validator rejections of an EXTRACTED bet (vision yielded a bet, a validator
+  // killed it). Surfaced on the return so recoverHold can report the real drop
+  // reason instead of the misleading "no_bet_found" (which means vision found
+  // nothing at all). Distinct from the vision-empty early return above.
+  const drops = [];
   for (const bet of parsed.bets) {
     // Anti-hallucination: validate parsed bet against source content.
     // Slip pipeline inherently has an image → hasMedia:true (brand-exempt).
@@ -542,6 +551,7 @@ async function processSlipImage(client, imageUrl, capperId, capperName, opts = {
         : slipValidation.reason === 'entity_mismatch' ? 'VALIDATOR_ENTITY_MISMATCH'
         : 'BOUNCER_REJECTED';
       recordDrop({ ingestId, sourceType: 'discord', sourceRef, stage: 'DROPPED', dropReason: mappedReason, payload: { validator: slipValidation.reason, issues: slipValidation.issues, description: (bet.description || '').slice(0, 120) } });
+      drops.push({ reason: slipValidation.reason, dropReason: mappedReason, issues: slipValidation.issues || [], description: (bet.description || '').slice(0, 120) });
       continue;
     }
 
@@ -570,7 +580,7 @@ async function processSlipImage(client, imageUrl, capperId, capperName, opts = {
   }
 
   console.log(`[SlipPipeline] Stage 4: Saved ${saved.length} bet(s) to DB.`);
-  return { bets: saved };
+  return { bets: saved, drops };
 }
 
 // ── F-07: slip-feed multi-image selection (pure, exported for unit tests) ──
