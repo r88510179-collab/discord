@@ -473,10 +473,11 @@ async function safeReact(message, emoji) {
 // ── Shared OCR slip processing pipeline ──────────────────────
 // Used by both the /slip command and the slip feed channel listener.
 // Returns { bets: [...saved], drops: [...validator rejections of EXTRACTED
-// bets] }. `drops` lets recoverHold distinguish "a validator killed the parse"
-// (status validator_drop) from "vision extracted nothing" (no_bet_found); every
-// other caller reads only `.bets`. (NOTE: an `ocrText` field was never actually
-// returned despite older callers/comment referencing it — pre-existing.)
+// bets], ocrText }. `drops` lets recoverHold distinguish "a validator killed the
+// parse" (status validator_drop) from "vision extracted nothing" (no_bet_found);
+// every other caller reads only `.bets`. `ocrText` is the raw OCR string the
+// /slip command echoes back — commands/slip.js gates its success path on it, so
+// both return paths (success + vision-empty) carry it.
 async function processSlipImage(client, imageUrl, capperId, capperName, opts = {}) {
   const { channelId, messageId, sourceUrl, contextHints } = opts;
   const ingestId = opts.ingestId || makeIngestId('discord', messageId || imageUrl || 'slip');
@@ -521,7 +522,7 @@ async function processSlipImage(client, imageUrl, capperId, capperName, opts = {
   if (!parsed.bets || parsed.bets.length === 0) {
     console.log('[SlipPipeline] Stage 2: No bets found in image.');
     recordDrop({ ingestId, sourceType: 'discord', sourceRef, stage: 'DROPPED', dropReason: 'VISION_EXTRACTION_FAILED', payload: { where: 'processSlipImage', parseError: parsed.error || null } });
-    return { bets: [] };
+    return { bets: [], ocrText };
   }
   recordStage({ ingestId, sourceType: 'discord', sourceRef, stage: 'PARSED', eventType: 'STAGE_ENTER', payload: { betCount: parsed.bets.length, source: 'vision_slip' } });
 
@@ -580,7 +581,7 @@ async function processSlipImage(client, imageUrl, capperId, capperName, opts = {
   }
 
   console.log(`[SlipPipeline] Stage 4: Saved ${saved.length} bet(s) to DB.`);
-  return { bets: saved, drops };
+  return { bets: saved, drops, ocrText };
 }
 
 // ── F-07: slip-feed multi-image selection (pure, exported for unit tests) ──
