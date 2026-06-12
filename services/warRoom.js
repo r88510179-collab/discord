@@ -363,17 +363,20 @@ async function handleWarRoomInteraction(interaction) {
     if (action === 'war_ladder_approve') {
       await interaction.deferReply({ ephemeral: true });
       const betIds = betId.split(',').filter(Boolean);
-      let approved = 0;
+      // approveBet returns the approved row (with capper fields) or null on
+      // refusal — post ONLY what actually approved, and keep the staging
+      // embed alive when nothing did, so refused steps keep their Approve
+      // surface and are never announced in #slip-feed as new picks.
+      const approvedBets = [];
       for (const id of betIds) {
         const result = approveBet(id);
-        if (result) approved++;
+        if (result) approvedBets.push(result);
       }
-      await interaction.message.delete().catch(() => {});
-      await interaction.editReply({ content: `✅ Approved **${approved}/${betIds.length}** ladder steps.` });
-      // Post each to #slip-feed
-      for (const id of betIds) {
-        const bet = db.prepare('SELECT b.*, c.display_name AS capper_name FROM bets b LEFT JOIN cappers c ON b.capper_id = c.id WHERE b.id = ?').get(id);
-        if (bet) await postNewPick(interaction.client, bet, bet.capper_name);
+      if (approvedBets.length > 0) await interaction.message.delete().catch(() => {});
+      await interaction.editReply({ content: `✅ Approved **${approvedBets.length}/${betIds.length}** ladder steps.` });
+      // Post each approved step to #slip-feed
+      for (const bet of approvedBets) {
+        await postNewPick(interaction.client, bet, bet.capper_name);
       }
       return true;
     }
@@ -395,7 +398,7 @@ async function handleWarRoomInteraction(interaction) {
       try {
         const bet = approveBet(betId);
         if (!bet) {
-          return interaction.editReply({ content: 'Bet not found or already confirmed.' });
+          return interaction.editReply({ content: 'Bet not found, already confirmed, or no longer pending. If it was auto-voided/swept, run `/admin revert-by-id` first, then Approve.' });
         }
 
         // Forward to #slip-feed

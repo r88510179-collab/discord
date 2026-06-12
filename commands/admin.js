@@ -230,16 +230,17 @@ module.exports = {
       txn();
 
       const summary = suspect.map(b => `• \`${b.id.slice(0, 8)}\` ${b.result.toUpperCase()} → PENDING: ${b.description?.slice(0, 50)}`).join('\n');
+      const parkedNote = `\n⚠️ All ${suspect.length} parked in the review queue — each needs Edit + Approve to re-enter grading.`;
 
       // DM owner
       if (ownerId && interaction.client) {
         try {
           const owner = await interaction.client.users.fetch(ownerId);
-          await owner.send(`🔄 **Reverted ${suspect.length} hallucinated grade(s):**\n${summary}`);
+          await owner.send(`🔄 **Reverted ${suspect.length} hallucinated grade(s):**\n${summary}${parkedNote}`);
         } catch (_) {}
       }
 
-      return interaction.editReply(`🔄 Reverted **${suspect.length}** suspect grade(s):\n${summary.slice(0, 1900)}`);
+      return interaction.editReply(`🔄 Reverted **${suspect.length}** suspect grade(s):\n${summary.slice(0, 1800)}${parkedNote}`);
     }
 
     if (sub === 'clean-dashboard') {
@@ -350,9 +351,10 @@ module.exports = {
       const { db } = require('../services/database');
       const bet = db.prepare('SELECT id, description, result FROM bets WHERE id LIKE ?').get(`${partialId}%`);
       if (!bet) return interaction.reply({ content: `❌ No bet found matching \`${partialId}\``, ephemeral: true });
-      // Resets state machine fields too — bet becomes eligible for next grade cycle.
+      // Resets state machine fields and parks the bet in the review queue —
+      // it re-enters grading only after a human Edits + Approves it.
       revertBetToPending(bet.id, 'REVERTED manually via /admin revert-by-id');
-      return interaction.reply({ content: `🔄 Reverted \`${bet.id.slice(0, 8)}\` (was ${bet.result}) → PENDING (state=ready, attempts=0)\n${bet.description?.slice(0, 80)}`, ephemeral: true });
+      return interaction.reply({ content: `🔄 Reverted \`${bet.id.slice(0, 8)}\` (was ${bet.result}) → PENDING, parked in review queue (Edit + Approve in War Room to re-enter grading)\n${bet.description?.slice(0, 80)}`, ephemeral: true });
     }
 
     // ── Toggle Twitter poller ──
