@@ -22,6 +22,17 @@
 // colliding nickname failed forever. Fix: when the declared set contains
 // NO modeled league (declaresOnlyUnmodeledLeagues, mirroring #85's
 // derivation), leg-team matching is skipped — war-room review is the gate.
+//
+// Repro 4: 2026-06-12 · pipeline_events 71398 · GNP "USA / Paraguay both
+// teams to score NO 5u" (declared sport "Unknown") was DROPPED VALIDATOR_
+// SPORT_MISMATCH: 'Leg references team(s) "both teams to score" which exist
+// in SOCCER but not in declared parlay sport Unknown'. The market phrase
+// "both teams to score" lives in SPORT_TEAM_MAP's SOCCER list (a sport
+// signal) and was wrongly treated as a soccer TEAM. Fired 5× on 06-12, 1×
+// on 06-11. Two fixes: (1) market/wager phrases are never treated as teams
+// for the contradiction check (MARKET_PHRASE_EXCLUSIONS); (2) an Unknown/
+// placeholder declaration ADOPTS a single-sport signal (isSportPlaceholder)
+// instead of dropping — there is no declared sport for a leg to contradict.
 // ═══════════════════════════════════════════════════════════
 
 const assert = require('assert');
@@ -378,23 +389,110 @@ run('"Baseball" + marlins → still FIRES (modeled-generic name, #85-consistent;
   assert.match(r.reason, /marlins/i);
 });
 
-// Placeholders carry NO league signal — never treated as confidently-unmodeled.
-run('placeholder "Unknown" + lakers → still FIRES (no-signal labels keep validating)', () => {
+// Placeholder declarations ("Unknown", "N/A", null, empty) carry NO declared
+// sport, so there is nothing for a leg's team to CONTRADICT — the wrong-sport
+// DROP path is structurally inapplicable. When the leg's signal resolves to
+// exactly one sport, that sport is ADOPTED (returned as adoptedSport) and the
+// leg passes. SUPERSEDES the prior "placeholders still FIRE" assertions: those
+// predated the Unknown→adopt fix (Repro 4). A genuine cross-sport contradiction
+// still requires a REAL declared sport — see lakers+MLB / rangers+NBA /
+// marlins+NBA fires above, all unchanged.
+run('placeholder "Unknown" + lakers → PASS + adopt NBA (was: FIRES; superseded by Unknown→adopt)', () => {
   const r = validateLegSportConsistency({ description: 'Los Angeles Lakers ML' }, 'Unknown');
-  assert.strictEqual(r.valid, false);
-  assert.match(r.reason, /lakers/i);
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
+  assert.strictEqual(r.adoptedSport, 'NBA');
 });
 
-run('placeholder "N/A" + lakers → still FIRES (whole-label check beats the "/" split)', () => {
+run('placeholder "N/A" + lakers → PASS + adopt NBA (whole-label placeholder, not the "/" split)', () => {
   const r = validateLegSportConsistency({ description: 'Los Angeles Lakers ML' }, 'N/A');
-  assert.strictEqual(r.valid, false);
-  assert.match(r.reason, /lakers/i);
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
+  assert.strictEqual(r.adoptedSport, 'NBA');
 });
 
-run('empty declared sport + lakers → still FIRES (no signal ≠ unmodeled)', () => {
+run('empty declared sport + lakers → PASS + adopt NBA (no declared sport to contradict)', () => {
   const r = validateLegSportConsistency({ description: 'Los Angeles Lakers ML' }, '');
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
+  assert.strictEqual(r.adoptedSport, 'NBA');
+});
+
+// ═══════════════════════════════════════════════════════════
+// Market-phrase exclusion + Unknown-sport adoption (Repro 4, GNP).
+// (1) A market/wager phrase ("both teams to score", "btts", "corners", …) is
+//     never treated as a TEAM for the cross-sport contradiction check.
+// (2) An Unknown/placeholder declaration ADOPTS a single-sport signal instead
+//     of dropping it. Behavior-change tests below FAIL on the pre-fix code at
+//     the marked assertion; the no-weakening guard is unchanged by design.
+// ═══════════════════════════════════════════════════════════
+console.log('\nMarket-phrase exclusion + Unknown-sport adoption (Repro 4):');
+
+// ── (1) The exact dropped GNP leg, direct — adopt Soccer, retain the leg.
+//        Pre-fix: DROPS ('both teams to score' → SOCCER ∉ {Unknown}). ──
+run('GNP regression: "USA / Paraguay both teams to score NO" + Unknown → PASS + adopt Soccer', () => {
+  const r = validateLegSportConsistency({ description: 'USA / Paraguay both teams to score NO' }, 'Unknown');
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`); // FAILS pre-fix
+  assert.strictEqual(r.adoptedSport, 'Soccer', 'soccer market phrase adopts Soccer under Unknown');
+});
+
+// ── End-to-end through validateParsedBet: pick.sport is rewritten to Soccer. ──
+run('GNP regression (end-to-end): Unknown parlay with a BTTS leg → valid + pick.sport adopted Soccer', () => {
+  const pick = {
+    sport: 'Unknown',
+    bet_type: 'parlay',
+    description: 'USA / Paraguay both teams to score NO 5u',
+    legs: [{ description: 'USA / Paraguay both teams to score NO' }],
+  };
+  const r = validateParsedBet(pick, '', { hasMedia: false });
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason} | ${JSON.stringify(r.issues)}`); // FAILS pre-fix
+  assert.strictEqual(pick.sport, 'Soccer', 'parlay sport adopted from the soccer market phrase');
+});
+
+// ── (2) A bare market phrase is NEVER a team — even under a mismatching declared
+//        sport. Both phrases live in SPORT_TEAM_MAP, so pre-fix DROPS them. ──
+run('bare market phrase "both teams to score" + NBA → PASS (market phrase ≠ soccer team)', () => {
+  const r = validateLegSportConsistency({ description: 'both teams to score' }, 'NBA');
+  assert.strictEqual(r.valid, true, `market phrase must not be treated as a team, got: ${r.reason}`); // FAILS pre-fix
+});
+
+run('bare market phrase "corners over 9.5" + NBA → PASS (no team match)', () => {
+  const r = validateLegSportConsistency({ description: 'corners over 9.5' }, 'NBA');
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`); // FAILS pre-fix
+});
+
+// ── (3) No weakening. The simple real-team contradiction guard already exists
+//        above ("lakers + MLB → fire"); here we prove the reject still fires
+//        AND that the reason names only the REAL team's sport, never a
+//        co-occurring market phrase. Pre-fix names {NBA,SOCCER} → fails the
+//        doesNotMatch assertion. ──
+run('contradiction excludes market phrases: "Lakers both teams to score" + MLB → DROPS naming NBA, not SOCCER', () => {
+  const r = validateLegSportConsistency({ description: 'Los Angeles Lakers both teams to score' }, 'MLB');
   assert.strictEqual(r.valid, false);
   assert.match(r.reason, /lakers/i);
+  assert.match(r.reason, /NBA/);
+  assert.doesNotMatch(r.reason, /SOCCER|both teams to score/i, 'market phrase must not appear as a contradicting team'); // FAILS pre-fix
+});
+
+// ── (4) Adoption is sport-agnostic — a non-soccer single signal adopts too.
+//        Pre-fix: DROPS ('yankees' → MLB ∉ {Unknown}). ──
+run('non-soccer adoption: "New York Yankees -1.5" + Unknown → PASS + adopt MLB', () => {
+  const r = validateLegSportConsistency({ description: 'New York Yankees -1.5' }, 'Unknown');
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`); // FAILS pre-fix
+  assert.strictEqual(r.adoptedSport, 'MLB');
+});
+
+// ── Ambiguity guard — a shared nickname spanning 2 sports under Unknown does
+//    NOT adopt (and still does not drop). Pre-fix DROPS it. ──
+run('ambiguous "Rangers ML" + Unknown → PASS, no adoption (MLB+NHL — not exactly one sport)', () => {
+  const r = validateLegSportConsistency({ description: 'Rangers ML' }, 'Unknown');
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`); // FAILS pre-fix
+  assert.strictEqual(r.adoptedSport, undefined, 'ambiguous signal must not adopt a sport');
+});
+
+// ── Conservative gate — a leg with NO team/market signal under Unknown passes
+//    untouched (no sport stamped). Already passed pre-fix; guards the gate. ──
+run('signal-less player prop "Mookie Betts over 1.5 hits" + Unknown → PASS, no adoption', () => {
+  const r = validateLegSportConsistency({ description: 'Mookie Betts over 1.5 hits' }, 'Unknown');
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
+  assert.strictEqual(r.adoptedSport, undefined, 'no signal must not adopt a sport');
 });
 
 // ═══════════════════════════════════════════════════════════

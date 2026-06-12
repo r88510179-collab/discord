@@ -3,7 +3,7 @@
 // Provider order (getProviders() iterates PROVIDERS object order): Gemini → Groq → OpenRouter → Cerebras → Mistral → Ollama
 // ═══════════════════════════════════════════════════════════
 
-const { normalizeDescription, normalizePlayer, declaresOnlyUnmodeledLeagues } = require('./normalization');
+const { normalizeDescription, normalizePlayer, declaresOnlyUnmodeledLeagues, isSportPlaceholder } = require('./normalization');
 const sharp = require('sharp');
 const crypto = require('crypto');
 const { recordDrop } = require('./pipeline-events');
@@ -1580,6 +1580,50 @@ const SPORT_TEAM_MAP = {
   'MMA': ['wins by ko','wins by tko','wins by submission','wins by decision','fight goes the distance','round over','round under','ufc'],
 };
 
+// Market / wager-type phrases that are NOT teams. Some of these also live inside
+// SPORT_TEAM_MAP (e.g. SOCCER's "both teams to score", "btts", "corners", "clean
+// sheet") because they are useful *sport* signals for inferLegSport /
+// reclassifySport — a "both teams to score" leg is almost certainly soccer. But
+// the cross-sport contradiction check in validateLegSportConsistency must NEVER
+// treat a market phrase as a TEAM: a leg like "USA / Paraguay both teams to
+// score NO" has no real team token, so matching the market phrase as a "soccer
+// team" and then DROPPING the leg because the declared parlay sport is "Unknown"
+// is a false positive (live drop 2026-06-12, pipeline_events 71398, GNP —
+// fired 5× on 06-12, 1× on 06-11).
+//
+// isMarketPhrase is checked against a *matched SPORT_TEAM_MAP keyword*, so only
+// entries that ALSO appear in SPORT_TEAM_MAP are load-bearing today — those are
+// the SOCCER prop phrases (the live-drop class). The remaining generic wager
+// types ("moneyline"/"spread"/"over"/… ) are NOT in SPORT_TEAM_MAP, so they
+// never produce a team match and are currently INERT — kept as the spec's
+// required vocabulary and as a guard if any are later added to SPORT_TEAM_MAP.
+// (TENNIS/GOLF/MMA prop phrases in SPORT_TEAM_MAP are intentionally left as
+// sport signals — out of this fix's soccer scope; see PR "known limitations".)
+const MARKET_PHRASE_EXCLUSIONS = new Set([
+  // ── load-bearing: also in SPORT_TEAM_MAP's SOCCER list (markets, not clubs) ──
+  'both teams to score', 'btts', 'corners', 'clean sheet',
+  'goalie saves', 'goal scorer', 'anytime scorer', 'yellow cards',
+  // ── spec-required market vocabulary; inert today (not in SPORT_TEAM_MAP), kept
+  //    for completeness + forward-compatibility ──
+  'moneyline', 'spread', 'total', 'over', 'under',
+  'double chance', 'total goals', 'draw no bet', 'tie no bet',
+  'anytime goalscorer', '1st half', 'cards',
+]);
+
+function isMarketPhrase(token) {
+  return MARKET_PHRASE_EXCLUSIONS.has(String(token == null ? '' : token).toLowerCase());
+}
+
+// SPORT_TEAM_MAP keys are upper-cased ('SOCCER'); detectSport and the rest of
+// the pipeline use the canonical mixed-case label ('Soccer'). Map an adopted
+// sport to that canonical form so an Unknown→adopted bet stores the same sport
+// string a directly-detected one would. NBA/NFL/MLB/NHL are identical in both;
+// the `|| key` fallback keeps adoption safe if a new SPORT_TEAM_MAP key is added.
+const SPORT_TEAM_MAP_CANONICAL = {
+  MLB: 'MLB', NBA: 'NBA', NFL: 'NFL', NHL: 'NHL',
+  SOCCER: 'Soccer', TENNIS: 'Tennis', GOLF: 'Golf', MMA: 'MMA',
+};
+
 // Action / prop keywords that uniquely identify a sport when no team name
 // is present in the leg description. Lowercase, substring-matched. Keep
 // this list conservative: keywords here must NOT appear in other sports.
@@ -1914,6 +1958,7 @@ function validateParsedBet(pick, sourceText, opts = {}) {
 
   // Bug A: Wrong-sport team contamination in parlay legs
   if (pick.legs && pick.legs.length > 0 && pick.sport) {
+    const adoptedSports = new Set();
     for (const leg of pick.legs) {
       const legCheck = validateLegSportConsistency(leg, pick.sport);
       if (!legCheck.valid) {
@@ -1921,6 +1966,16 @@ function validateParsedBet(pick, sourceText, opts = {}) {
         maybeDrop('leg_sport_mismatch', 'VALIDATOR_SPORT_MISMATCH', { leg: leg?.description?.slice(0, 80) });
         return { valid: false, issues, reason: 'leg_sport_mismatch' };
       }
+      if (legCheck.adoptedSport) adoptedSports.add(legCheck.adoptedSport);
+    }
+    // Unknown-sport adoption: a placeholder declaration ("Unknown"/"N/A"/…) whose
+    // legs unanimously signal ONE sport adopts it, so the bet grades under the
+    // right sport instead of as Unknown (and is no longer dropped as a wrong-sport
+    // mismatch). In-place reassignment mirrors the twitter path's reclassifySport
+    // (services/twitter-handler.js:246); the value flows to storage via
+    // createBetWithLegs({ sport: bet.sport }). Mixed/empty signals leave it as-is.
+    if (isSportPlaceholder(pick.sport) && adoptedSports.size === 1) {
+      pick.sport = [...adoptedSports][0];
     }
   }
 
@@ -1986,22 +2041,57 @@ function validateLegSportConsistency(leg, parlaySport) {
   // for COMPOUND declarations mixing KBO with a modeled league, e.g. "MLB/KBO" —
   // a pure-KBO declaration already passed.)
   if (declaredSet.has('KBO') && matchesKboTeam(desc)) return { valid: true };
-  const matchedSports = new Map(); // sport → first keyword that matched
+  // Scan SPORT_TEAM_MAP, but separate REAL-TEAM hits from MARKET-PHRASE hits. A
+  // market phrase ("both teams to score", "btts", …) is only a soft *sport*
+  // signal: it may ADOPT a sport under an Unknown declaration, but it must never
+  // fire a wrong-sport DROP. `teamMatches` drives the contradiction check;
+  // `signalMatches` (teams ∪ market phrases) drives sport adoption. A sport keeps
+  // scanning past a market-phrase hit so a real team behind it still registers
+  // (e.g. "Inter Miami both teams to score" → SOCCER team, not just a signal).
+  const teamMatches = new Map();   // sport → first real-team keyword
+  const signalMatches = new Map(); // sport → first keyword of any kind
   for (const [sport, keywords] of Object.entries(SPORT_TEAM_MAP)) {
     for (const keyword of keywords) {
-      if (desc.includes(keyword)) {
-        matchedSports.set(sport, keyword);
-        break;
-      }
+      if (!desc.includes(keyword)) continue;
+      if (!signalMatches.has(sport)) signalMatches.set(sport, keyword);
+      if (!isMarketPhrase(keyword)) { teamMatches.set(sport, keyword); break; }
     }
   }
-  if (matchedSports.size === 0) return { valid: true };
-  // Pass when the leg's sport is in the declared set (intersection non-empty).
-  for (const sport of matchedSports.keys()) {
+
+  // Unknown / placeholder declaration ("Unknown", "N/A", null, …): there is no
+  // declared sport for a leg to contradict, so this branch NEVER drops. It ADOPTS
+  // a sport (returned up to validateParsedBet, which writes it onto the bet) only
+  // on a CONFIDENT single-sport signal — and otherwise passes WITHOUT adopting,
+  // so a weak/coincidental match never stamps a confidently-wrong sport:
+  //   • exactly one REAL TEAM  → adopt that sport (a club name is strong), or
+  //   • no real team but exactly one CURATED market-phrase sport → adopt it
+  //     (the GNP fix: "both teams to score" + Unknown → adopt Soccer).
+  // Anything ambiguous (a shared nickname spanning 2 sports) or signal-less
+  // passes untouched (sport stays the placeholder).
+  if (isSportPlaceholder(parlaySport)) {
+    if (teamMatches.size === 1) {
+      const key = [...teamMatches.keys()][0];
+      return { valid: true, adoptedSport: SPORT_TEAM_MAP_CANONICAL[key] || key };
+    }
+    if (teamMatches.size === 0 && signalMatches.size === 1) {
+      const [key, keyword] = [...signalMatches.entries()][0];
+      if (isMarketPhrase(keyword)) {
+        return { valid: true, adoptedSport: SPORT_TEAM_MAP_CANONICAL[key] || key };
+      }
+    }
+    return { valid: true };
+  }
+
+  // Known declared sport: only a REAL TEAM from a non-declared sport is a genuine
+  // cross-sport contradiction. Market-phrase-only hits never drop (downgraded
+  // above). Pass when a real team confirms the declared set (intersection
+  // non-empty); otherwise it is the preserved wrong-sport reject.
+  if (teamMatches.size === 0) return { valid: true };
+  for (const sport of teamMatches.keys()) {
     if (declaredSet.has(sport)) return { valid: true };
   }
-  const sports = [...matchedSports.keys()];
-  const teams = [...matchedSports.values()];
+  const sports = [...teamMatches.keys()];
+  const teams = [...teamMatches.values()];
   const sportsStr = sports.length === 1 ? sports[0] : `{${sports.join(',')}}`;
   const teamsStr = teams.length === 1 ? `"${teams[0]}"` : `{${teams.map(t => `"${t}"`).join(',')}}`;
   console.log(`[Parser] WRONG-SPORT LEG REJECTED: parlay sport=${parlaySport}, leg="${desc.slice(0, 80)}", matched=${sportsStr}`);
