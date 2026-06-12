@@ -222,7 +222,22 @@ const stmts = {
   deleteBet: db.prepare('DELETE FROM bets WHERE id = ?'),
 
   // Review queue management
-  approveBet: db.prepare("UPDATE bets SET review_status = 'confirmed' WHERE id = ? AND review_status = 'needs_review'"),
+  // Atomic approve: confirm + clean-slate grading reset + 3-day sweep grace
+  // in ONE gated UPDATE, so approval can never half-apply. The result =
+  // 'pending' gate lives here (not in a second statement): incident
+  // 2026-06-12, bet 453e0952 — a retry-cap-voided bet (result='void',
+  // review_status still 'needs_review') was confirmed while the separate
+  // result-gated reset matched 0 rows and was silently swallowed, so the war
+  // room reported success on a bet the grader could never pick up.
+  approveBet: db.prepare(`UPDATE bets SET
+    review_status = 'confirmed',
+    grading_state = 'ready',
+    grading_attempts = 0,
+    grading_lock_until = NULL,
+    grading_next_attempt_at = NULL,
+    grading_last_failure_reason = NULL,
+    sweep_exempt_until = datetime('now', '+3 days')
+    WHERE id = ? AND review_status = 'needs_review' AND result = 'pending'`),
   rejectBet:  db.prepare("DELETE FROM bets WHERE id = ? AND review_status = 'needs_review'"),
   updateBetFields: db.prepare("UPDATE bets SET description = ?, odds = ? WHERE id = ?"),
   getReviewBetWithCapper: db.prepare(`SELECT b.*, c.display_name AS capper_name, c.discord_id AS capper_discord_id
@@ -665,11 +680,19 @@ function getAllPendingBets() {
 // P0 admin helper: revert a finalized bet back to pending AND reset all
 // state-machine fields. Used by /admin revert-today and revert-by-id.
 // revert-hallucinations uses gradeBetRecord(..., 'void', ...) via the gateway.
+// review_status = 'needs_review': a revert parks the bet in the protected
+// human queue (replacing any terminal auto_void_* label) instead of handing
+// it straight back to the grader. Without this, a reverted unscoped bet kept
+// its auto_void_unscoped_bet label — getPendingBets only shields
+// 'needs_review' — and the grader re-voided it before a human could Edit the
+// sport (incident 2026-06-12, bet 45cef7b2). Approve re-arms grading and
+// stamps the sweeper grace window.
 function revertBetToPending(betId, reason = 'reverted') {
   const info = db.prepare(`
     UPDATE bets SET
       result = 'pending', profit_units = NULL, graded_at = NULL, grade = NULL,
       grade_reason = ?,
+      review_status = 'needs_review',
       grading_state = 'ready',
       grading_attempts = 0,
       grading_lock_until = NULL,
@@ -908,36 +931,23 @@ function getPendingReviews() {
 }
 
 function approveBet(betId) {
+  // stmts.approveBet is a single atomic UPDATE: confirm + clean-slate grading
+  // reset + sweep grace, gated on review_status='needs_review' AND
+  // result='pending'. A freshly-approved bet re-enters the grader with state
+  // accrued in the review queue wiped (quarantine, backoff, attempts that
+  // would trip the retry-cap-15 / no-data-5 thresholds) and a 3-day
+  // sweep_exempt_until window measured from the APPROVAL moment, so
+  // review-queue dwell or a recovered bet's backdated created_at can't
+  // 7-day-sweep it to a false loss in its first visible cycle. The grace
+  // never shortens an existing window — the only other writer is recovery
+  // (+3d), and approval post-dates recovery.
+  // If the gate doesn't match — bet missing, already confirmed, or result no
+  // longer 'pending' (e.g. a retry-cap void that kept review_status=
+  // 'needs_review') — this is a REFUSAL: null, zero writes. Reporting success
+  // while the reset silently no-opped is how incident 2026-06-12 bet
+  // 453e0952 vanished. For terminal rows, /admin revert-by-id first.
   const info = stmts.approveBet.run(betId);
   if (info.changes === 0) return null;
-  // A freshly-approved bet re-enters the grader queue with a clean slate.
-  // Grading state accrued while the bet sat in needs_review (attempts from
-  // the pre-2026-06-12 era when the grader still claimed review-queue bets,
-  // backoff schedules, even attempts>=20 quarantine) would otherwise keep it
-  // invisible to getPendingBets — 'quarantined' is not in IN ('ready','backoff')
-  // — or insta-void it via the retry-cap (15) / no-data (5) attempt
-  // thresholds. Mirrors revertBetToPending's reset; result/grade untouched.
-  // sweep_exempt_until: a bet older than SWEEP_DAYS=7 (review-queue dwell, or
-  // a recovered bet's backdated created_at) would be 7-day-swept to a FALSE
-  // loss in the first cycle it becomes visible after approval; stamp the same
-  // 3-day grace recoverHold uses, measured from the APPROVAL moment, so the
-  // grader gets real cycles first. Never shortens an existing window — the
-  // only other writer is recovery (+3d), and approval post-dates recovery.
-  try {
-    db.prepare(`UPDATE bets SET
-      grading_state = 'ready',
-      grading_attempts = 0,
-      grading_lock_until = NULL,
-      grading_next_attempt_at = NULL,
-      grading_last_failure_reason = NULL,
-      sweep_exempt_until = datetime('now', '+3 days')
-      WHERE id = ? AND result = 'pending'`).run(betId);
-  } catch (e) {
-    // The bet is already confirmed at this point — a swallowed reset failure
-    // would silently revert to the incident behavior (invisible after
-    // Approve / insta-void), so make it loud enough to triage.
-    console.error(`[approveBet] grading-state reset FAILED for ${String(betId).slice(0, 8)}: ${e.message} — bet is confirmed but may keep damaged grading state`);
-  }
   return stmts.getReviewBetWithCapper.get(betId);
 }
 
