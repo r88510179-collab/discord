@@ -230,14 +230,70 @@ console.log(JSON.stringify(db.prepare(`
 `).all(), null, 2));
 ```
 
-Repair, where the underlying pick is real and judgeable, is **revert + requeue
-via existing tooling** — `/admin revert-by-id` (`revertBetToPending`: result
-back to pending, full grading-state reset) — NOT raw SQL. CAVEAT: neither
-`revertBetToPending` nor raw UPDATEs unwind a swept LOSS's bankroll/snapshot
-impact (`updateBankroll` already ran at sweep time); if the bet had
-`result='loss'` + a capper bankroll, reverse the `profit_units × unit_size`
-delta by hand and re-run `saveDailySnapshot` — voids stamped `profit_units=0`
-need no unwind.
+Repair, where the underlying pick is real and judgeable, is **revert via
+existing tooling** — `/admin revert-by-id` (`revertBetToPending`: result back
+to pending, full grading-state reset, **and `review_status='needs_review'`** —
+replacing any terminal `auto_void_*` label) — NOT raw SQL. The revert does
+**not** requeue the bet to the grader: it parks it in the protected review
+queue (a Class-3 bet becomes a Class-1 bet). Fix the underlying problem
+first, then **Approve** — approval applies the clean-slate reset + 3-day
+sweep grace and re-arms grading. Edit exists ONLY on the War Room staging
+card (`/review` can only Approve/Reject — no Edit); if the card is gone
+(deleted at original approval, or the bet predates staging), fix the
+offending column (e.g. `sport`) via guarded explicit-id SQL **before**
+approving, or Approve just re-arms the same auto-void. To Approve a parked
+bet with no clickable surface — `/review` shows only the 25 newest
+needs_review rows, and a reverted swept loss is ≥7 days old by construction,
+buried below a week of newer arrivals — use **`/admin approve-by-id
+<bet_id>`** (explicit-id, OWNER-gated, atomic approveBet; refuses non-pending
+bets with revert-first guidance; does NOT post to #slip-feed). Also note:
+`/review`'s **Reject All
+hard-DELETEs every listed needs_review row — including a parked revert
+mid-repair** (`rejectBet` is a DELETE gated only on
+`review_status='needs_review'`). Don't flush vision junk while an incident
+repair is parked. Two traps this flow closes (incident 2026-06-12):
+
+- Reverting and expecting auto-regrade re-creates the incident: the
+  pre-hardening revert left `auto_void_unscoped_bet` in place, and since
+  `getPendingBets` shields only `'needs_review'`, the grader re-claimed the
+  bet and re-voided it before a human could Edit the sport (bet `45cef7b2`).
+- **Approve refuses non-pending bets.** `approveBet` is one atomic UPDATE
+  gated on `review_status='needs_review' AND result='pending'`; on a gate
+  mismatch it returns null and writes nothing. Clicking Approve directly on a
+  Class-3 row (`result='void'` + `needs_review`) is therefore a no-op — the
+  old code confirmed the bet while silently skipping the grading reset, which
+  is how the war room reported success on bet `453e0952` that the grader
+  could never pick up. Revert first, then Approve.
+
+CAVEAT: neither `revertBetToPending` nor raw UPDATEs unwind a swept LOSS's
+bankroll/snapshot impact (`updateBankroll` already ran at sweep time); if the
+bet had `result='loss'` + a capper bankroll, reverse the
+`profit_units × unit_size` delta by hand and re-run `saveDailySnapshot` —
+voids stamped `profit_units=0` need no unwind.
+
+### Stats visibility of the 2026-06-12 incident bets (one-shot, NOT executed)
+
+Capper stats and the leaderboard/scoreboard count by `result` alone —
+`SETTLED_BET` (`services/database.js`) is `result IN ('win','loss','push') AND
+profit_units IS NOT NULL`, no `review_status` filter — so the incident bets
+count there as soon as they grade, whatever their label. But the
+**confirmed-only surfaces** (`dashboardSummary` → `/dashboard`,
+`capperGradedBets`/`capperRecentResults`/`capperSportBreakdown` → `/capper`
+analytics) filter `review_status='confirmed'`. Bets repaired through the full
+revert → Edit → Approve flow end at `'confirmed'` automatically and need
+nothing. ONLY if one of today's two incident bets somehow settles while still
+labeled `auto_void_*`/`needs_review`, relabel those explicit ids after they
+grade:
+
+```js
+const db = require('/app/node_modules/better-sqlite3')('/data/bettracker.db'); // write mode
+const ids = ['45cef7b2bc996aeb3359394cba94b2c1', '453e09526e70cacbcdbef06927d27ba7']; // FULL ids
+const upd = db.prepare(`UPDATE bets SET review_status='confirmed'
+  WHERE id = ? AND result IN ('win','loss','push') AND review_status != 'confirmed'`);
+let changed = 0;
+db.transaction(() => { for (const id of ids) changed += upd.run(id).changes; })();
+console.log(`relabeled ${changed}/${ids.length} (0 is fine — means they confirmed via Approve or haven't settled)`);
+```
 
 ---
 

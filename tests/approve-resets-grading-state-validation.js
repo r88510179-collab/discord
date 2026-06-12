@@ -131,13 +131,17 @@ function run() {
   // ── TEST 4: finalized bets are not resurrected ────────────────────────────
   const voidBet = makeNeedsReviewBet('Already voided pick');
   database.db.prepare("UPDATE bets SET result = 'void', grading_state = 'done' WHERE id = ?").run(voidBet.id);
-  database.approveBet(voidBet.id);
+  const voidApproved = database.approveBet(voidBet.id);
+  assert.strictEqual(voidApproved, null,
+    'approveBet must REFUSE (null) a bet whose result is no longer pending — a success here is the 453e0952 false-success');
   row = gradingRow(voidBet.id);
+  assert.strictEqual(row.review_status, 'needs_review',
+    'refused bet must keep needs_review — no confirm without the clean-slate reset');
   assert.strictEqual(row.result, 'void', 'result must stay void');
   assert.strictEqual(row.grading_state, 'done', 'grading_state must stay done for finalized bets');
   assert.strictEqual(row.sweep_exempt_until, null, 'no grace stamp on finalized bets');
   assert.ok(!selectedIds().has(voidBet.id), 'finalized bet must not re-enter the grader queue');
-  console.log('  ✓ approveBet on a finalized bet does not resurrect it (result=pending guard)');
+  console.log('  ✓ approveBet on a finalized bet refuses (null) and writes nothing (atomic result=pending gate)');
 
   // ── TEST 5: normal fresh-bet path unchanged ──────────────────────────────
   const freshBet = makeNeedsReviewBet('Fresh normal pick');

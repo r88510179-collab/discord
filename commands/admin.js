@@ -1,5 +1,5 @@
 const { SlashCommandBuilder, PermissionFlagsBits, ActionRowBuilder, ButtonBuilder, ButtonStyle, AttachmentBuilder } = require('discord.js');
-const { getSetting, setSetting, purgeTable, revertBetToPending } = require('../services/database');
+const { getSetting, setSetting, purgeTable, revertBetToPending, approveBet } = require('../services/database');
 const { recordStage } = require('../services/pipeline-events');
 const { renderTraceByIngestId, renderTraceByBet, renderPipelineDrops } = require('../services/pipelineRender');
 
@@ -86,6 +86,10 @@ module.exports = {
     .addSubcommand(sub =>
       sub.setName('revert-by-id')
         .setDescription('Revert a single bet grade by ID')
+        .addStringOption(opt => opt.setName('bet_id').setDescription('Bet ID (first 8 chars ok)').setRequired(true)))
+    .addSubcommand(sub =>
+      sub.setName('approve-by-id')
+        .setDescription("Approve a review-queue bet by ID (reaches bets buried below /review's top-25)")
         .addStringOption(opt => opt.setName('bet_id').setDescription('Bet ID (first 8 chars ok)').setRequired(true)))
     .addSubcommand(sub =>
       sub.setName('pause-twitter')
@@ -230,16 +234,17 @@ module.exports = {
       txn();
 
       const summary = suspect.map(b => `• \`${b.id.slice(0, 8)}\` ${b.result.toUpperCase()} → PENDING: ${b.description?.slice(0, 50)}`).join('\n');
+      const parkedNote = `\n⚠️ All ${suspect.length} parked in the review queue — each needs Edit + Approve to re-enter grading.`;
 
       // DM owner
       if (ownerId && interaction.client) {
         try {
           const owner = await interaction.client.users.fetch(ownerId);
-          await owner.send(`🔄 **Reverted ${suspect.length} hallucinated grade(s):**\n${summary}`);
+          await owner.send(`🔄 **Reverted ${suspect.length} hallucinated grade(s):**\n${summary}${parkedNote}`);
         } catch (_) {}
       }
 
-      return interaction.editReply(`🔄 Reverted **${suspect.length}** suspect grade(s):\n${summary.slice(0, 1900)}`);
+      return interaction.editReply(`🔄 Reverted **${suspect.length}** suspect grade(s):\n${summary.slice(0, 1800)}${parkedNote}`);
     }
 
     if (sub === 'clean-dashboard') {
@@ -350,9 +355,30 @@ module.exports = {
       const { db } = require('../services/database');
       const bet = db.prepare('SELECT id, description, result FROM bets WHERE id LIKE ?').get(`${partialId}%`);
       if (!bet) return interaction.reply({ content: `❌ No bet found matching \`${partialId}\``, ephemeral: true });
-      // Resets state machine fields too — bet becomes eligible for next grade cycle.
+      // Resets state machine fields and parks the bet in the review queue —
+      // it re-enters grading only after a human Edits + Approves it.
       revertBetToPending(bet.id, 'REVERTED manually via /admin revert-by-id');
-      return interaction.reply({ content: `🔄 Reverted \`${bet.id.slice(0, 8)}\` (was ${bet.result}) → PENDING (state=ready, attempts=0)\n${bet.description?.slice(0, 80)}`, ephemeral: true });
+      return interaction.reply({ content: `🔄 Reverted \`${bet.id.slice(0, 8)}\` (was ${bet.result}) → PENDING, parked in review queue (Edit + Approve in War Room to re-enter grading)\n${bet.description?.slice(0, 80)}`, ephemeral: true });
+    }
+
+    // ── Approve single bet by ID ──
+    // The /review queue surfaces only the 25 newest needs_review rows and the
+    // war-room staging card may be long deleted, so a parked bet older than
+    // the top-25 (e.g. a reverted 7-day-swept loss, >=7d old by construction)
+    // has no clickable Approve. This is the explicit-id escape hatch; it does
+    // NOT post to #slip-feed (repairs are not new picks).
+    if (sub === 'approve-by-id') {
+      if (process.env.OWNER_ID && interaction.user.id !== process.env.OWNER_ID) return interaction.reply({ content: '🚫', ephemeral: true });
+      const partialId = interaction.options.getString('bet_id');
+      const { db } = require('../services/database');
+      const bet = db.prepare('SELECT id, description, result, review_status FROM bets WHERE id LIKE ?').get(`${partialId}%`);
+      if (!bet) return interaction.reply({ content: `❌ No bet found matching \`${partialId}\``, ephemeral: true });
+      const approved = approveBet(bet.id);
+      if (!approved) {
+        // approveBet is atomic: gate mismatch -> null, zero writes.
+        return interaction.reply({ content: `🚫 Cannot approve \`${bet.id.slice(0, 8)}\` — review_status=${bet.review_status}, result=${bet.result}. Approve requires review_status=needs_review AND result=pending; if it was auto-voided/swept, run \`/admin revert-by-id\` first (and Edit the bet if its sport/description is wrong, or it will re-void).\n${bet.description?.slice(0, 80)}`, ephemeral: true });
+      }
+      return interaction.reply({ content: `✅ Approved \`${bet.id.slice(0, 8)}\` → confirmed (state=ready, attempts=0, 3-day sweep grace) — re-enters grading next cycle. Not posted to #slip-feed.\n${bet.description?.slice(0, 80)}`, ephemeral: true });
     }
 
     // ── Toggle Twitter poller ──
