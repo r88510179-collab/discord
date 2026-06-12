@@ -101,7 +101,7 @@ router.get('/holds', (req, res) => {
         channelId: payload.channelId || null,
         messageUrl: payload.messageUrl || null,            // Discord message link, if stored
         reason: payload.reason || r.drop_reason || null,   // hold / failure reason
-        sample: payload.sample || null,                    // extracted text (≤80 chars as stored)
+        sample: payload.sample || null,                    // extracted text (hold sample ≤400 chars as stored; ≤80 on pre-2026-06-12 holds)
         parsed,                                            // candidate parsed payload, if stored
         sourceType: r.source_type || null,
         betId: r.bet_id || null,

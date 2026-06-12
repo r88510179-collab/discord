@@ -8,6 +8,7 @@ const { extractTextFromImage } = require('../services/ocr');
 const { gradeFromCelebration, finalizeBetGrading, calcProfit, canFinalizeBet, scheduleRecheckAfterDenial } = require('../services/grading');
 const { recordStage, recordDrop, recordError, makeIngestId } = require('../services/pipeline-events');
 const ocrFirstWiring = require('../services/ocrFirstWiring');
+const linkReader = require('../services/linkReader');
 
 // Sends the admin-log embed for MANUAL_REVIEW_HOLD with Release/Dismiss/View Original buttons.
 // Replaces the old plain-text notification so the admin can act on the hold from Discord.
@@ -1223,13 +1224,19 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
         const pureSlipChannelIds = (process.env.PURE_SLIP_CHANNEL_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
         const isPureSlip = pureSlipChannelIds.includes(message.channel.id);
         if (isHumanChannel && !isPureSlip) {
-          stageAll('MANUAL_REVIEW_HOLD', {
+          // Phase A link-reader (shadow): attachShareLink is a no-op when
+          // LINK_READER_MODE is unset/off (hold payload byte-identical aside
+          // from the sample bump); in shadow it adds an additive `share_link`
+          // field when the body carries an allow-listed book/shortlink URL.
+          const holdPayload = {
             reason: 'ai_is_bet_false',
             channelId: message.channel.id,
             capper: capperInfo?.name || message.author?.username || 'unknown',
             messageUrl: message.url,
-            sample: cleanText.slice(0, 80),
-          });
+            sample: cleanText.slice(0, 400),
+          };
+          linkReader.attachShareLink(holdPayload, cleanText);
+          stageAll('MANUAL_REVIEW_HOLD', holdPayload);
           try {
             await sendHoldReviewEmbed(message.client, {
               ingestId,
@@ -1285,7 +1292,10 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
         const pureSlipChannelIds = (process.env.PURE_SLIP_CHANNEL_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
         const isPureSlip = pureSlipChannelIds.includes(message.channel.id);
         if (isHumanChannel && !isPureSlip) {
-          stageAll('MANUAL_REVIEW_HOLD', {
+          // Phase A link-reader (shadow): no-op off; additive `share_link` in
+          // shadow mode. Same off-mode-byte-identical contract as the
+          // ai_is_bet_false branch above.
+          const holdPayload = {
             reason: 'ai_indeterminate_no_bets',
             is_bet_value: parsed.is_bet === undefined ? 'undefined' : String(parsed.is_bet),
             parsedType: parsed.type || null,
@@ -1293,8 +1303,10 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
             channelId: message.channel.id,
             capper: capperInfo?.name || message.author?.username || 'unknown',
             messageUrl: message.url,
-            sample: cleanText.slice(0, 80),
-          });
+            sample: cleanText.slice(0, 400),
+          };
+          linkReader.attachShareLink(holdPayload, cleanText);
+          stageAll('MANUAL_REVIEW_HOLD', holdPayload);
           try {
             await sendHoldReviewEmbed(message.client, {
               ingestId,
