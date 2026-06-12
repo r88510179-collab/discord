@@ -627,3 +627,8 @@ NOT in #admin-log:
 - War Room staging embeds (Approve/Edit/Reject) — go to WAR_ROOM_CHANNEL_ID=1485091165308190780 (set in prod). services/warRoom.js falls back to #admin-log only if that var is unset.
 
 Design note: holds already have a durable home, so the dashboard's write actions call the existing review-holds path — no admin_events table. Strict-mode/error are informational only.
+
+## Local checkouts (Mac)
+
+- `discord` (bot): `~/Documents/discord`
+- `zonetracker-dashboard`: `~/Documents/zonetracker-dashboard` — runtime canonical is the Surface Pro PM2 process; the Mac clone is for Code-tab agent work (commit+push, then pull + pm2 restart on the Pro)
