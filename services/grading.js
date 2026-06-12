@@ -1334,9 +1334,18 @@ async function runAutoGrade(client) {
 async function gradeFromCelebration(client, capperId, outcome, subjects) {
   if (!capperId || !subjects || subjects.length === 0) return null;
 
-  // Find oldest pending bet from this capper that matches any subject
+  // Find oldest pending bet from this capper that matches any subject.
+  // confirmed ONLY: review-queue bets must be invisible to every auto-grade
+  // path until approveBet() confirms them (services/database.js getPendingBets
+  // contract, PR #89) — this pool was the one bypass. A needs_review bet is
+  // typically parked BECAUSE its description/sport is wrong (revert-by-id,
+  // low-confidence staging), so a fuzzy word-overlap match here graded +
+  // bankrolled + auto-confirmed exactly the bets a human still needs to fix,
+  // and the pending_legs denial path below retry-cap-voided them into the
+  // result='void' + review_status='needs_review' shape behind the 2026-06-12
+  // bet 453e0952 false-success incident.
   const pendingBets = db.prepare(
-    "SELECT * FROM bets WHERE capper_id = ? AND result = 'pending' AND review_status IN ('confirmed', 'needs_review') ORDER BY created_at ASC",
+    "SELECT * FROM bets WHERE capper_id = ? AND result = 'pending' AND review_status = 'confirmed' ORDER BY created_at ASC",
   ).all(capperId);
 
   if (pendingBets.length === 0) return null;
