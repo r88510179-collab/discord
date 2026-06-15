@@ -204,5 +204,56 @@ run('MODE shadow but no link in text → no share_link added', () => {
   assert.ok(!('share_link' in payload), 'shadow + no link → field absent');
 });
 
+console.log('linkReader.attachShareLink — sportsbook_brand reject payload (Phase A.1):');
+
+// The exact payload shape the BOUNCER_REJECTED drop sites build for a
+// sportsbook_brand rejection (handlers/messageHandler.js dropAll site ~1370).
+// Phase A.1 calls attachShareLink on it so a share-wrapper whose text the parser
+// hallucinated into a bet is counted in shadow, the same as the hold sites.
+const brandRejectPayload = () => ({
+  validator: 'sportsbook_brand',
+  issues: ['Description matches sportsbook brand name'],
+  description: 'DraftKings Sportsbook',
+});
+const BRAND_WRAPPER_TEXT = 'Tail my slip 👉 https://dkng.co/abcdef';
+
+run('brand-reject payload gains share_link in shadow when text carries an allow-listed URL', () => {
+  const sh = loadFresh('shadow');
+  const payload = brandRejectPayload();
+  const out = sh.attachShareLink(payload, BRAND_WRAPPER_TEXT);
+  assert.strictEqual(out, payload, 'mutates and returns the same payload object');
+  assert.deepStrictEqual(out.share_link, { url: 'https://dkng.co/abcdef', domain: 'dkng.co', kind: 'book' });
+  // Existing payload fields are untouched.
+  assert.strictEqual(out.validator, 'sportsbook_brand');
+  assert.deepStrictEqual(out.issues, ['Description matches sportsbook brand name']);
+  assert.strictEqual(out.description, 'DraftKings Sportsbook');
+});
+
+run('brand-reject payload is byte-identical in off mode (no share_link)', () => {
+  const off = loadFresh(undefined);
+  assert.strictEqual(off.MODE, 'off');
+  const payload = brandRejectPayload();
+  const before = JSON.stringify(payload);
+  const out = off.attachShareLink(payload, BRAND_WRAPPER_TEXT);
+  assert.strictEqual(out, payload, 'returns the same object');
+  assert.ok(!('share_link' in out), 'off-mode adds no share_link to a brand-reject payload');
+  assert.strictEqual(JSON.stringify(out), before, 'payload unchanged byte-for-byte');
+});
+
+run('brand-reject payload gets no share_link in shadow when text carries no allow-listed URL', () => {
+  const sh = loadFresh('shadow');
+  const payload = brandRejectPayload();
+  // Brand name in the text, but no book/shortlink URL — the common promo-brand case.
+  sh.attachShareLink(payload, 'DraftKings Sportsbook best ball promo, no link here');
+  assert.ok(!('share_link' in payload), 'shadow + no allow-listed URL → field absent');
+});
+
+run('brand-reject payload: promo / social URLs are NOT annotated (allow-list only)', () => {
+  const sh = loadFresh('shadow');
+  const payload = brandRejectPayload();
+  sh.attachShareLink(payload, 'FanDuel picks here https://dubclub.win/c/x and https://x.com/y/status/1');
+  assert.ok(!('share_link' in payload), 'non-allow-listed URLs leave a brand-reject payload unannotated');
+});
+
 console.log(`\nlink-reader: ${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

@@ -1367,7 +1367,15 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
             const mappedReason = validation.reason === 'leg_sport_mismatch' ? 'VALIDATOR_SPORT_MISMATCH'
               : validation.reason === 'entity_mismatch' ? 'VALIDATOR_ENTITY_MISMATCH'
               : 'BOUNCER_REJECTED';
-            dropAll('DROPPED', mappedReason, { validator: validation.reason, issues: validation.issues, description: (bet.description || '').slice(0, 120) });
+            const dropPayload = { validator: validation.reason, issues: validation.issues, description: (bet.description || '').slice(0, 120) };
+            // Phase A.1 link-reader (shadow): a share-wrapper whose text the parser
+            // hallucinated into a bet exits here as sportsbook_brand → BOUNCER_REJECTED.
+            // Annotate it with the book/shortlink URL the same way Phase A annotates the
+            // MANUAL_REVIEW_HOLD sites, so shadow counts this terminal exit too. No-op
+            // unless LINK_READER_MODE=shadow AND cleanText carries an allow-listed URL;
+            // additive `share_link` field only — drop reason and control flow unchanged.
+            if (validation.reason === 'sportsbook_brand') linkReader.attachShareLink(dropPayload, cleanText);
+            dropAll('DROPPED', mappedReason, dropPayload);
             continue;
           }
 
