@@ -46,6 +46,12 @@ Both merged and shipped in **v606** (clean main, `--no-cache`, ~18:40Z). Full na
 - **DB ops (read-only-guarded, base64-node-on-Fly):** pool-wide reset of **298** `backoff` bets' `grading_attempts` → 0 (counters accrued during the broken-search era; 264 were ≥5 attempts and would auto-void after 1–2 honest tries). `grading_next_attempt_at` untouched. Two nudge-script aborts (wrong column name; truncated bet id) are written up as worked examples in `docs/RUNBOOKS/db-interventions.md`.
 
 ### Gate 3 → `enforce` (quote-bound grading is live)
+### ✅ SHIPPED 2026-06-15 — Gate 4 enforce flip (shadow → enforce)
+
+`DATE_BOUND_GRADING=enforce` is live on Fly (v659, machine 286de07a — verified in-container, not just staged). Gate 4 runs after Gate 3 (needs a trusted quote to attribute): Gate 3 proves the quote is real, Gate 4 proves it came from a source dated inside the bet's game window (anchorISO ± per-sport tol). Off-date evidence (right quote, wrong fixture — incident e5d27de0, 2026-06-12) → enforce forces PENDING (`OFF_DATE_EVIDENCE`) through the same early-return Gate 3's `UNVERIFIED_QUOTE` uses; shadow only marks the audit row. Tri-state via `DATE_BOUND_GRADING` (off | shadow | enforce); default shadow.
+
+**Would-fires: 0** — `SELECT COUNT(*) FROM grading_audit WHERE guards_failed LIKE '%GATE4_WOULD_FIRE%'` returns 0, so enforce blocks no correctly-grading bet (verified 2026-06-15). The would-fire marker (`GATE4_WOULD_FIRE|mode=...|claimed=...|reason=...`) rides the existing attempt's `guards_failed` array (zero extra rows), display-only at commands/admin.js; pass outcomes carry `GATE4:date_ok` / `GATE4:no_date_signal` labels. Gate 5 (season-vs-game) pending on the same evidence-record layer.
+
 `QUOTE_BOUND_GRADING=enforce` is now live on Fly — verified **in-container** (`printenv QUOTE_BOUND_GRADING` → `enforce`), not just the staged default (which is still `shadow`). The shadow→enforce flip was decided after reviewing the persisted would-fire set: **7 distinct bets** carried a `GATE3_WOULD_FIRE` marker (`grading_audit.guards_failed`, 11 attempt-rows). All 7 reviewed cases were evidence-free **VOID**s — the grade was already heading to VOID/PENDING with no quotable evidence — so enforce blocks nothing that was grading correctly (**zero false positives**). Closes the "Gate 3 enforce flip (pending)" item below.
 
 ### event_date validation (#70, migration 029)
