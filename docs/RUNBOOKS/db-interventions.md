@@ -271,6 +271,13 @@ bet had `result='loss'` + a capper bankroll, reverse the
 `profit_units × unit_size` delta by hand and re-run `saveDailySnapshot` —
 voids stamped `profit_units=0` need no unwind.
 
+**Wrong judgment vs wrong status — do NOT re-grade a verifiably wrong result.**
+If the grader returns a result that contradicts the verified final score (e.g.
+VGK 4-2 CAR = 6 goals graded WIN on an Over 6.5), correct the bet **manually**
+via a guarded one-shot UPDATE — do **not** re-grade through the autograder,
+which will reproduce the same wrong judgment from the same inputs. Reference:
+VGK/CAR incident 2026-06-12, bet `45cef7b2`.
+
 ### Stats visibility of the 2026-06-12 incident bets (one-shot, NOT executed)
 
 Capper stats and the leaderboard/scoreboard count by `result` alone —
