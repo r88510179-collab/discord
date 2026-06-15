@@ -9,6 +9,7 @@ const {
   ModalBuilder, TextInputBuilder, TextInputStyle,
 } = require('discord.js');
 const { approveBet, rejectBet, updateBetFields, getBetLegs, getBetProps, getCapperStats, getBankroll, db, createBet, updateBankroll, upsertUserBet, getSentimentCounts, gradeBet: gradeBetRecord } = require('./database');
+const { canonicalizeSport } = require('./sportNormalize');
 const { postNewPick, renderSlipFeedMessage, updateScoreboard } = require('./dashboard');
 const { shopLine, formatLineShop, extractTeamFromDescription } = require('./odds');
 const { calculateOptimalBet } = require('./bankroll');
@@ -333,7 +334,7 @@ async function applyBetEdit(interaction, betId) {
   if (newDesc || newOdds || capperChanged) {
     if (newDesc || newOdds) {
       db.prepare('UPDATE bets SET sport = ?, description = ?, odds = COALESCE(?, odds), units = COALESCE(?, units) WHERE id = ?')
-        .run(newSport || 'Unknown', newDesc, newOdds, newUnits, betId);
+        .run(canonicalizeSport(newSport) || 'Unknown', newDesc, newOdds, newUnits, betId);
     }
 
     const current = db.prepare('SELECT b.*, c.display_name AS capper_name FROM bets b LEFT JOIN cappers c ON b.capper_id = c.id WHERE b.id = ?').get(betId);

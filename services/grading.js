@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const { getPendingBets, gradeBet, updateBankroll, saveDailySnapshot, getBankroll, db, payoutTailers } = require('./database');
 const { gradeBetAI } = require('./ai');
+const { canonicalizeSport } = require('./sportNormalize');
 const bets = require('./bets');
 const { buildEvidenceRecords, evaluateOffDate } = require('./evidenceRecords');
 const delay = ms => new Promise(res => setTimeout(res, ms));
@@ -2374,7 +2375,15 @@ function writeGradingAudit(audit) {
     db.prepare(`INSERT INTO grading_audit (id, bet_id, attempt_num, timestamp, sport_in, sport_out, reclassified, is_parlay, leg_index, leg_count, search_backend, search_query, search_hits, search_duration_ms, provider_used, raw_response, guards_passed, guards_failed, final_status, final_evidence) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
       .run(
         uid, audit.bet_id, attemptNum + 1, Date.now(),
-        audit.sport_in || null, audit.sport_out || null, audit.reclassified || 0,
+        // Canonicalize sport casing at the single persist point. `sport_out` is
+        // the live fork: the grade path reassigns `bet.sport` from
+        // reclassifySport(), whose SPORT_TEAM_MAP-key return is UPPERCASE
+        // ("SOCCER"), while un-reclassified bets keep ingestion's Title-Case
+        // ("Soccer"). canonicalizeSport() collapses both to the canonical form;
+        // unknown/compound values pass through unchanged. `sport_in` is
+        // canonicalized too for hygiene (the `reclassified` flag is computed
+        // upstream from raw values and is unaffected).
+        canonicalizeSport(audit.sport_in) || null, canonicalizeSport(audit.sport_out) || null, audit.reclassified || 0,
         audit.is_parlay || 0, audit.leg_index ?? null, audit.leg_count ?? null,
         audit.search_backend || null, audit.search_query || null,
         audit.search_hits || 0, audit.search_duration_ms || 0,
