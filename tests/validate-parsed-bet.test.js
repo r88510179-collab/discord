@@ -14,7 +14,7 @@
 // ═══════════════════════════════════════════════════════════
 
 const assert = require('assert');
-const { validateParsedBet } = require('../services/ai');
+const { validateParsedBet, isInSeason } = require('../services/ai');
 
 let passed = 0;
 let failed = 0;
@@ -186,6 +186,119 @@ run('datdudestill #ig-dave-picks → pass with hasMedia', () => {
   // Hard Rock slip caption with no team names in text body.
   const r = validateParsedBet(pick, '🚨 LOCK OF THE NIGHT 🔒', { hasMedia: true });
   assert.strictEqual(r.valid, true, `expected pass, got: ${JSON.stringify(r)}`);
+});
+
+// ═══════════════════════════════════════════════════════════
+// Offseason bouncer: ambiguous shared nicknames resolve to an
+// in-season league before an offseason drop.
+//
+// Production evidence (pipeline_events 76871, recurring for weeks on
+// GNP / LockedIn): "GNP\nSF Giants ML" was dropped at BOUNCER_REJECTED
+//   {"validator":"offseason","issues":["NFL is out of season"], ... }
+// The shared nickname "Giants" was resolved to the out-of-season NFL New
+// York Giants, but the pick is the in-season MLB San Francisco Giants.
+// Same drop on bare "Giants ML", "Cardinals", "Cubs … SF Giants U10.5".
+//
+// These tests are date-sensitive (isInSeason reads the real clock, exactly
+// like Case 7 above). They run only inside the window where the bug
+// manifests — MLB in season AND NFL out of season (≈ Mar 20 – Aug 31) —
+// and skip otherwise, so the suite never goes red outside that window.
+// ═══════════════════════════════════════════════════════════
+console.log('\noffseason ambiguous-team disambiguation:');
+
+const mlbIn = isInSeason('MLB');
+const nflOut = !isInSeason('NFL');
+const inBugWindow = mlbIn && nflOut; // MLB in season, NFL out — the 76871 window
+
+// Regression A — direct repro of pipeline_events 76871. Declared sport NFL
+// (the mislabel: "NFL is out of season"), description the literal "SF Giants ML".
+// Pre-fix: dropped as offseason. Post-fix: in-season-wins adopts MLB.
+run('SF Giants ML (declared NFL) → not dropped, resolves MLB (76871)', () => {
+  if (!inBugWindow) { console.log('    (skipped — outside MLB-in/NFL-out window)'); return; }
+  const pick = { sport: 'NFL', type: 'straight', description: 'SF Giants ML', odds: null, units: 1, legs: [] };
+  const r = validateParsedBet(pick, 'GNP\nSF Giants ML', { hasMedia: false });
+  assert.strictEqual(r.valid, true, `expected pass, got: ${JSON.stringify(r)}`);
+  assert.strictEqual(pick.sport, 'MLB', `expected sport adopted to MLB, got: ${pick.sport}`);
+});
+
+// Regression B — bare ambiguous nickname, no qualifier. In-season-wins rule:
+// "Giants" maps to {MLB, NFL}; MLB is in season, so it must not drop.
+run('Giants ML bare (declared NFL) → not dropped, in-season wins (MLB)', () => {
+  if (!inBugWindow) { console.log('    (skipped — outside MLB-in/NFL-out window)'); return; }
+  const pick = { sport: 'NFL', type: 'straight', description: 'Giants ML', odds: null, units: 1, legs: [] };
+  const r = validateParsedBet(pick, 'Giants ML', { hasMedia: false });
+  assert.strictEqual(r.valid, true, `expected pass, got: ${JSON.stringify(r)}`);
+  assert.strictEqual(pick.sport, 'MLB', `expected sport adopted to MLB, got: ${pick.sport}`);
+});
+
+// Regression C — a different ambiguous team (Cardinals = MLB + NFL). MLB in
+// season → must not drop, adopts MLB.
+run('Cardinals ML (declared NFL) → not dropped, resolves MLB', () => {
+  if (!inBugWindow) { console.log('    (skipped — outside MLB-in/NFL-out window)'); return; }
+  const pick = { sport: 'NFL', type: 'straight', description: 'Cardinals ML', odds: null, units: 1, legs: [] };
+  const r = validateParsedBet(pick, 'Cardinals ML', { hasMedia: false });
+  assert.strictEqual(r.valid, true, `expected pass, got: ${JSON.stringify(r)}`);
+  assert.strictEqual(pick.sport, 'MLB', `expected sport adopted to MLB, got: ${pick.sport}`);
+});
+
+// No-weakening D — a real single-league out-of-season pick. "Chiefs" is NFL-only,
+// so there is no in-season league to fall back to: it must still drop. (Identical
+// behavior pre- and post-fix — this is the invariant guard, not a regression.)
+run('Chiefs ML (declared NFL, single-league) → still drops (no weakening)', () => {
+  if (!nflOut) { console.log('    (skipped — NFL is currently in season)'); return; }
+  const pick = { sport: 'NFL', type: 'straight', description: 'Chiefs ML', odds: null, units: 1, legs: [] };
+  const r = validateParsedBet(pick, 'Chiefs ML', { hasMedia: false });
+  assert.strictEqual(r.valid, false, `expected reject, got: ${JSON.stringify(r)}`);
+  assert.strictEqual(r.reason, 'offseason', `expected offseason, got: ${r.reason}`);
+});
+
+// No-weakening E — a qualifier that pins the OUT-OF-SEASON franchise still drops.
+// "New York Giants" disambiguates to the NFL Giants (full "<city> <nickname>"
+// phrase); the fix must not blanket-rescue every ambiguous nickname. This is the
+// genuine NFL-in-June case from the spec — it must still drop.
+run('New York Giants ML (declared NFL, qualifier-pinned NFL) → still drops', () => {
+  if (!nflOut) { console.log('    (skipped — NFL is currently in season)'); return; }
+  const pick = { sport: 'NFL', type: 'straight', description: 'New York Giants ML', odds: null, units: 1, legs: [] };
+  const r = validateParsedBet(pick, 'New York Giants ML', { hasMedia: false });
+  assert.strictEqual(r.valid, false, `expected reject, got: ${JSON.stringify(r)}`);
+  assert.strictEqual(r.reason, 'offseason', `expected offseason, got: ${r.reason}`);
+});
+
+// No-weakening E2 — multi-team genuine NFL pick whose nickname collides with an
+// in-season league. "Patriots" is NFL-only and PINS the bet to NFL, so it must
+// still drop in June even though "Jets" also names the in-season NHL Winnipeg
+// Jets. (Without the unique-nickname pin this would be falsely rescued as NHL —
+// this guards that pin.)
+run('Patriots vs Jets (declared NFL, NFL-pinned vs NHL "Jets") → still drops', () => {
+  if (!nflOut) { console.log('    (skipped — NFL is currently in season)'); return; }
+  const pick = { sport: 'NFL', type: 'straight', description: 'Patriots vs Jets', odds: null, units: 1, legs: [] };
+  const r = validateParsedBet(pick, 'Patriots vs Jets', { hasMedia: false });
+  assert.strictEqual(r.valid, false, `expected reject, got: ${JSON.stringify(r)}`);
+  assert.strictEqual(r.reason, 'offseason', `expected offseason, got: ${r.reason}`);
+});
+
+// No-weakening E3 — a full-city IN-SEASON qualifier must NOT rescue a pick that
+// also names an out-of-season, league-unique team. "San Francisco Giants" → MLB
+// (in season) co-occurs with "Cowboys" (NFL-only, out of season): the definite
+// out-of-season NFL team keeps the drop. (Guards against the qualifier check
+// short-circuiting ahead of the unique-nickname pin — caught in adversarial
+// review.)
+run('Cowboys + San Francisco Giants (declared NFL) → still drops (definite NFL out)', () => {
+  if (!nflOut) { console.log('    (skipped — NFL is currently in season)'); return; }
+  const pick = { sport: 'NFL', type: 'straight', description: 'Cowboys -7, San Francisco Giants ML', odds: null, units: 1, legs: [] };
+  const r = validateParsedBet(pick, 'Cowboys -7, San Francisco Giants ML', { hasMedia: false });
+  assert.strictEqual(r.valid, false, `expected reject, got: ${JSON.stringify(r)}`);
+  assert.strictEqual(r.reason, 'offseason', `expected offseason, got: ${r.reason}`);
+});
+
+// Resolution F — the full-city in-season qualifier is adopted outright (step 1),
+// independent of the in-season-wins fallback: "San Francisco Giants" → MLB.
+run('San Francisco Giants ML (declared NFL) → not dropped, resolves MLB', () => {
+  if (!inBugWindow) { console.log('    (skipped — outside MLB-in/NFL-out window)'); return; }
+  const pick = { sport: 'NFL', type: 'straight', description: 'San Francisco Giants ML', odds: null, units: 1, legs: [] };
+  const r = validateParsedBet(pick, 'San Francisco Giants ML', { hasMedia: false });
+  assert.strictEqual(r.valid, true, `expected pass, got: ${JSON.stringify(r)}`);
+  assert.strictEqual(pick.sport, 'MLB', `expected sport adopted to MLB, got: ${pick.sport}`);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

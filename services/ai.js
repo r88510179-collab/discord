@@ -1822,6 +1822,70 @@ function declaredSportIncludesKbo(parlaySport) {
     .includes('KBO');
 }
 
+// ── Offseason disambiguation for shared team nicknames ──────────────────────
+// The offseason bouncer (validateParsedBet) drops a pick whose declared sport is
+// out of season. But a shared nickname can resolve to the WRONG league: "SF
+// Giants ML" is the in-season MLB San Francisco Giants, yet detectSport / the
+// LLM may label it NFL (the New York Giants) — out of season in summer — so the
+// bet is silently dropped (pipeline_events 76871; recurring on GNP / LockedIn
+// "SF Giants ML", "Giants ML", "Cubs Giants", "… SF Giants U10.5"). Before
+// honoring an offseason drop, re-resolve the token:
+// A description carries two kinds of team signal:
+//   • DEFINITE — a team we are sure about: a nickname UNIQUE to one league
+//     ("cubs"→MLB, "patriots"→NFL), or a full "<city> <nickname>" qualifier
+//     resolved by disambiguateAmbiguousTeam ("san francisco giants"→MLB, "new
+//     york giants"→NFL). The same table detectSport/reclassifySport/inferLegSport
+//     consult, reused here.
+//   • AMBIGUOUS — a bare shared nickname ("giants"→MLB+NFL, "rangers"→MLB+NHL).
+// The decision:
+//   (a) If ANY definite team is out of season, this is a genuine out-of-season
+//       pick — the drop STANDS, even if an in-season team also appears. This is
+//       what keeps "New York Giants" (NFL), "Chiefs ML", and a mixed
+//       "Cowboys -7, San Francisco Giants ML" dropping in June, and is why the
+//       qualifier check does NOT short-circuit ahead of the unique-nickname scan.
+//   (b) Otherwise (no definite out-of-season team) adopt an in-season league: a
+//       city-qualified franchise wins outright; else in-season wins among the
+//       definite pins, else across all ambiguous candidates (SPORT_TEAM_MAP
+//       order, MLB-first, for determinism) — the in-season-wins rule for bare
+//       "Giants"/"Cardinals"/"SF Giants". The drop stands only when nothing is in
+//       season or there is no modeled team at all (e.g. an NFL player prop).
+// Returns the canonical in-season sport to ADOPT, or null to let the drop stand.
+function resolveInSeasonForOffseason(description) {
+  const desc = (description || '').toLowerCase();
+
+  // Scan SPORT_TEAM_MAP: record which league(s) each REAL-TEAM keyword present
+  // belongs to (market phrases excluded — soft sport signals, not teams).
+  const candidates = new Set();          // every league with a real-team hit
+  const keywordLeagues = new Map();      // keyword → Set(leagues claiming it)
+  for (const [sport, keywords] of Object.entries(SPORT_TEAM_MAP)) {
+    for (const keyword of keywords) {
+      if (!desc.includes(keyword) || isMarketPhrase(keyword)) continue;
+      candidates.add(sport);
+      if (!keywordLeagues.has(keyword)) keywordLeagues.set(keyword, new Set());
+      keywordLeagues.get(keyword).add(sport);
+    }
+  }
+
+  // DEFINITE leagues: a nickname unique to one league, plus a full "<city>
+  // <nickname>" qualifier — both pin a specific franchise. A shared nickname
+  // alone is not definite.
+  const definite = new Set();
+  for (const sports of keywordLeagues.values()) if (sports.size === 1) definite.add([...sports][0]);
+  const forced = disambiguateAmbiguousTeam(description);
+  if (forced) definite.add(forced);
+
+  // (a) Any definite team out of season → genuine out-of-season pick → drop.
+  for (const sport of definite) if (!isInSeason(sport)) return null;
+
+  // (b) No definite out-of-season team. Adopt an in-season league.
+  if (forced) return SPORT_TEAM_MAP_CANONICAL[forced] || forced; // in season (checked above)
+  const pool = definite.size > 0 ? definite : candidates;
+  for (const sport of Object.keys(SPORT_TEAM_MAP)) {
+    if (pool.has(sport) && isInSeason(sport)) return SPORT_TEAM_MAP_CANONICAL[sport] || sport;
+  }
+  return null; // nothing in season / no modeled team — drop stands
+}
+
 function validateParsedBet(pick, sourceText, opts = {}) {
   const issues = [];
   const desc = (pick.description || '').toLowerCase();
@@ -1856,11 +1920,21 @@ function validateParsedBet(pick, sourceText, opts = {}) {
     return { valid: false, issues, reason: 'placeholder' };
   }
 
-  // Check sport seasonality
+  // Check sport seasonality. A shared nickname may have been mislabeled to an
+  // out-of-season league ("SF Giants" → NFL); re-resolve before dropping so an
+  // in-season reading (the MLB San Francisco Giants) is adopted instead of
+  // silently dropped. Only a genuinely out-of-season pick still drops — one that
+  // is unambiguous, has no modeled team, or is a qualifier-pinned franchise whose
+  // own sport is out of season (see resolveInSeasonForOffseason; events 76871).
   if (pick.sport && !isInSeason(pick.sport)) {
-    issues.push(`${pick.sport} is out of season`);
-    maybeDrop('offseason', 'BOUNCER_REJECTED', { sport: pick.sport });
-    return { valid: false, issues, reason: 'offseason' };
+    const inSeasonSport = resolveInSeasonForOffseason(pick.description);
+    if (inSeasonSport) {
+      pick.sport = inSeasonSport;
+    } else {
+      issues.push(`${pick.sport} is out of season`);
+      maybeDrop('offseason', 'BOUNCER_REJECTED', { sport: pick.sport });
+      return { valid: false, issues, reason: 'offseason' };
+    }
   }
 
   // P1c: pitcher-record / stat-line legs — vision misread NAME N-N (NN%)
