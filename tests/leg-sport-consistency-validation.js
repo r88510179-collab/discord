@@ -36,7 +36,7 @@
 // ═══════════════════════════════════════════════════════════
 
 const assert = require('assert');
-const { validateLegSportConsistency, reclassifySport, matchesKboTeam, normalizeKboLeg, validateParsedBet } = require('../services/ai');
+const { validateLegSportConsistency, reclassifySport, inferLegSport, matchesKboTeam, normalizeKboLeg, validateParsedBet } = require('../services/ai');
 
 let passed = 0;
 let failed = 0;
@@ -493,6 +493,134 @@ run('signal-less player prop "Mookie Betts over 1.5 hits" + Unknown → PASS, no
   const r = validateLegSportConsistency({ description: 'Mookie Betts over 1.5 hits' }, 'Unknown');
   assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
   assert.strictEqual(r.adoptedSport, undefined, 'no signal must not adopt a sport');
+});
+
+// ═══════════════════════════════════════════════════════════
+// National-teams (World Cup) ingest at sport=Unknown (2026-06-15).
+// GNP World Cup picks ("Tunisia +.5", "Curacao +3.5", "Egypt Belgium
+// both teams score no", "Netherland / Japan under 2.5", …) ingested
+// sport=Unknown because no national-team name existed for #98's validator
+// to ADOPT Soccer from.
+//
+// FIX SHAPE — national teams are a SEPARATE list (SOCCER_NATIONAL_TEAMS),
+// NOT entries in SPORT_TEAM_MAP, consulted only in the Unknown/placeholder
+// adoption branch and matched WHOLE-WORD. This is deliberate: SPORT_TEAM_MAP
+// is scanned by validateLegSportConsistency AND reclassifySport AND
+// inferLegSport, and a nation name (substring-matched) collides with player
+// nationalities ("Ohtani vs Japan"), venues ("Mexico City"), trophies
+// ("Prince of Wales") and surnames ("Frances" ⊃ france). Keeping nations out
+// of the map means they can ONLY soft-adopt Soccer under Unknown — never DROP
+// a known-sport leg, never re-sport a pick via reclassify/infer.
+//
+// The adoption assertions FAIL on pre-fix code (no national-team list → no
+// adoption). The collision-guard assertions lock in the safe behavior (they
+// would FAIL if nations were instead added to SPORT_TEAM_MAP as substrings).
+// ═══════════════════════════════════════════════════════════
+console.log('\nNational-teams Unknown-sport adoption (World Cup, 2026-06-15):');
+
+run('national team: "Tunisia +.5" + Unknown → PASS + adopt Soccer', () => {
+  const r = validateLegSportConsistency({ description: 'Tunisia +.5' }, 'Unknown');
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
+  assert.strictEqual(r.adoptedSport, 'Soccer'); // FAILS pre-fix ('tunisia' absent → no adoption)
+});
+
+run('national team: "Curacao +3.5" + Unknown → PASS + adopt Soccer (no-cedilla spelling)', () => {
+  const r = validateLegSportConsistency({ description: 'Curacao +3.5' }, 'Unknown');
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
+  assert.strictEqual(r.adoptedSport, 'Soccer'); // FAILS pre-fix
+});
+
+// "both teams score no" is NOT the market phrase "both teams to score" (no
+// "to"), so adoption here is driven purely by the NATIONS egypt + belgium —
+// the #98 market-phrase path does not cover this pick.
+run('national teams: "Egypt Belgium both teams score no" + Unknown → PASS + adopt Soccer', () => {
+  const r = validateLegSportConsistency({ description: 'Egypt Belgium both teams score no' }, 'Unknown');
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
+  assert.strictEqual(r.adoptedSport, 'Soccer'); // FAILS pre-fix (egypt/belgium absent; phrase ≠ BTTS)
+});
+
+run('two-nation phrase: "Netherland / Japan under 2.5" + Unknown → PASS + adopt Soccer', () => {
+  const r = validateLegSportConsistency({ description: 'Netherland / Japan under 2.5' }, 'Unknown');
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
+  assert.strictEqual(r.adoptedSport, 'Soccer'); // FAILS pre-fix
+});
+
+// End-to-end through validateParsedBet: the parlay's sport is rewritten Soccer.
+run('national team (end-to-end): Unknown parlay of national-team legs → valid + pick.sport adopted Soccer', () => {
+  const pick = {
+    sport: 'Unknown',
+    bet_type: 'parlay',
+    description: 'Tunisia +.5 / Morocco +.5',
+    legs: [{ description: 'Tunisia +.5' }, { description: 'Morocco +.5' }],
+  };
+  const r = validateParsedBet(pick, '', { hasMedia: false });
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason} | ${JSON.stringify(r.issues)}`); // FAILS pre-fix
+  assert.strictEqual(pick.sport, 'Soccer', 'parlay sport adopted from the national-team leg');
+});
+
+// Bare nations that are surname/word-shaped are now safe (whole-word matched).
+run('national team: "Australia ML" + Unknown → PASS + adopt Soccer', () => {
+  const r = validateLegSportConsistency({ description: 'Australia ML' }, 'Unknown');
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
+  assert.strictEqual(r.adoptedSport, 'Soccer'); // FAILS pre-fix
+});
+
+// ── No-collision guards (task 4). Because nations live OUTSIDE SPORT_TEAM_MAP
+//    and are whole-word matched, a NON-soccer leg that merely mentions a
+//    country (nationality / venue / trophy / surname) must NOT be dropped or
+//    re-sported. Each of these would FAIL if the nations were added to
+//    SPORT_TEAM_MAP as substring keys. ──
+
+// (a) Known-sport player-prop naming a player's NATIONALITY → never dropped.
+run('no-collision: "Ohtani 2+ hits vs Japan" + MLB → PASS (nationality mention, no drop)', () => {
+  const r = validateLegSportConsistency({ description: 'Ohtani 2+ hits vs Japan' }, 'MLB');
+  assert.strictEqual(r.valid, true, `nationality mention must not drop an MLB prop, got: ${r.reason}`);
+  assert.strictEqual(r.adoptedSport, undefined);
+});
+
+run('no-collision: "Connor McDavid Canada 2 points" + NHL → PASS (4 Nations / nationality, no drop)', () => {
+  const r = validateLegSportConsistency({ description: 'Connor McDavid Canada 2 points' }, 'NHL');
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
+});
+
+// (b) Venue / trophy substrings of a nation → never dropped under a known sport.
+run('no-collision: "Mexico City total points over 44.5" + NFL → PASS (NFL venue, no drop)', () => {
+  const r = validateLegSportConsistency({ description: 'Mexico City total points over 44.5' }, 'NFL');
+  assert.strictEqual(r.valid, true, `the annual NFL Mexico City game must not drop, got: ${r.reason}`);
+});
+
+run('no-collision: "Prince of Wales Trophy" + NHL → PASS (NHL trophy, no drop)', () => {
+  const r = validateLegSportConsistency({ description: 'Prince of Wales Trophy' }, 'NHL');
+  assert.strictEqual(r.valid, true, `the NHL Prince of Wales Trophy must not drop, got: ${r.reason}`);
+});
+
+// (c) Whole-word matching: a nation inside a surname/adjective must NOT adopt
+//     Soccer under Unknown ("Frances" ⊃ france, "japanese" ⊃ japan).
+run('no-collision: "Frances Tiafoe over 22.5 games" + Unknown → PASS, NOT Soccer (whole-word)', () => {
+  const r = validateLegSportConsistency({ description: 'Frances Tiafoe over 22.5 games' }, 'Unknown');
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
+  assert.notStrictEqual(r.adoptedSport, 'Soccer', '"Frances" must not adopt Soccer via "france"');
+});
+
+run('no-collision: "Japanese pitcher strikeouts over 6.5" + Unknown → PASS, NOT Soccer (whole-word)', () => {
+  const r = validateLegSportConsistency({ description: 'Japanese pitcher strikeouts over 6.5' }, 'Unknown');
+  assert.strictEqual(r.valid, true, `expected pass, got: ${r.reason}`);
+  assert.notStrictEqual(r.adoptedSport, 'Soccer', '"japanese" must not adopt Soccer via "japan"');
+});
+
+// (d) The map-consuming sport routers (reclassifySport on the live ingest path,
+//     inferLegSport at grade time) must NOT see national teams — a real Tennis
+//     pick whose surname contains a nation must keep its sport.
+run('no-collision: reclassifySport("Tennis","Frances Tiafoe over 22.5 games") → Tennis (no Soccer leak)', () => {
+  assert.strictEqual(reclassifySport('Tennis', 'Frances Tiafoe over 22.5 games'), 'Tennis');
+});
+
+run('no-collision: inferLegSport("Frances Tiafoe over 22.5 games") → not SOCCER (no Soccer leak)', () => {
+  assert.notStrictEqual(inferLegSport('Frances Tiafoe over 22.5 games'), 'SOCCER');
+});
+
+run('no-collision: reclassifySport("MLB","Japanese pitcher strikeouts") → MLB (no Soccer leak)', () => {
+  assert.strictEqual(reclassifySport('MLB', 'Japanese pitcher strikeouts'), 'MLB');
 });
 
 // ═══════════════════════════════════════════════════════════

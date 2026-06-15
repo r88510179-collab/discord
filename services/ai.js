@@ -1580,6 +1580,71 @@ const SPORT_TEAM_MAP = {
   'MMA': ['wins by ko','wins by tko','wins by submission','wins by decision','fight goes the distance','round over','round under','ufc'],
 };
 
+// ── International / national teams (World Cup) — added 2026-06-15 ──────────────
+// GNP World Cup picks ("Tunisia +.5", "Netherland / Japan under 2.5", "Egypt
+// Belgium both teams score no", …) ingest with sport=Unknown: detectSport can't
+// classify a bare nation name and #98's validator only ADOPTS Soccer off a known
+// SPORT_TEAM_MAP team, which held no national teams. So the picks stayed Unknown
+// and fell to needs_review.
+//
+// These nation names are DELIBERATELY KEPT OUT OF SPORT_TEAM_MAP. That map is
+// scanned by THREE functions with different guards — validateLegSportConsistency
+// (two-sport-tie guard), reclassifySport (shared-nickname guard only) and
+// inferLegSport (NO guard) — and nation names collide with non-soccer leg text
+// far more than club nicknames do: player NATIONALITIES ("Ohtani 2+ hits vs
+// Japan" — MLB), VENUES ("Mexico City" — the annual NFL game), TROPHIES ("Prince
+// of Wales" — NHL), and surnames/adjectives ("Frances" Tiafoe ⊃ france,
+// "japanese" ⊃ japan). Putting them in SPORT_TEAM_MAP would (a) DROP known-sport
+// legs that merely mention a country and (b) let reclassifySport/inferLegSport
+// silently re-sport a real NBA/NHL/Tennis pick to Soccer on the live ingest path.
+//
+// Instead this is a SEPARATE list consulted in ONE place: the Unknown/placeholder
+// adoption branch of validateLegSportConsistency, as a soft Soccer signal that
+// fires ONLY when no modeled-league team matched (no wrong-sport drop possible,
+// no reclassify/infer leak). Matching is WHOLE-WORD (NATIONAL_TEAM_RE, `\b…\b`)
+// so "France" adopts Soccer but "Frances Tiafoe" / "japanese" / "miranda" do not,
+// and "australia" no longer rides inside "australian open". Names that are common
+// STANDALONE non-soccer words are still excluded (england → "New England",
+// georgia → US state/college, jordan → "Jordan Love/Poole"). Residual whole-word
+// overlaps that survive (mexico ⊂ "Mexico City", wales ⊂ "Prince of Wales",
+// turkey ⊂ "Turkey Day") can only mis-ADOPT under an already-Unknown declaration
+// — never drop, never reclassify — a soft, recoverable mislabel we accept to keep
+// 2026 co-host Mexico and the picks' Turkey.
+const SOCCER_NATIONAL_TEAMS = [
+  // ── from the production GNP picks (must parse) ──
+  'tunisia', 'curacao', 'cape verde', 'new zealand', 'morocco', 'qatar',
+  'uruguay', 'saudi', 'netherland', 'netherlands', 'japan', 'scotland',
+  'haiti', 'turkey', 'australia', 'egypt', 'belgium',
+  // ── aliases the picks/cappers use (whole-word, so "usa" ≠ "sousa") ──
+  'usa', 'united states', 'korea',
+  // ── common WC / confederation nations (whole-word matched, so short names
+  //    like "iran"/"peru"/"chile" no longer ride inside "miranda"/"perugia"/
+  //    "chiles") ──
+  'argentina', 'brazil', 'france', 'germany', 'spain', 'portugal', 'italy',
+  'croatia', 'serbia', 'switzerland', 'denmark', 'poland', 'sweden', 'norway',
+  'austria', 'ukraine', 'greece', 'hungary', 'romania', 'slovakia', 'slovenia',
+  'czech', 'wales', 'mexico', 'canada', 'costa rica', 'panama', 'jamaica',
+  'honduras', 'colombia', 'ecuador', 'peru', 'paraguay', 'venezuela', 'bolivia',
+  'chile', 'iran', 'senegal', 'ghana', 'nigeria', 'cameroon', 'algeria',
+  'ivory coast', "cote d'ivoire", 'south africa',
+];
+
+// Whole-word / whole-phrase matcher for the national teams. Longest-first so the
+// alternation prefers the most specific phrase; `\b…\b` prevents substring rides
+// inside surnames, adjectives and longer words (the collision class that makes
+// these unsafe as SPORT_TEAM_MAP substring keys).
+const NATIONAL_TEAM_RE = new RegExp(
+  '\\b(' + SOCCER_NATIONAL_TEAMS
+    .slice()
+    .sort((a, b) => b.length - a.length)
+    .map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|') + ')\\b'
+);
+
+function descNamesNationalTeam(desc) {
+  return NATIONAL_TEAM_RE.test(String(desc == null ? '' : desc).toLowerCase());
+}
+
 // Market / wager-type phrases that are NOT teams. Some of these also live inside
 // SPORT_TEAM_MAP (e.g. SOCCER's "both teams to score", "btts", "corners", "clean
 // sheet") because they are useful *sport* signals for inferLegSport /
@@ -2139,7 +2204,9 @@ function validateLegSportConsistency(leg, parlaySport) {
   // so a weak/coincidental match never stamps a confidently-wrong sport:
   //   • exactly one REAL TEAM  → adopt that sport (a club name is strong), or
   //   • no real team but exactly one CURATED market-phrase sport → adopt it
-  //     (the GNP fix: "both teams to score" + Unknown → adopt Soccer).
+  //     (the GNP fix: "both teams to score" + Unknown → adopt Soccer), or
+  //   • no modeled team at all but a national team is named (whole-word) →
+  //     adopt Soccer (the World Cup fix: "Tunisia +.5" + Unknown → Soccer).
   // Anything ambiguous (a shared nickname spanning 2 sports) or signal-less
   // passes untouched (sport stays the placeholder).
   if (isSportPlaceholder(parlaySport)) {
@@ -2152,6 +2219,15 @@ function validateLegSportConsistency(leg, parlaySport) {
       if (isMarketPhrase(keyword)) {
         return { valid: true, adoptedSport: SPORT_TEAM_MAP_CANONICAL[key] || key };
       }
+    }
+    // National-team soft signal — only when NO modeled-league team matched (a
+    // modeled team would make this ambiguous, and is handled above). This list
+    // is intentionally NOT in SPORT_TEAM_MAP, so it can never fire a wrong-sport
+    // DROP under a known declared sport, nor leak into reclassifySport /
+    // inferLegSport. Whole-word matched, so a nationality/surname mention
+    // ("Frances Tiafoe", "japanese pitcher") does not falsely adopt.
+    if (teamMatches.size === 0 && descNamesNationalTeam(desc)) {
+      return { valid: true, adoptedSport: 'Soccer' };
     }
     return { valid: true };
   }
