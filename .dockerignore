@@ -7,3 +7,5 @@ bettracker.db-shm
 README.md
 supabase-setup.sql
 migrate-to-supabase.js
+
+.claude/
