@@ -2137,6 +2137,28 @@ function validateLegShape(leg) {
   return { valid: true };
 }
 
+// Word-boundary team-name matcher for the cross-sport contradiction scan. A
+// nickname/team must match only as a WHOLE WORD or whole multi-word phrase —
+// never as a substring inside a longer token. A bare `desc.includes('rams')`
+// matched the player surname "CJ Ab*rams*" and dropped a clean 4-leg MLB hits
+// parlay as a phantom NFL "Rams" leg (false VALIDATOR_SPORT_MISMATCH; ingest
+// disc_1510607698473914429 — Tatis/Abrams/Wood/Laureano, all Over 0.5 Hits).
+// `\b`-anchored, regex-escaped and case-insensitive so "rams" still matches a
+// bare "rams" token and "Rams -3.5" but never "abrams", while a multi-word name
+// ("red sox", "blue jays", "both teams to score") still matches as a phrase.
+// Mirrors the NATIONAL_TEAM_RE escape; regexes are cached per keyword because
+// SPORT_TEAM_MAP is large and re-scanned for every leg.
+const _legTeamWordRe = new Map();
+function legTextHasTeamWord(desc, keyword) {
+  let re = _legTeamWordRe.get(keyword);
+  if (!re) {
+    const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    re = new RegExp(`\\b${escaped}\\b`, 'i');
+    _legTeamWordRe.set(keyword, re);
+  }
+  return re.test(desc);
+}
+
 // Bug A: Validate that parlay legs don't contain teams from wrong sports.
 // Multi-sport team names (Giants, Cardinals, Rangers, Panthers, Jets, Kings) live in
 // multiple sport lists — fire only when NONE of the matched sports is the declared sport.
@@ -2191,7 +2213,7 @@ function validateLegSportConsistency(leg, parlaySport) {
   const signalMatches = new Map(); // sport → first keyword of any kind
   for (const [sport, keywords] of Object.entries(SPORT_TEAM_MAP)) {
     for (const keyword of keywords) {
-      if (!desc.includes(keyword)) continue;
+      if (!legTextHasTeamWord(desc, keyword)) continue;
       if (!signalMatches.has(sport)) signalMatches.set(sport, keyword);
       if (!isMarketPhrase(keyword)) { teamMatches.set(sport, keyword); break; }
     }
