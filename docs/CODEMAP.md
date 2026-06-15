@@ -22,7 +22,7 @@ PK is `id` (TEXT, hex hash — **NOT** `bet_id`, common memory error).
 |--------|------|-------|
 | id | TEXT PK | hex hash, never `bet_id` |
 | capper_id | TEXT | FK → cappers.id |
-| sport | TEXT NOT NULL | "Unknown" is a real value; ~46% of May voids |
+| sport | TEXT NOT NULL | "Unknown" is a real value; ~46% of May voids. **Casing canonicalized at write** via `canonicalizeSport()` in `createBet` (`database.js`) + the war-room edit (`warRoom.js`) — see §Enums |
 | league | TEXT | |
 | bet_type | TEXT NOT NULL | "straight", "parlay", "prop", etc |
 | description | TEXT NOT NULL | newline-separated for parlays |
@@ -107,7 +107,7 @@ PK is `id` (TEXT, hex hash — **NOT** `bet_id`, common memory error).
 
 ### `grading_audit`
 
-Every grader attempt logged. Cols: `bet_id, attempt_num, timestamp INTEGER, sport_in/out, reclassified, is_parlay, leg_index, leg_count, search_backend, search_query, search_hits, search_duration_ms, provider_used, raw_response, guards_passed, guards_failed, final_status, final_evidence`. Created via `CREATE TABLE IF NOT EXISTS` in `services/database.js:97` (NOT a numbered migration). `timestamp` is epoch **MILLIS** (`Date.now()`) — window filters use `timestamp >= (unixepoch()-N)*1000` (see the daily cap at `grading.js:~1178`), not `datetime('now',…)`. `guards_passed`/`guards_failed` are JSON-array TEXT. **B0 (2026-06-04):** Gate-3 would-fire events ride `guards_failed` as a `GATE3_WOULD_FIRE|mode=|claimed=|prop=|reason=` token (`SELECT … WHERE guards_failed LIKE '%GATE3_WOULD_FIRE%'`); `guards_failed` is display-only (`commands/admin.js:439`) and never gates grading.
+Every grader attempt logged. Cols: `bet_id, attempt_num, timestamp INTEGER, sport_in/out, reclassified, is_parlay, leg_index, leg_count, search_backend, search_query, search_hits, search_duration_ms, provider_used, raw_response, guards_passed, guards_failed, final_status, final_evidence`. Created via `CREATE TABLE IF NOT EXISTS` in `services/database.js:97` (NOT a numbered migration). `timestamp` is epoch **MILLIS** (`Date.now()`) — window filters use `timestamp >= (unixepoch()-N)*1000` (see the daily cap at `grading.js:~1178`), not `datetime('now',…)`. `guards_passed`/`guards_failed` are JSON-array TEXT. **B0 (2026-06-04):** Gate-3 would-fire events ride `guards_failed` as a `GATE3_WOULD_FIRE|mode=|claimed=|prop=|reason=` token (`SELECT … WHERE guards_failed LIKE '%GATE3_WOULD_FIRE%'`); `guards_failed` is display-only (`commands/admin.js:439`) and never gates grading. **Sport casing (2026-06-15):** `sport_in`/`sport_out` are run through `canonicalizeSport()` at the single persist point `writeGradingAudit` (`grading.js`). Root fork (now neutralized): the grade path reassigns `bet.sport` from `reclassifySport()` (`ai.js`), whose `SPORT_TEAM_MAP`-key return is **UPPERCASE** ("SOCCER"), so a reclassified soccer pick was written `sport_out="SOCCER"` while un-reclassified picks kept ingestion's Title-Case "Soccer" — both daily. `reclassified` is computed upstream from raw values and is unaffected. See §Enums.
 
 ### `regrade_results`, `regrade_batches`, `bet_grade_history` (mig 022)
 
@@ -138,6 +138,8 @@ Reconciliation project. `bet_grade_history` archives old grades on regrade. `reg
 **`bets.source`** (live-verified 2026-06-10, by volume): `twitter_vision`, `vision_slip`,
 `twitter_text`, `discord`, `twitter` (legacy), `untracked_win`, `hold_review_script`,
 `twitter_mobile` (legacy), `manual_hold_release`. Set wherever `createBetWithLegs` is called.
+
+**Sport vocabulary + casing** (`bets.sport`, `grading_audit.sport_in`/`sport_out`) — canonical casing convention: **acronym leagues UPPERCASE** (`MLB`, `NBA`, `NHL`, `NFL`, `NCAAB/F/M/W`, `MLS`, `EPL`, `UCL`, `UEL`, `F1`, `NASCAR`, `UFC`, `MMA`) and **word-sports / proper-noun leagues Title-Case** (`Soccer`, `Tennis`, `Golf`, `Boxing`, `La Liga`, `Serie A`, `Bundesliga`, `Ligue 1`, `World Cup`, `Copa America`, `Champions League`, `Europa League`). The single source of truth is **`canonicalizeSport(sport)`** in **`services/sportNormalize.js`** (`CANONICAL_SPORT_BY_KEY` map; case-insensitive lookup, **unknown/compound/`Unknown` input passes through UNCHANGED**, null/empty safe) — imported by `grading.js` (`writeGradingAudit`), `database.js` (`createBet`), `warRoom.js` (edit), and `scripts/backfill-sport-casing.js`. **Hard constraint:** the dispatch acronyms `MLB`/`NBA`/`NHL`/`NFL` MUST stay uppercase (adapter dispatch + `SPORT_MAP`/`SUPPORTED_SPORTS` lookups key on the uppercase form). It is a normalize **map**, never a blanket up/down-case.
 
 **`pipeline_events.stage`**: `RECEIVED`, `AUTHORIZED`, `BUFFERED`, `EXTRACTED`, `PARSED`, `VALIDATED`, `STAGED`, `DROPPED`, `MANUAL_REVIEW_HOLD`, `MANUAL_REVIEW_DISMISSED`, `MANUAL_REVIEW_RELEASED`, `PURE_SLIP_SKIP_HOLD`, `OCR_FIRST`, `RECOVERY_ATTEMPT_FAILED`, `GRADING_ENTER`, `GRADING_SEARCH`, `GRADING_AI`, `GRADING_GUARDS`, `GRADING_COMPLETE`, `GRADING_DROPPED`. Enum lives at `services/pipeline-events.js:18`. **`RECOVERY_ATTEMPT_FAILED`** (added 2026-06-12): one row per hold-recovery attempt that burned vision+OCR but yielded no bet (`validator_drop` / `no_bet_found`, incl. extract throw); `COUNT(*)` per `ingest_id` is `recoverHold`'s retry-cap counter (`RECOVERY_RETRY_CAP`=5, `services/holdReview.js`) — at the cap, un-forced recovery refuses with `recovery_exhausted` (HTTP 429) **before** the Discord fetch, so an exhausted hold costs nothing per poll; API body `{force:true}` is the operator override. Trace-only, NOT a drop (the hold stays open); absent from `pipelineHealth.EXPECTED_STAGES` like the other markers. Note: `STAGE_ENTER` etc. listed here previously were `event_type` values, not stages — those are `STAGE_ENTER`, `STAGE_EXIT`, `DROP`, `ERROR` (line 32). Write-boundary enum validation shipped as #49: `warnUnknownEnums` (`services/pipeline-events.js:127`, called at the single write boundary L154) warn-only logs non-canonical values and still writes (fire-and-forget contract preserved; closes audit F-17).
 
@@ -319,7 +321,7 @@ Team/player nickname-alias expansion for stored bet descriptions. `normalizeDesc
 ### services/sportsdata/ (Phase 1 structured grading, v459)
 | File | Purpose |
 | --- | --- |
-| index.js | Router: dispatches a bet to the right sport adapter; runs BEFORE search+LLM and short-circuits the LLM when `resolved=true` |
+| index.js | Router: dispatches a bet to the right sport adapter; runs BEFORE search+LLM and short-circuits the LLM when `resolved=true`. **Dispatch is case-insensitive:** `tryStructured` routes on `normalizeSport(bet.sport)` (L14), which `.toUpperCase()`s before substring-matching, so the `if (sport === 'MLB'\|'NBA'\|'NHL')` checks (L75/80/85) compare against the already-uppercased result, never raw `bet.sport` — sport casing cannot affect routing (Soccer/Tennis are not dispatched at all). |
 | mlb.js | MLB Stats API adapter (`statsapi.mlb.com/api/v1`) — official, no auth |
 | nhl.js | NHL Web API adapter (`api-web.nhle.com/v1`) — no auth |
 | nba.js | ESPN NBA public API adapter (`site.api.espn.com`) — unofficial, no auth |
@@ -448,6 +450,7 @@ The single write-path normalizer for `bets.event_date`. `normalizeEventDateForSt
 | test-dedup-normalization.js | Validates parlay leg dedup normalizer |
 | backfill-hold-embeds.js | v447 hold-embed backfill (PR #29) |
 | test-team-disambiguation.js | Regression harness for `normalizeDescription` bare-city injection (Bug 1) + shared-nickname sport disambiguation (Bug 2) (PR #36). Run: `node scripts/test-team-disambiguation.js` |
+| backfill-sport-casing.js | One-shot **idempotent** sport-casing backfill for `bets.sport` + `grading_audit.sport_out`. Reuses the shared `canonicalizeSport()`. Default = **dry-run** (opens DB `{readonly:true}`); `--apply` executes per-value UPDATEs in one transaction. Safe to re-run (2nd `--apply` = 0 rows). Run post-deploy. |
 
 ## Twitter ingest — Surface scraper → /mobile-ingest → F-12 dedup
 

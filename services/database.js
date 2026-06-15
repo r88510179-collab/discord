@@ -3,6 +3,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { runMigrations } = require('./migrator');
 const { normalizeEventDateForStorage } = require('./eventDate');
+const { canonicalizeSport } = require('./sportNormalize');
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'bettracker.db');
 
@@ -356,7 +357,10 @@ function createBet(betData) {
   const id = uid();
   try {
     stmts.insertBet.run(id,
-      betData.capper_id, betData.sport || 'Unknown', betData.league || null,
+      // Normalize sport casing at the write site so any future off-casing source
+      // (the current ingestion path is already canonical) stores the canonical
+      // form. Unknown/compound values pass through unchanged; null → 'Unknown'.
+      betData.capper_id, canonicalizeSport(betData.sport) || 'Unknown', betData.league || null,
       betData.bet_type || 'straight', betData.description,
       betData.odds || null, betData.units || 1,
       // Write-time gate: event_date is NULL or a parseable ISO datetime —
