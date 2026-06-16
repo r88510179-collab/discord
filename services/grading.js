@@ -601,6 +601,50 @@ function canonicalizeSportForGrading(rawSport) {
   return trimmed;
 }
 
+// ── Grade-time national-team rescue for NO-LEG Unknown bets ──
+// #100 adopts a soccer national team's sport ONLY inside
+// validateLegSportConsistency(), which runs for MULTI-LEG picks
+// (pick.legs && pick.legs.length > 0). A single-pick / no-leg row that stores
+// sport='Unknown' never enters that function, so a bare World-Cup nation pick
+// ("Iraq team total over .5", "Spain draw", "Iran/New Zealand draw") reaches
+// gradePropWithAI still Unknown and auto-voids at the SUPPORTED_SPORTS gate —
+// while the SAME batch's leg-bearing "Algeria …" was rescued (browser audit,
+// 2026-06-16). #110's canonicalizeSportForGrading (above) maps non-canonical
+// sport LABELS ("World Cup" → SOCCER) but not DESCRIPTIONS, so an Unknown-LABEL
+// nation pick is still missed. This rescue closes that gap for legacy rows
+// already in the DB and new ones alike.
+//
+// It REUSES #100's whole-word matcher (descNamesNationalTeam / NATIONAL_TEAM_RE,
+// `\b…\b`) — never a substring scan — so it cannot reintroduce the
+// nation-substring leak #100 fixed ("Frances Tiafoe" ⊅ france). Deliberately
+// conservative (the constraints #100 taught):
+//   • Fires ONLY when the sport is still a placeholder (Unknown / N/A / TBD / …),
+//     so a known sport (MLB / NHL / …) is NEVER overridden.
+//   • Defers when the description carries a strong NON-soccer signal that
+//     inferLegSport recognizes — a modeled team OR a prop-action keyword
+//     ("double double" → NBA, "total bases" → MLB) — leaving it Unknown to void
+//     as before. inferLegSport's signal is BOUNDED (SPORT_TEAM_MAP substring +
+//     a short SPORT_ACTION_MAP), so a compound / multi-leg Unknown caption that
+//     names a nation but whose non-soccer prop it does NOT recognize (e.g.
+//     "Canada ML + McDavid anytime point") is rescued to Soccer instead of
+//     voided. That only ever turns a SAFE auto-void into a grade attempt for an
+//     already-Unknown bet — it never mis-grades one that was grading correctly —
+//     so it is #100's accepted residual extended from single-pick to compound
+//     text. Real multi-leg parlays are already sported at INGEST by #100's leg
+//     validator, so they do not arrive here as Unknown in practice. (Tightening
+//     via "/" or "+" separators is rejected: legitimate single soccer picks use
+//     them — "Iran/New Zealand draw", "Tunisia +.5".)
+// Pure: returns the (possibly rescued) sport string, never mutates its input.
+function rescueNoLegNationalTeamSport(sport, description) {
+  const { descNamesNationalTeam, inferLegSport } = require('./ai');
+  const { isSportPlaceholder } = require('./normalization');
+  if (!isSportPlaceholder(sport)) return sport;          // known sport — untouched
+  if (!descNamesNationalTeam(description)) return sport;  // no nation named — untouched
+  const inferred = inferLegSport(description);            // strong non-soccer signal?
+  if (inferred && inferred !== 'SOCCER') return sport;    // defer — voids as before
+  return 'Soccer';
+}
+
 // ═══════════════════════════════════════════════════════════
 // Player-prop evidence guard (G6 sub-check)
 //
@@ -2244,6 +2288,21 @@ async function gradePropWithAI(bet) {
     console.log(`[AI Grader] SPORT ALIAS: ${preAliasSport} → ${bet.sport} for "${(bet.description || '').slice(0, 50)}"`);
   }
 
+  // ── GRADE-TIME NATIONAL-TEAM RESCUE (no-leg Unknown gap; Codex blocker) ──
+  // Runs AFTER canonicalizeSportForGrading (which handles non-canonical sport
+  // LABELS like "World Cup") and BEFORE the supported-sport gate below, so a
+  // single-pick Unknown row whose DESCRIPTION whole-word names a World-Cup
+  // nation ("Iraq team total over .5") is rescued to Soccer instead of being
+  // silently auto-voided — the leg-only #100 rescue never saw it. Composes with
+  // #110: a "World Cup"-LABELED pick is already SOCCER here (not a placeholder),
+  // so this no-ops; this handles the Unknown-LABEL + nation-in-DESCRIPTION case.
+  // See rescueNoLegNationalTeamSport for the whole-word / conservative rules.
+  const preNationSport = bet.sport;
+  bet.sport = rescueNoLegNationalTeamSport(bet.sport, bet.description);
+  if (bet.sport !== preNationSport) {
+    console.log(`[AI Grader] NATION RESCUE: ${preNationSport} → ${bet.sport} for "${(bet.description || '').slice(0, 50)}"`);
+  }
+
   // ── AUTO-VOID UNSCOPED BETS ──
   // If the sport is null / Unknown / N/A / outside the supported set,
   // void the bet immediately and skip BOTH ESPN and AI. With Brave dead
@@ -3194,6 +3253,7 @@ module.exports = {
   SUPPORTED_SPORTS,
   isSupportedSport,
   canonicalizeSportForGrading,
+  rescueNoLegNationalTeamSport,
   SPORT_ALIAS_TO_CANONICAL,
   // Exported for unit tests only — do not rely on these from bot code:
   _internal: {

@@ -1627,6 +1627,13 @@ const SOCCER_NATIONAL_TEAMS = [
   'honduras', 'colombia', 'ecuador', 'peru', 'paraguay', 'venezuela', 'bolivia',
   'chile', 'iran', 'senegal', 'ghana', 'nigeria', 'cameroon', 'algeria',
   'ivory coast', "cote d'ivoire", 'south africa',
+  // ── added 2026-06-16 (grade-time no-leg national-team rescue PR) ──
+  // The browser-audit specimen "GNP Iraq team total over .5" ingested as a
+  // no-leg sport=Unknown row and auto-voided at the grade gate, while the SAME
+  // batch's leg-bearing "Algeria team total under .5" was rescued to Soccer by
+  // #100's leg validator. Iraq was simply absent from this list. Whole-word
+  // \biraq\b — "iraqi" has no trailing word boundary, so it does not ride along.
+  'iraq',
 ];
 
 // Whole-word / whole-phrase matcher for the national teams. Longest-first so the
@@ -2388,4 +2395,4 @@ function normalizeEventDate(raw) {
   return null;
 }
 
-module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, evaluateTweet, validateParsedBet, validateLegSportConsistency, validateLegShape, isSportsbookBrand, reclassifySport, inferLegSport, disambiguateAmbiguousTeam, matchesKboTeam, normalizeKboLeg, declaredSportIncludesKbo, isInSeason, normalizeEventDate, AMBIGUITY_THRESHOLD, tryVisionGemma, parseGemmaOutputWithCerebras, runGemmaVisionFallback, logVisionFailure, GEMMA_SLIP_PROMPT, gemmaHealth, isGemmaHealthy, recordGemmaResult, callLLM, callLLMResult, callGemini, callOpenAI, AdapterError, FALLBACK_ELIGIBLE };
+module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, evaluateTweet, validateParsedBet, validateLegSportConsistency, validateLegShape, isSportsbookBrand, reclassifySport, inferLegSport, descNamesNationalTeam, disambiguateAmbiguousTeam, matchesKboTeam, normalizeKboLeg, declaredSportIncludesKbo, isInSeason, normalizeEventDate, AMBIGUITY_THRESHOLD, tryVisionGemma, parseGemmaOutputWithCerebras, runGemmaVisionFallback, logVisionFailure, GEMMA_SLIP_PROMPT, gemmaHealth, isGemmaHealthy, recordGemmaResult, callLLM, callLLMResult, callGemini, callOpenAI, AdapterError, FALLBACK_ELIGIBLE };
