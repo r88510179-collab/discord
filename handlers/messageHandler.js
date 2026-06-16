@@ -1118,6 +1118,11 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
       // Auto-grade detection
       if (parsed.type === 'result') {
         console.log(`[AutoGrade] AI detected result: ${parsed.outcome} for ${parsed.subject?.join(', ')}`);
+        // F17 instrumentation: vision classified this relay image as a settled result and
+        // routes it to auto-grade — NO new bet is staged for this ingest. Record the terminal
+        // DROP first (before the side-effect) so the ingest reaches a terminal pipeline_event
+        // instead of vanishing after EXTRACTED/PARSED. Logging only — the auto-grade is unchanged.
+        dropAll('DROPPED', 'VISION_RESULT_RECAP', { parsedType: 'result', outcome: parsed.outcome || null, subjectCount: parsed.subject?.length || 0 });
         await autoGradeBet(message.client, parsed.outcome, parsed.subject || []);
         return;
       }
@@ -1125,6 +1130,10 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
       // Untracked winner — send yellow embed to War Room
       if (parsed.type === 'untracked_win') {
         console.log(`[UntrackedWin] Detected: ${parsed.description}`);
+        // F17 instrumentation: vision classified this as an untracked win (War Room embed
+        // only, NO new tracked bet). Record the terminal DROP first so the ingest doesn't
+        // vanish after EXTRACTED/PARSED. Logging only — the embed below is unchanged.
+        dropAll('DROPPED', 'VISION_UNTRACKED_WIN', { parsedType: 'untracked_win', description: (parsed.description || '').slice(0, 120) });
 
         // Determine source URL. Two cases:
         //   (a) Twitter-vision relay from mobile-ingest: message has an embed
@@ -1172,6 +1181,11 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
       if (parsed.ticket_status === 'winner' || parsed.ticket_status === 'loser') {
         const outcome = parsed.ticket_status === 'winner' ? 'win' : 'loss';
         console.log(`[RecapSlip] Detected ${parsed.ticket_status} ticket with ${parsed.bets?.length || 0} bet(s) from ${capperInfo.name}`);
+        // F17 instrumentation: vision classified this as a completed ticket (recap) and routes
+        // it to recap-grade matching — NO new tracked bet is staged for this ingest. Record the
+        // terminal DROP first so the ingest reaches a terminal pipeline_event instead of vanishing
+        // after EXTRACTED/PARSED. Logging only — the recap-grade loop below is unchanged.
+        dropAll('DROPPED', 'VISION_TICKET_RECAP', { parsedType: 'recap', ticketStatus: parsed.ticket_status, betCount: parsed.bets?.length || 0 });
 
         let graded = 0;
         for (const bet of (parsed.bets || [])) {
@@ -1410,6 +1424,13 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
             recordDrop({ ingestId, sourceType: 'discord', sourceRef, stage: 'DROPPED', dropReason: 'DUPLICATE_IMAGE', payload: { dedup: 'fingerprint' } });
           }
         }
+      } else {
+        // F17 instrumentation: the ONLY way past the is_bet=false (above) and indeterminate
+        // (is_bet !== true && no bets) guards with an empty bets array is is_bet===true && bets:[]
+        // (e.g. normalizeBet filtered every parsed bet out). Without this the ingest would exit
+        // after PARSED with no terminal pipeline_event. Reuses PRE_FILTER_AI_EMPTY_RESULT with a
+        // distinct `filter` tag so it stays queryable apart from the indeterminate drop. Logging only.
+        dropAll('DROPPED', 'PRE_FILTER_AI_EMPTY_RESULT', { filter: 'ai_is_bet_true_no_bets', is_bet_value: String(parsed.is_bet), parsedType: parsed.type || null, betCount: 0 });
       }
     }
 
