@@ -510,6 +510,97 @@ function isSupportedSport(sport) {
   return SUPPORTED_SPORTS.has(s);
 }
 
+// ── Sport-alias canonicalization (audit finding B7) ──
+// Gradeable sports are often labeled with a non-canonical alias ("World Cup",
+// "Hockey", "ATP") that is NOT a SUPPORTED_SPORTS token, so the EXACT-STRING
+// gate in gradePropWithAI silently auto-voids them — and because createBet
+// defaults review_status='confirmed', no human ever sees the loss.
+//
+// This map resolves an unambiguous alias to the SUPPORTED family token so the
+// gate passes and the bet reaches the grader. It is deliberately CONSERVATIVE:
+//   • Every value MUST be a member of SUPPORTED_SPORTS (asserted in the test).
+//   • Keys are matched as the WHOLE sport LABEL only — case-insensitive and
+//     trimmed, never as a substring. `bet.sport` is a short label ("World Cup"),
+//     not free text, so this avoids the substring trap PR #100 hit (matching a
+//     team nickname inside unrelated words).
+//   • Only aliases that resolve to EXACTLY ONE supported sport are listed.
+//   • Foreign domestic leagues the codebase intentionally treats as UNMODELED
+//     (KBO / KHL / NPB — see services/normalization.js isUnmodeledSportPart)
+//     are deliberately EXCLUDED — mapping them to a US league token would
+//     mislabel a distinct competition. Generic sport labels ("Hockey") and
+//     unambiguous international competitions ("World Cup", "IIHF") are included
+//     because they denote the modeled sport even when the precise league differs
+//     (the Odds endpoint may miss and grading falls through to web search — the
+//     intended "reach the grader, don't pre-void" outcome).
+const SPORT_ALIAS_TO_CANONICAL = {
+  // ── Soccer competitions / international labels → SOCCER ──
+  'WORLD CUP': 'SOCCER', 'FIFA WORLD CUP': 'SOCCER',
+  'UEFA': 'SOCCER', 'UEFA EURO': 'SOCCER',
+  'UEFA NATIONS LEAGUE': 'SOCCER', 'NATIONS LEAGUE': 'SOCCER',
+  'COPA AMERICA': 'SOCCER', 'COPA': 'SOCCER',
+  // Only the QUALIFIED international-friendly labels — bare "Friendly" /
+  // "Friendlies" is a fixture TYPE, not a sport (basketball/rugby/cricket all
+  // have friendlies), so it is deliberately NOT mapped (audit B7 review).
+  'INTERNATIONAL FRIENDLY': 'SOCCER', 'INTERNATIONAL FRIENDLIES': 'SOCCER',
+  // ── Ice hockey → NHL (the only modeled hockey token) ──
+  'HOCKEY': 'NHL', 'ICE HOCKEY': 'NHL', 'IIHF': 'NHL',
+  // ── Tennis tours → TENNIS ──
+  'ATP': 'TENNIS', 'WTA': 'TENNIS',
+  // ── Golf → GOLF (golf IS a supported sport; PGA is unambiguously golf) ──
+  'PGA': 'GOLF',
+};
+
+// Resolve a single trimmed+uppercased part to its canonical supported token,
+// or null when it is neither a known alias nor an already-supported token.
+function _canonicalSportPart(part) {
+  if (Object.prototype.hasOwnProperty.call(SPORT_ALIAS_TO_CANONICAL, part)) {
+    return SPORT_ALIAS_TO_CANONICAL[part];
+  }
+  return SUPPORTED_SPORTS.has(part) ? part : null;
+}
+
+/**
+ * Map a non-canonical-but-unambiguous sport LABEL to its SUPPORTED_SPORTS family
+ * token so the supported-sport gate doesn't pre-void a gradeable bet. Returns
+ * the input UNCHANGED when it is already supported, unknown, or a genuinely
+ * mixed compound — so isSupportedSport still rejects truly unsupported sports
+ * (no false rescue).
+ *
+ * Compound labels ("ATP/WTA", "MLB/NBA") are split on / & , and rescued ONLY
+ * when EVERY part resolves to the SAME canonical token ("ATP/WTA" → TENNIS). A
+ * genuinely mixed compound ("MLB/NBA", "MMA/Boxing") is left untouched — it is a
+ * multi-sport bet and must not be force-canonicalized to one sport.
+ *
+ * @param {*} rawSport  raw sport label (any casing) or null/undefined.
+ * @returns canonical SUPPORTED token for a recognized alias; otherwise the input
+ *          trimmed. null/undefined and empty/whitespace pass through unchanged.
+ */
+function canonicalizeSportForGrading(rawSport) {
+  if (rawSport == null) return rawSport;
+  const trimmed = String(rawSport).trim();
+  if (!trimmed) return trimmed;
+  const whole = trimmed.toUpperCase();
+  // 1. Whole-label alias — also covers multi-word aliases with no separator
+  //    ("FIFA WORLD CUP", "UEFA NATIONS LEAGUE").
+  if (Object.prototype.hasOwnProperty.call(SPORT_ALIAS_TO_CANONICAL, whole)) {
+    return SPORT_ALIAS_TO_CANONICAL[whole];
+  }
+  // 2. Already a supported token → leave as-is (the gate will accept it).
+  if (SUPPORTED_SPORTS.has(whole)) return trimmed;
+  // 3. Compound — rescue only when EVERY non-empty part agrees on one canonical
+  //    token ("ATP/WTA" → TENNIS). >= 1 (not >= 2) so a single real part left
+  //    after stripping a dangling separator ("ATP/" → ["ATP"]) is still
+  //    rescued; a genuinely mixed compound still has ≥1 disagreeing/unknown part
+  //    and falls through unchanged (no false rescue — verified for Cricket/KHL).
+  const parts = whole.split(/[/&,]/).map((s) => s.trim()).filter(Boolean);
+  if (parts.length >= 1) {
+    const canon = parts.map(_canonicalSportPart);
+    if (canon.every((c) => c && c === canon[0])) return canon[0];
+  }
+  // 4. Unknown / mixed → unchanged (no false rescue).
+  return trimmed;
+}
+
 // ═══════════════════════════════════════════════════════════
 // Player-prop evidence guard (G6 sub-check)
 //
@@ -2141,6 +2232,18 @@ async function gradePropWithAI(bet) {
     }
   }
 
+  // ── Canonicalize sport ALIASES (audit B7) ──
+  // Map an unambiguous alias label ("World Cup", "Hockey", "ATP") to its
+  // SUPPORTED family token BEFORE the gate below, so a gradeable sport under a
+  // non-canonical label reaches the grader instead of being silently
+  // auto-voided. Whole-label match only (see canonicalizeSportForGrading) — runs
+  // after reclassifySport so a team-name rescue still wins first.
+  const preAliasSport = bet.sport;
+  bet.sport = canonicalizeSportForGrading(bet.sport);
+  if (bet.sport !== preAliasSport) {
+    console.log(`[AI Grader] SPORT ALIAS: ${preAliasSport} → ${bet.sport} for "${(bet.description || '').slice(0, 50)}"`);
+  }
+
   // ── AUTO-VOID UNSCOPED BETS ──
   // If the sport is null / Unknown / N/A / outside the supported set,
   // void the bet immediately and skip BOTH ESPN and AI. With Brave dead
@@ -3067,6 +3170,8 @@ module.exports = {
   probeBrave,
   SUPPORTED_SPORTS,
   isSupportedSport,
+  canonicalizeSportForGrading,
+  SPORT_ALIAS_TO_CANONICAL,
   // Exported for unit tests only — do not rely on these from bot code:
   _internal: {
     looksLikePlayerProp, parsePlayerPropDescription, searchWeb, isTrustedLossLeg, aggregateParlayLegResults,
