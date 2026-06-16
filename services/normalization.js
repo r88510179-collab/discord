@@ -347,6 +347,48 @@ function declaresOnlyUnmodeledLeagues(declaredSport) {
 }
 
 /**
+ * True when the declared sport CONFIDENTLY names AT LEAST ONE league/sport we
+ * don't model — the EXISTENCE dual of declaresOnlyUnmodeledLeagues. Same
+ * canonicalization (whole-label placeholder/modeled-name pre-check, then split
+ * on / & , exactly like validateLegSportConsistency's declared-sport set) and
+ * the same per-element predicate (isUnmodeledSportPart); only the quantifier
+ * differs — `.some` here vs `.every` there.
+ *
+ * Used by the grader's supported-sport gate (services/grading.js gradePropWithAI):
+ * a bet whose declared sport is an intentionally-unmodeled real league (KBO /
+ * KHL / NPB — the leagues the codebase deliberately excludes from alias-rescue,
+ * grading.js SPORT_ALIAS_TO_CANONICAL) cannot be settled by our models, but it
+ * must NOT be auto-voided to a silent (and possibly false) result — a human has
+ * to grade it. ANY part (not EVERY) qualifies because a parlay cannot settle
+ * while even one leg is in an unmodeled league ("MLB/KBO" → divert: the KBO leg
+ * blocks the whole slip).
+ *
+ * Deliberately conservative — false (the gate's auto-void path stands) when:
+ *   • declaredSport is absent/empty (null/'' → STILL auto-void), or
+ *   • the WHOLE label is a non-committal placeholder ("Unknown", "N/A", … —
+ *     SPORT_PLACEHOLDERS; the dominant garbage-sport value detectSport emits),
+ *     so genuine "no sport" garbage keeps auto-voiding, or
+ *   • EVERY element names a modeled league by CODE or NAME (a free-text caption
+ *     like "MLB Wednesday picks" contains the whole-word code "MLB" → its only
+ *     part is modeled → false → STILL auto-void, no regression).
+ *
+ * @param {string} [declaredSport]
+ * @returns {boolean}
+ */
+function declaresAnyUnmodeledLeague(declaredSport) {
+  if (declaredSport == null) return false;
+  const whole = String(declaredSport).trim().toUpperCase();
+  if (!whole) return false;
+  // Whole-label pre-check BEFORE splitting (mirrors the sibling predicates):
+  // "N/A" contains the separator "/" and "MAJOR LEAGUE BASEBALL" is a single
+  // multi-word name — neither should be split into meaningless parts.
+  if (SPORT_PLACEHOLDERS.has(whole) || modeledLeagueNames.has(whole)) return false;
+  const parts = whole.split(/[/&,]/).map((s) => s.trim()).filter(Boolean);
+  if (parts.length === 0) return false;
+  return parts.some(isUnmodeledSportPart);
+}
+
+/**
  * True when the declared sport carries NO league signal — it is null/empty or a
  * non-committal placeholder (one of SPORT_PLACEHOLDERS: 'Unknown', 'N/A', 'TBD',
  * …). detectSport (services/ai.js) emits the literal 'Unknown' for abbreviation/
@@ -450,4 +492,4 @@ function reloadMappings() {
   playerIndex = loadPlayerMappings();
 }
 
-module.exports = { normalizeTeam, normalizeDescription, normalizePlayer, reloadMappings, declaresOnlyUnmodeledLeagues, isSportPlaceholder };
+module.exports = { normalizeTeam, normalizeDescription, normalizePlayer, reloadMappings, declaresOnlyUnmodeledLeagues, declaresAnyUnmodeledLeague, isSportPlaceholder };

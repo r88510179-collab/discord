@@ -653,27 +653,39 @@ function gradeBetRecord(betId, result, profitUnits, grade, gradeReason, allowAut
   return { graded: true };
 }
 
+// Terminal review_status values that make a still-`pending` bet INVISIBLE to the
+// autograder AND the 7-day sweeper (which both draw exclusively from
+// getPendingBets). 'needs_review' = war-room human queue (PR #89).
+// 'manual_review_unmodeled_sport' = a real unmodeled league (KBO/KHL/NPB) parked
+// for human grading instead of auto-voided (gradePropWithAI divert) — it stays
+// result='pending' (no grade written), so without this exclusion the sweeper
+// would settle it to a FALSE loss after 7 days. grading_state='done' already
+// hides it from the state-machine path; this guards the kill-switch path and any
+// future grading_state drift.
+const GRADER_HIDDEN_REVIEW_STATUSES = ['needs_review', 'manual_review_unmodeled_sport'];
+
 // P0 state-machine selector: only rows eligible for the current grading cycle.
 // Kill-switch env var reverts to the old broad query.
-// Bets awaiting human review (review_status='needs_review') are invisible to
-// the grader and every auto-void path until approveBet() confirms them —
+// Bets awaiting human review (review_status in GRADER_HIDDEN_REVIEW_STATUSES) are
+// invisible to the grader and every auto-void path until they are confirmed —
 // otherwise the AutoGrader races the war-room queue and stales its buttons.
 function getPendingBets() {
   if ((process.env.GRADING_STATE_MACHINE_ENABLED || 'true') === 'false') {
     // stmts.pendingBets is shared with getAllPendingBets (dashboards/admin),
     // so the review-queue exclusion is applied here, not in the statement.
-    return stmts.pendingBets.all().filter(b => b.review_status !== 'needs_review');
+    return stmts.pendingBets.all().filter(b => !GRADER_HIDDEN_REVIEW_STATUSES.includes(b.review_status));
   }
+  const placeholders = GRADER_HIDDEN_REVIEW_STATUSES.map(() => '?').join(',');
   return db.prepare(`
     SELECT b.*, c.display_name AS capper_name, c.discord_id AS capper_discord_id
     FROM bets b LEFT JOIN cappers c ON b.capper_id = c.id
     WHERE b.result = 'pending'
-      AND (b.review_status IS NULL OR b.review_status != 'needs_review')
+      AND (b.review_status IS NULL OR b.review_status NOT IN (${placeholders}))
       AND b.grading_state IN ('ready','backoff')
       AND (b.grading_lock_until IS NULL OR b.grading_lock_until < datetime('now'))
       AND (b.grading_next_attempt_at IS NULL OR b.grading_next_attempt_at <= datetime('now'))
     ORDER BY b.created_at DESC
-  `).all();
+  `).all(...GRADER_HIDDEN_REVIEW_STATUSES);
 }
 
 // Broad pending selector — preserves old behavior for dashboards/admin/healthReport.

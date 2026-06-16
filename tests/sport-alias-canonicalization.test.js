@@ -18,8 +18,10 @@
 //   D. Compound rule — all-parts-same → rescue; genuinely mixed → untouched.
 //   E. Invariant — every alias value is a real SUPPORTED_SPORTS member.
 //   F. Null / empty safety.
-//   G. Integration — gradePropWithAI does NOT auto-void a World Cup bet, but DOES
-//      auto-void a genuinely unsupported (Cricket) bet.
+//   G. Integration — gradePropWithAI does NOT auto-void a World Cup bet, STILL
+//      auto-voids a genuine-garbage sport (with GRADE_AUTOVOID_UNSCOPED drop), and
+//      diverts a real-but-unmodeled sport (Cricket) to manual review rather than
+//      voiding it (see tests/unmodeled-sport-manual-review.test.js).
 //
 // Each behaviour-change assertion fails on pre-fix code (the helper does not
 // exist, and pre-fix the World Cup bet is auto-voided).
@@ -203,27 +205,44 @@ async function gradeRow(betRow) {
   const atpAfter = await gradeRow(atp);
   ok('ATP NOT auto-voided by gate', atpAfter.review_status !== 'auto_void_unscoped_bet');
 
-  // Genuinely unsupported sport — the gate MUST still auto-void it (no false rescue).
+  // Genuine-garbage sport (a non-committal placeholder, no real league) — the gate
+  // MUST still auto-void it. The manual-review divert below spares only REAL
+  // unmodeled sports; null/Unknown/garbage are unchanged (declaresAnyUnmodeledLeague
+  // returns false for placeholders). Description names no nation/team so the
+  // national-team rescue does not fire and it reaches the gate as Unknown.
+  const garbage = database.createBet({
+    capper_id: 'test-capper', sport: 'Unknown', description: 'generic promo wager no teams here test-b7',
+    bet_type: 'straight', odds: '-150', units: 1, source: 'test',
+  });
+  const garbageAfter = await gradeRow(garbage);
+  ok('Unknown garbage IS auto-voided (gate still works)', garbageAfter.review_status === 'auto_void_unscoped_bet');
+  ok('Unknown garbage result void', garbageAfter.result === 'void');
+
+  // A genuinely-unsupported REAL sport (Cricket) is NO LONGER auto-voided — like
+  // KBO it is a real competition we can't grade, so the gate diverts it to manual
+  // review instead of recording a silent (often false) void (see
+  // tests/unmodeled-sport-manual-review.test.js). canonicalize still does not
+  // rescue it (sections A/B), so it reaches the gate unsupported.
   const cricket = database.createBet({
     capper_id: 'test-capper', sport: 'Cricket', description: 'India to win the test match test-b7',
     bet_type: 'straight', odds: '-150', units: 1, source: 'test',
   });
   const cricketAfter = await gradeRow(cricket);
-  ok('Cricket IS auto-voided (gate still works)', cricketAfter.review_status === 'auto_void_unscoped_bet');
-  ok('Cricket result void', cricketAfter.result === 'void');
+  ok('Cricket diverts to manual review (real unmodeled sport, not voided)', cricketAfter.review_status === 'manual_review_unmodeled_sport');
+  ok('Cricket NOT voided (result stays pending)', cricketAfter.result === 'pending');
 
   // ── G2. Traceability of the unscoped void (audit B7 follow-up) ─────────
   // The terminal auto-void used to return its AUTO_VOIDED sentinel with NO
   // pipeline_events row, so every unsupported-sport void left an empty trail
   // (the empty trail that made the "World Cup keeps voiding" report look like a
   // separate sweep). It now records a DROP. FAILS on pre-fix code (no recordDrop):
-  // the genuinely-unsupported Cricket void MUST leave exactly such a row AND stamp
+  // the genuine-garbage void MUST leave exactly such a row AND stamp
   // bets.drop_reason; the World Cup pick — which grades, never voids — must NOT.
   const unscopedDropCount = (id) => database.db.prepare(
     "SELECT COUNT(*) AS c FROM pipeline_events WHERE bet_id = ? AND event_type = 'DROP' AND drop_reason = 'GRADE_AUTOVOID_UNSCOPED'",
   ).get(id).c;
-  ok('Cricket void records a GRADE_AUTOVOID_UNSCOPED drop (no longer silent)', unscopedDropCount(cricket.id) >= 1);
-  ok('Cricket void stamps bets.drop_reason', (database.db.prepare('SELECT drop_reason FROM bets WHERE id = ?').get(cricket.id) || {}).drop_reason === 'GRADE_AUTOVOID_UNSCOPED');
+  ok('garbage void records a GRADE_AUTOVOID_UNSCOPED drop (no longer silent)', unscopedDropCount(garbage.id) >= 1);
+  ok('garbage void stamps bets.drop_reason', (database.db.prepare('SELECT drop_reason FROM bets WHERE id = ?').get(garbage.id) || {}).drop_reason === 'GRADE_AUTOVOID_UNSCOPED');
   ok('World Cup (graded, not voided) has NO unscoped-void drop', unscopedDropCount(wc.id) === 0);
 
   // ── Summary ──────────────────────────────────────────────────────────
