@@ -1754,6 +1754,22 @@ const SPORT_ACTION_MAP = {
 };
 
 function reclassifySport(parsedSport, description) {
+  // KBO awareness (mirrors validateLegSportConsistency's
+  // `declaredSet.has('KBO') && matchesKboTeam` carve-out). Six KBO clubs share a
+  // US nickname (Eagles/Tigers/Twins/Lions/Giants/Bears) and KBO is intentionally
+  // NOT in SPORT_TEAM_MAP, so a declared-KBO parlay whose legs name KBO clubs
+  // reclassifies to the colliding US league ("Hanwha Eagles / Samsung Lions" →
+  // NFL). That corrupts bets.sport BEFORE gradePropWithAI's supported-sport gate
+  // and DEFEATS the #113 manual-review divert: the gate then sees a supported
+  // (NFL) sport, never diverts, grades every leg against the wrong league, and
+  // the slip loops on backoff (live bet 38ab5396, KBO → NFL). When the declared
+  // sport already names KBO and the description names a KBO club (sponsor prefix
+  // decisive; tolerates the "Hanwha Philadelphia Eagles" Vision corruption), keep
+  // the declared sport. Runs before disambiguateAmbiguousTeam so an injected US
+  // city cannot force the wrong sport first.
+  if (declaredSportIncludesKbo(parsedSport) && matchesKboTeam(description)) {
+    return parsedSport;
+  }
   // P1 Bug 2: a recognized (nickname, full-city) pair forces the sport. This
   // overrides the multi-sport "keep original" no-op below (a shared nickname
   // matches >=2 sports in SPORT_TEAM_MAP, so without this it never reclassed).
@@ -1765,7 +1781,13 @@ function reclassifySport(parsedSport, description) {
 
   for (const [sport, keywords] of Object.entries(SPORT_TEAM_MAP)) {
     for (const kw of keywords) {
-      if (desc.includes(kw)) { matchedSports.add(sport); break; }
+      // Whole-word match (#103's `legTextHasTeamWord`, \b-anchored) — NOT a bare
+      // substring scan: "CJ Ab*rams*" must not reclassify an MLB hits-parlay to
+      // NFL via the "rams" substring (live bet 0f50c2bf — every leg then searched
+      // "<player> NFL final score", found nothing, and the slip stalled PENDING).
+      // A bare "rams" / "Rams -3.5" token still matches; a multi-word name
+      // ("red sox", "blue jays") still matches as a phrase.
+      if (legTextHasTeamWord(desc, kw)) { matchedSports.add(sport); break; }
     }
   }
 
@@ -1789,6 +1811,16 @@ function reclassifySport(parsedSport, description) {
 
 // Infer sport from a single leg description
 function inferLegSport(legDescription) {
+  // KBO awareness: a leg naming a KBO club (sponsor + nickname, e.g.
+  // "Hanwha Eagles") is never the US team its nickname collides with. Return
+  // null — no confident per-leg signal — so the caller inherits the parlay's
+  // stored sport instead of mis-firing NFL (gradeParlay's
+  // `inferLegSport(...) || parlayBet.sport` floor). matchesKboTeam requires the
+  // sponsor pairing, so a bare "Eagles" never matches and real NFL legs are
+  // untouched. Runs before disambiguateAmbiguousTeam so the "Hanwha Philadelphia
+  // Eagles" Vision corruption can't force NFL via the injected city. Mirrors the
+  // validator's matchesKboTeam carve-out.
+  if (matchesKboTeam(legDescription)) return null;
   // P1 Bug 2: city-aware disambiguation precedes the (oppositely-ordered)
   // SPORT_TEAM_MAP scan below, so a lone shared nickname + a known city
   // resolves consistently with detectSport instead of MLB-first.
@@ -1796,10 +1828,13 @@ function inferLegSport(legDescription) {
   if (forced) return forced;
   const desc = (legDescription || '').toLowerCase();
   // Team-name keywords first — these are the strongest signal (whole
-  // franchise names rarely false-match).
+  // franchise names rarely false-match). Whole-word matched (#103's
+  // `legTextHasTeamWord`, \b-anchored) so a player surname never false-fires the
+  // colliding nickname inside it ("CJ Ab*rams*" ⊅ NFL "rams", "Wheaton" ⊅ NBA
+  // "heat"); a multi-word name ("red sox") still matches as a phrase.
   for (const [sport, keywords] of Object.entries(SPORT_TEAM_MAP)) {
     for (const kw of keywords) {
-      if (desc.includes(kw)) return sport;
+      if (legTextHasTeamWord(desc, kw)) return sport;
     }
   }
   // Action / prop keywords as a secondary signal for player-only legs
