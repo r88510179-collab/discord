@@ -91,6 +91,18 @@ run('F17 vision-recap drop reasons are registered in DROP_REASONS', () => {
   }
 });
 
+// Unscoped auto-void traceability (audit B7 follow-up 2026-06-16): the terminal
+// auto-void in gradePropWithAI (services/grading.js) for null/Unknown/unsupported
+// sport previously returned its AUTO_VOIDED sentinel with NO pipeline_events row,
+// so unsupported-sport voids left an empty trail. It now records a DROP with this
+// reason — registered so the warn-only write-boundary tripwire stays quiet.
+run('GRADE_AUTOVOID_UNSCOPED is registered in DROP_REASONS', () => {
+  assert.ok(
+    pe.DROP_REASONS.includes('GRADE_AUTOVOID_UNSCOPED'),
+    'GRADE_AUTOVOID_UNSCOPED missing from DROP_REASONS',
+  );
+});
+
 // Hold-recovery retry-cap marker (services/holdReview.js): one row per
 // vision-burning failed recovery attempt; COUNT(*) per ingest is the cap
 // counter. Registered so the tripwire stays quiet on every failed attempt.

@@ -78,6 +78,7 @@ const DROP_REASONS = [
   'GRADE_RESOLVER_UNRESOLVED',
   'GRADE_EXCEPTION',
   'GRADE_BACKOFF_EXHAUSTED',
+  'GRADE_AUTOVOID_UNSCOPED',         // gradePropWithAI auto-voided a bet whose sport is null/Unknown/outside SUPPORTED_SPORTS (after reclassify + canonicalizeSportForGrading). This terminal void returns the AUTO_VOIDED sentinel that runAutoGrade's if/else ignores, so pre-#110-followup it left an EMPTY trail (zero pipeline_events) — registered + emitted so each unsupported-sport void is queryable, DISTINCT from the no-data void (review_status='auto_void_no_searchable_data') and the retry-cap void (GRADE_BACKOFF_EXHAUSTED). Audit B7 follow-up 2026-06-16.
   'GRADE_POST_GUARD_REJECTED',      // post-AI guard rejected verdict (hallucination, team/player mismatch, cross-sport)
   'GRADE_AI_NO_PROVIDERS',          // all AI providers failed or none configured
   'GRADE_PENDING_UNCLASSIFIED',     // wrapper catch-all — PENDING not matching known prefixes
