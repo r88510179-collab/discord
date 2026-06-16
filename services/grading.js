@@ -2255,8 +2255,9 @@ async function gradePropWithAI(bet) {
   // paths inherit the guard.
   if (!isSupportedSport(bet.sport)) {
     console.log(`[AutoGrade] Auto-void unscoped: ${bet.id} | sport=${bet.sport} | "${(bet.description || '').slice(0, 80)}"`);
+    let voided = false;
     try {
-      db.prepare(`UPDATE bets SET
+      const info = db.prepare(`UPDATE bets SET
         result = 'void',
         profit_units = 0,
         graded_at = datetime('now'),
@@ -2269,8 +2270,30 @@ async function gradePropWithAI(bet) {
         `Auto-voided: sport=${bet.sport || 'null'} not in supported set`,
         bet.id
       );
+      voided = info.changes > 0;
     } catch (e) {
       console.error(`[AutoGrade] Auto-void write error: ${e.message}`);
+    }
+    // Traceability (audit B7 follow-up): this terminal void returns the
+    // AUTO_VOIDED sentinel below, which runAutoGrade's if/else does NOT match,
+    // so the branch finalizes WITHOUT finalizeBetGrading and emitted NO
+    // pipeline_events — every unsupported-sport void left an empty trail, which
+    // is exactly what made the "World Cup bets keep voiding" report hard to
+    // diagnose. Record a DROP (only when a row was actually voided) so each void
+    // is queryable and distinct from the no-data and retry-cap voids. Mirrors the
+    // retry-cap recordDrop above; fire-and-forget, never breaks the void.
+    if (voided) {
+      bets.recordDrop({
+        betId: bet.id,
+        stage: 'GRADING_DROPPED',
+        dropReason: 'GRADE_AUTOVOID_UNSCOPED',
+        payload: {
+          sport: bet.sport || null,
+          orig_sport: origSport || null,
+          bet_desc_preview: String(bet.description || '').slice(0, 200),
+        },
+        ingestId: bet.ingest_id || null,
+      });
     }
     // Return sentinel that runAutoGrade's if/else won't match → silent no-op.
     // (The DB write above is the real finalize; no need for finalizeBetGrading.)

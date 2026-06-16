@@ -212,6 +212,20 @@ async function gradeRow(betRow) {
   ok('Cricket IS auto-voided (gate still works)', cricketAfter.review_status === 'auto_void_unscoped_bet');
   ok('Cricket result void', cricketAfter.result === 'void');
 
+  // ── G2. Traceability of the unscoped void (audit B7 follow-up) ─────────
+  // The terminal auto-void used to return its AUTO_VOIDED sentinel with NO
+  // pipeline_events row, so every unsupported-sport void left an empty trail
+  // (the empty trail that made the "World Cup keeps voiding" report look like a
+  // separate sweep). It now records a DROP. FAILS on pre-fix code (no recordDrop):
+  // the genuinely-unsupported Cricket void MUST leave exactly such a row AND stamp
+  // bets.drop_reason; the World Cup pick — which grades, never voids — must NOT.
+  const unscopedDropCount = (id) => database.db.prepare(
+    "SELECT COUNT(*) AS c FROM pipeline_events WHERE bet_id = ? AND event_type = 'DROP' AND drop_reason = 'GRADE_AUTOVOID_UNSCOPED'",
+  ).get(id).c;
+  ok('Cricket void records a GRADE_AUTOVOID_UNSCOPED drop (no longer silent)', unscopedDropCount(cricket.id) >= 1);
+  ok('Cricket void stamps bets.drop_reason', (database.db.prepare('SELECT drop_reason FROM bets WHERE id = ?').get(cricket.id) || {}).drop_reason === 'GRADE_AUTOVOID_UNSCOPED');
+  ok('World Cup (graded, not voided) has NO unscoped-void drop', unscopedDropCount(wc.id) === 0);
+
   // ── Summary ──────────────────────────────────────────────────────────
   console.log(`\nsport-alias-canonicalization: ${pass} passed, ${fail} failed`);
   try { if (fs.existsSync(dbFile)) fs.unlinkSync(dbFile); } catch (_) {}
