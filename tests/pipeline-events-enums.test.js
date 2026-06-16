@@ -81,6 +81,16 @@ run('GUARD5_INSUFFICIENT_SIGNALS is registered in DROP_REASONS', () => {
   );
 });
 
+// F17 (audit 2026-06-16): the relay-image vision path returned on a recap/result
+// classification without recording any terminal event. These three drop reasons make
+// each silent exit queryable and DISTINCT from a genuine extraction failure. Registered
+// so the warn-only write-boundary tripwire stays quiet when the call sites emit them.
+run('F17 vision-recap drop reasons are registered in DROP_REASONS', () => {
+  for (const reason of ['VISION_RESULT_RECAP', 'VISION_UNTRACKED_WIN', 'VISION_TICKET_RECAP']) {
+    assert.ok(pe.DROP_REASONS.includes(reason), `${reason} missing from DROP_REASONS`);
+  }
+});
+
 // Hold-recovery retry-cap marker (services/holdReview.js): one row per
 // vision-burning failed recovery attempt; COUNT(*) per ingest is the cap
 // counter. Registered so the tripwire stays quiet on every failed attempt.

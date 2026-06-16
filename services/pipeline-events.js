@@ -50,6 +50,17 @@ const DROP_REASONS = [
   'GUARD5_INSUFFICIENT_SIGNALS', // GUARD 5 pre-buffer signal heuristic dropped a message (looksLikePick <2 signals, no celebration, no images) — distinct from PRE_FILTER_NO_BET_CONTENT so "a real bare total was discarded by the heuristic" is queryable apart from genuine non-bet text (handlers/messageHandler.js GUARD 5). Incident 2026-06-11.
   'BOUNCER_REJECTED',
   'VISION_EXTRACTION_FAILED',
+  // ── F17 (2026-06-16): silent post-EXTRACTED returns in the relay-image path ──
+  // handlers/messageHandler.js processAggregatedMessage classified a vision parse as
+  // a recap/result and returned WITHOUT recording any terminal event, so the ingest
+  // vanished after EXTRACTED with zero bets and no DROP (audit F17: 65 relay-image
+  // ingests). These three make each such terminal exit queryable and DISTINCT from a
+  // genuine extraction failure (VISION_EXTRACTION_FAILED). Vision succeeded here — the
+  // content was simply not a new trackable bet. Mirror of twitter-handler.js's existing
+  // vision-result drop (which already used PRE_FILTER_NO_BET_CONTENT + a filter tag).
+  'VISION_RESULT_RECAP',        // parsed.type === 'result' → routed to autoGradeBet, no new bet staged
+  'VISION_UNTRACKED_WIN',       // parsed.type === 'untracked_win' → War Room embed only, no new bet
+  'VISION_TICKET_RECAP',        // parsed.ticket_status winner/loser → recap-grade matching, no new bet
   'TEXT_EXTRACTION_FAILED',     // parseBetText AI/parse failure (services/ai.js:1154,1173) — F-05 enum-drift registration
   'PARSER_NO_LEGS',
   'VALIDATOR_SPORT_MISMATCH',

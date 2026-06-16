@@ -36,7 +36,9 @@ function loadHandlerWithMocks({ parseBetText, parseBetSlipImage, createBetWithLe
   require.cache[dashboardPath] = { id: dashboardPath, filename: dashboardPath, loaded: true, exports: { postPickTracked: async () => {} } };
 
   const warRoomPath = path.resolve(__dirname, '../services/warRoom.js');
-  require.cache[warRoomPath] = { id: warRoomPath, filename: warRoomPath, loaded: true, exports: { sendStagingEmbed } };
+  // sendUntrackedWinEmbed is required inline inside processAggregatedMessage's
+  // untracked_win branch (F17 test); stub it so the branch's side-effect no-ops.
+  require.cache[warRoomPath] = { id: warRoomPath, filename: warRoomPath, loaded: true, exports: { sendStagingEmbed, sendUntrackedWinEmbed: async () => {} } };
 
   // Capture pipeline_events emissions for the pure-slip gate tests. The real module is kept
   // (real STAGES enum + makeIngestId); only the three write helpers are swapped for capturing
@@ -507,8 +509,115 @@ async function testDubclubWebhookBareTotalUnchanged() {
   assert.strictEqual(staged.length, 1, 'webhook bare total stages one War Room embed (unchanged)');
 }
 
+// ── F17: silent vision-extraction loss in the relay-image path ──────────────
+// audit 2026-06-16: 65 relay/image ingests traversed RECEIVED→AUTHORIZED→BUFFERED→
+// EXTRACTED then vanished — zero bets, NO terminal pipeline_event. The cause: three
+// post-EXTRACTED `return`s in processAggregatedMessage (vision classified the parse as
+// type:'result' / type:'untracked_win' / ticket_status:winner|loser) plus the narrow
+// is_bet===true && bets:[] fall-through, none of which recorded a terminal event. Each
+// must now record a terminal DROP. These tests drive a real image message through the
+// buffer→processAggregatedMessage path with a mocked parseBetText that forces each
+// classification, and assert the ingest reaches EXTRACTED AND a terminal event.
+//
+// Every assertion below FAILS on pre-fix code (no terminal event recorded) except the
+// thrown-error guard, which documents the pre-existing EXCEPTION_THROWN coverage.
+async function runVisionRelayMessage(parseBetText, messageId) {
+  process.env.PICKS_CHANNEL_IDS = 'channel_1';
+  process.env.HUMAN_SUBMISSION_CHANNEL_IDS = '';
+  process.env.PURE_SLIP_CHANNEL_IDS = '';
+  process.env.DUBCLUB_SPLIT_CHANNEL_IDS = '';
+  global.fetch = async () => ({ ok: true, arrayBuffer: async () => Buffer.from('fake') });
+
+  const events = [];
+  const writer = dedupeWriter();
+  const { handleMessage } = loadHandlerWithMocks({
+    parseBetText,
+    parseBetSlipImage: async () => ({ bets: [] }),
+    createBetWithLegs: writer,
+    sendStagingEmbed: async () => {},
+    events,
+  });
+
+  const msg = makeMessage({ messageId, withImage: true });
+  await handleMessage(msg);
+  await new Promise((resolve) => setTimeout(resolve, 4500));
+  return { events, writer };
+}
+
+// 1. Vision says type:'result' → terminal DROP VISION_RESULT_RECAP (was a silent return).
+async function testVisionResultRecapRecordsDrop() {
+  const { events, writer } = await runVisionRelayMessage(
+    async () => ({ type: 'result', outcome: 'win', subject: [] }),
+    'f17_result_1',
+  );
+  assert.ok(countStage(events, 'EXTRACTED') >= 1, 'image message must reach the EXTRACTED stage (vision path)');
+  const drop = events.find(e => e.fn === 'drop' && e.dropReason === 'VISION_RESULT_RECAP');
+  assert.ok(drop, 'vision type:result must record a terminal DROP VISION_RESULT_RECAP (FAILS pre-fix)');
+  assert.strictEqual(drop.stage, 'DROPPED', 'VISION_RESULT_RECAP must be a DROPPED-stage DROP');
+  assert.strictEqual(writer.insertedCount(), 0, 'result recap must not persist a bet (no behavior change)');
+}
+
+// 2. Vision says type:'untracked_win' → terminal DROP VISION_UNTRACKED_WIN.
+async function testVisionUntrackedWinRecordsDrop() {
+  const { events, writer } = await runVisionRelayMessage(
+    async () => ({ type: 'untracked_win', description: 'Someone hit a +1200 parlay' }),
+    'f17_untracked_1',
+  );
+  assert.ok(countStage(events, 'EXTRACTED') >= 1, 'image message must reach the EXTRACTED stage (vision path)');
+  const drop = events.find(e => e.fn === 'drop' && e.dropReason === 'VISION_UNTRACKED_WIN');
+  assert.ok(drop, 'vision type:untracked_win must record a terminal DROP VISION_UNTRACKED_WIN (FAILS pre-fix)');
+  assert.strictEqual(writer.insertedCount(), 0, 'untracked win must not persist a bet (no behavior change)');
+}
+
+// 3. Vision says ticket_status:'winner' → terminal DROP VISION_TICKET_RECAP.
+async function testVisionTicketRecapRecordsDrop() {
+  const { events, writer } = await runVisionRelayMessage(
+    async () => ({ ticket_status: 'winner', bets: [] }),
+    'f17_ticket_1',
+  );
+  assert.ok(countStage(events, 'EXTRACTED') >= 1, 'image message must reach the EXTRACTED stage (vision path)');
+  const drop = events.find(e => e.fn === 'drop' && e.dropReason === 'VISION_TICKET_RECAP');
+  assert.ok(drop, 'vision ticket_status:winner must record a terminal DROP VISION_TICKET_RECAP (FAILS pre-fix)');
+  assert.strictEqual(writer.insertedCount(), 0, 'ticket recap must not persist a bet (no behavior change)');
+}
+
+// 4. Vision says is_bet:true with an empty bets array (normalizeBet filtered all out) →
+//    the only way past the is_bet=false + indeterminate guards with no bets. Terminal DROP
+//    PRE_FILTER_AI_EMPTY_RESULT tagged filter:'ai_is_bet_true_no_bets'.
+async function testVisionIsBetTrueNoBetsRecordsDrop() {
+  const { events, writer } = await runVisionRelayMessage(
+    async () => ({ is_bet: true, bets: [] }),
+    'f17_isbettrue_empty_1',
+  );
+  assert.ok(countStage(events, 'EXTRACTED') >= 1, 'image message must reach the EXTRACTED stage (vision path)');
+  const drop = events.find(e => e.fn === 'drop'
+    && e.dropReason === 'PRE_FILTER_AI_EMPTY_RESULT'
+    && e.payload?.filter === 'ai_is_bet_true_no_bets');
+  assert.ok(drop, 'is_bet=true with empty bets must record a terminal DROP (FAILS pre-fix)');
+  assert.strictEqual(writer.insertedCount(), 0, 'empty-bets extraction must not persist a bet');
+}
+
+// 5. Regression guard (NOT a fix): a thrown vision parse is ALREADY terminal via the outer
+//    catch (EXCEPTION_THROWN). Documents the prompt's "(b) thrown error" case — passes pre AND
+//    post-fix, proving the exception path was never the silent hole (the recap returns were).
+async function testVisionThrowRecordsError() {
+  const { events, writer } = await runVisionRelayMessage(
+    async () => { throw new Error('vision backend exploded'); },
+    'f17_throw_1',
+  );
+  assert.ok(countStage(events, 'EXTRACTED') >= 1, 'image message must reach the EXTRACTED stage (vision path)');
+  const err = events.find(e => e.fn === 'error' && e.dropReason === 'EXCEPTION_THROWN');
+  assert.ok(err, 'a thrown vision parse must record a terminal EXCEPTION_THROWN event');
+  assert.strictEqual(writer.insertedCount(), 0, 'a thrown vision parse must not persist a bet');
+}
+
 (async () => {
   await testGetImageAttachmentsTagsOrigin();
+  await testVisionResultRecapRecordsDrop();
+  await testVisionUntrackedWinRecordsDrop();
+  await testVisionTicketRecapRecordsDrop();
+  await testVisionIsBetTrueNoBetsRecordsDrop();
+  await testVisionThrowRecordsError();
   await testReplayNoDuplicateSideEffects();
   await testTextAndImageSinglePersistedSet();
   await testNearSimultaneousReplaySingleSideEffects();
