@@ -1439,6 +1439,20 @@ function evaluateSweep(bet, now = Date.now()) {
   const betType = (bet.bet_type || '').toLowerCase();
   const desc = (bet.description || '').toLowerCase();
   if (betType === 'prop' || PROP_KEYWORDS.test(desc)) return { eligible: false, reason: 'prop' };
+  // Live-state guard against the stale-snapshot race: runAutoGrade captures
+  // `pending = getPendingBets()` ONCE, then its grader loop can PARK a bet to a
+  // terminal grading_state mid-cycle — most importantly the unmodeled-league
+  // divert (gradePropWithAI sets grading_state='done',
+  // review_status='manual_review_unmodeled_sport' but LEAVES result='pending').
+  // That bet is still in the stale `pending` array the sweeper filters, and the
+  // age/prop/grace checks never look at grading state, so without this re-read the
+  // sweeper would settle a just-parked bet to a FALSE loss in the SAME cycle it
+  // was diverted (canFinalizeBet only re-checks `result`, which a divert keeps
+  // 'pending' — it cannot catch this the way result='void' catches the auto-void).
+  // A genuinely sweepable long-stale bet is still 'ready'/'backoff'; only a
+  // finalized/parked one is 'done'. Read live by id (mirrors sweepGraceUntil).
+  const live = db.prepare('SELECT grading_state FROM bets WHERE id = ?').get(bet.id);
+  if (live && live.grading_state === 'done') return { eligible: false, reason: 'parked' };
   const graceUntil = sweepGraceUntil(bet.id);
   if (graceUntil) return { eligible: false, reason: 'grace', graceUntil };
   return { eligible: true, reason: 'eligible' };
@@ -2313,6 +2327,71 @@ async function gradePropWithAI(bet) {
   // still rescued. Applies before parlay/single dispatch, so both
   // paths inherit the guard.
   if (!isSupportedSport(bet.sport)) {
+    // ── DIVERT INTENTIONALLY-UNMODELED LEAGUES TO MANUAL REVIEW ──
+    // KBO / KHL / NPB and the like are REAL, distinct competitions the codebase
+    // deliberately leaves unmodeled — they are excluded from alias-rescue on
+    // purpose (see SPORT_ALIAS_TO_CANONICAL :527-529 + normalization.js
+    // isUnmodeledSportPart). The missing half is that "unmodeled" must mean
+    // "a human grades it", NOT "void it": auto-voiding records a silent, often
+    // FALSE settled result for a real bet (live casualty: IgDave KBO parlay,
+    // ingest disc_1514481735335805030 — the instant it is confirmed the grader
+    // voids it). So BEFORE the auto-void write, if the declared sport names a
+    // genuine unmodeled league (declaresAnyUnmodeledLeague — ANY part, since a
+    // parlay can't settle while one leg is unmodeled), park the bet in a
+    // terminal manual-review state instead of voiding: grading_state='done' so
+    // the grader never re-picks it, result stays 'pending' (NO grade/profit
+    // written), review_status flags it for a human. The state is sweeper-safe —
+    // getPendingBets (the autograder + 7-day sweeper's only source) excludes
+    // grading_state='done' AND this review_status in BOTH selector paths
+    // (services/database.js), so it can never be swept to a false loss.
+    // Truly-unsupported sports (null / Unknown / garbage captions) fall through
+    // to the auto-void below exactly as before — declaresAnyUnmodeledLeague
+    // returns false for placeholders and for labels whose only part carries a
+    // modeled league code ("MLB Wednesday picks").
+    const { declaresAnyUnmodeledLeague } = require('./normalization');
+    if (declaresAnyUnmodeledLeague(bet.sport)) {
+      console.log(`[AutoGrade] Manual-review unmodeled league: ${bet.id} | sport=${bet.sport} | "${(bet.description || '').slice(0, 80)}"`);
+      let diverted = false;
+      try {
+        // Idempotent: unlike the auto-void (which flips result→'void'), this
+        // leaves result='pending', so the no-op guard is the review_status itself
+        // — a re-grade of an already-parked bet changes 0 rows and re-emits nothing.
+        const info = db.prepare(`UPDATE bets SET
+          review_status = 'manual_review_unmodeled_sport',
+          grading_state = 'done',
+          grading_lock_until = NULL,
+          grade_reason = ?
+        WHERE id = ? AND (result = 'pending' OR result IS NULL)
+          AND (review_status IS NULL OR review_status != 'manual_review_unmodeled_sport')`).run(
+          `Manual review: unmodeled league (sport=${bet.sport}) — no model/teams data; parked for human grading (NOT voided)`,
+          bet.id
+        );
+        diverted = info.changes > 0;
+      } catch (e) {
+        console.error(`[AutoGrade] Manual-review write error: ${e.message}`);
+      }
+      // Traceability: mirror the auto-void DROP tail below. Distinct reason so a
+      // diverted-to-manual bet is queryable apart from a true void. Gated on an
+      // actual row change (idempotent — a re-grade of an already-parked bet does
+      // not double-emit). Fire-and-forget; never breaks the divert.
+      if (diverted) {
+        bets.recordDrop({
+          betId: bet.id,
+          stage: 'GRADING_DROPPED',
+          dropReason: 'GRADE_MANUAL_REVIEW_UNMODELED',
+          payload: {
+            sport: bet.sport || null,
+            orig_sport: origSport || null,
+            bet_desc_preview: String(bet.description || '').slice(0, 200),
+          },
+          ingestId: bet.ingest_id || null,
+        });
+      }
+      // Sentinel that runAutoGrade's if/else won't match → silent no-op (the DB
+      // write above is the real finalize; result stays pending for the human).
+      return { status: 'MANUAL_REVIEW_UNMODELED', evidence: `Manual review required: unmodeled league sport=${bet.sport}` };
+    }
+
     console.log(`[AutoGrade] Auto-void unscoped: ${bet.id} | sport=${bet.sport} | "${(bet.description || '').slice(0, 80)}"`);
     let voided = false;
     try {

@@ -103,6 +103,17 @@ run('GRADE_AUTOVOID_UNSCOPED is registered in DROP_REASONS', () => {
   );
 });
 
+// Unmodeled-league manual-review divert (2026-06-16): gradePropWithAI parks a
+// KBO/KHL/NPB bet in review_status='manual_review_unmodeled_sport' (non-void)
+// and records this DROP reason instead of GRADE_AUTOVOID_UNSCOPED. Registered so
+// the warn-only write-boundary tripwire stays quiet when the call site emits it.
+run('GRADE_MANUAL_REVIEW_UNMODELED is registered in DROP_REASONS', () => {
+  assert.ok(
+    pe.DROP_REASONS.includes('GRADE_MANUAL_REVIEW_UNMODELED'),
+    'GRADE_MANUAL_REVIEW_UNMODELED missing from DROP_REASONS',
+  );
+});
+
 // Hold-recovery retry-cap marker (services/holdReview.js): one row per
 // vision-burning failed recovery attempt; COUNT(*) per ingest is the cap
 // counter. Registered so the tripwire stays quiet on every failed attempt.
