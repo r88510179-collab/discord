@@ -10,6 +10,9 @@ const mlb = require('./mlb');
 const nhl = require('./nhl');
 const nba = require('./nba');
 
+// Normalized sport → adapter, for prop-vs-team routing.
+const ADAPTERS = { MLB: mlb, NBA: nba, NHL: nhl };
+
 // Normalize sport string. The grader uses many spellings: "MLB", "NBA", "NHL", "Baseball", etc.
 function normalizeSport(sport) {
   const s = String(sport || '').toUpperCase();
@@ -42,6 +45,25 @@ function isPlayerProp(description, sport) {
   return false;
 }
 
+// Prop-vs-team routing decision (testable helper).
+// Union of the keyword/"N+" heuristic (isPlayerProp) and the authoritative per-sport
+// parser (adapter.looksLikePlayerProp). isPlayerProp misses the "O/U N <stat>" shape
+// — it has no bare stat keywords and its only numeric pattern needs a literal "+", so
+// "Aaron Judge O 0.5 Hits" returns false and gets sent to the team grader → no team
+// found → search+LLM → Gate 3 forces PENDING. Delegating to the parser closes that gap
+// so the router and parser can never disagree; the adapter's looksLikePlayerProp guards
+// team totals ("Dodgers Over 8.5 Runs") so they still route to the team grader.
+// Purely additive: anything isPlayerProp already routed to props still does.
+function isPropBet(description, sport) {
+  if (!description) return false;
+  if (isPlayerProp(description, sport)) return true;
+  const adapter = ADAPTERS[normalizeSport(sport)];
+  if (adapter && typeof adapter.looksLikePlayerProp === 'function') {
+    return adapter.looksLikePlayerProp(description);
+  }
+  return false;
+}
+
 // Extract a YYYY-MM-DD date from a bet row.
 // Prefers created_at (always populated), falls back to event_date.
 function getBetDate(bet) {
@@ -69,7 +91,7 @@ async function tryStructured(bet) {
   const dateYMD = getBetDate(bet);
   if (!dateYMD) return { resolved: false, reason: 'no_bet_date' };
 
-  const isProp = isPlayerProp(bet.description, sport);
+  const isProp = isPropBet(bet.description, sport);
 
   try {
     if (sport === 'MLB') {
@@ -98,5 +120,6 @@ module.exports = {
   tryStructured,
   normalizeSport,
   isPlayerProp,
+  isPropBet,
   getBetDate,
 };

@@ -285,6 +285,20 @@ function parsePlayerProp(description) {
   return null;
 }
 
+// Router predicate: does this description name a *player* prop (not a team total)?
+// Delegates to parsePlayerProp so the prop-vs-team router can never disagree with the
+// parser, then guards the team-total case. parsePlayerProp matches a team total
+// greedily ("Los Angeles Lakers Over 220.5 Points" → {player:"Los Angeles Lakers",
+// stat:"points"}), so if the subject before the O/U resolves to a known team, this is
+// a team total — route it to the team grader, not the prop grader.
+function looksLikePlayerProp(description) {
+  const parsed = parsePlayerProp(description);
+  if (!parsed) return false;
+  if (parsed.stat === null && !parsed.fields) return false; // no gradeable stat
+  if (canonicalize(parsed.player)) return false;            // subject is a team → team total
+  return true;
+}
+
 function findPlayerInBoxscore(boxscore, lastName, firstName = null) {
   const lastLower = lastName.toLowerCase();
   const firstLower = (firstName || '').toLowerCase();
@@ -398,6 +412,7 @@ module.exports = {
   getGameForTeam,
   findPlayerGame,
   parsePlayerProp,
+  looksLikePlayerProp,
   canonicalize,
   _internal: { TEAM_ALIASES, STAT_FIELD_MAP, COMPOUND_DEFS },
 };
