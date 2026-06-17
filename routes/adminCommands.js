@@ -37,9 +37,22 @@
 //     GET /api/scraper-handles (routes/api.js, WHERE enabled=1) picks up the
 //     new flag on its next poll.
 //
-// `dismissHold` / `db` are lazy-required inside each handler (mirrors
-// routes/admin.js) so merely requiring this module does not couple route
-// loading to SQLite boot order.
+//   POST /bets/:id/approve          (no body)
+//     → approveBet(id) — the EXACT atomic confirm the /admin approve-by-id
+//       slash command calls (services/database.js): a single UPDATE gated on
+//       review_status='needs_review' AND result='pending' that confirms the
+//       bet + clean-slates its grading state + stamps the 3-day sweep grace.
+//     200 approved | 409 not_approvable | 400 malformed | 500 internal
+//     Releases a needs_review bet to the grader. Exact full-id match (no
+//     LIKE/prefix). approveBet returns the confirmed ROW on success or null
+//     on REFUSAL (missing / already confirmed / terminal — result no longer
+//     'pending') → 409. Reusing approveBet means there is NO parallel write
+//     path, so the #89/#92/#93 review-queue protections hold automatically.
+//     No actor (approveBet takes only the bet id), so no body is read.
+//
+// The core services (`dismissHold`, `recoverHold`, `db`, `approveBet`) are
+// lazy-required inside each handler (mirrors routes/admin.js) so merely
+// requiring this module does not couple route loading to SQLite boot order.
 // ═══════════════════════════════════════════════════════════
 
 const express = require('express');
@@ -194,7 +207,49 @@ function handleSetHandleRoute(req, res) {
 
 router.post('/handles/:handle', adminAuth, handleSetHandleRoute);
 
+// POST /bets/:id/approve  (no body)
+// Releases a needs_review bet by calling the EXACT approveBet() the /admin
+// approve-by-id slash command uses (services/database.js): a single atomic
+// UPDATE gated on review_status='needs_review' AND result='pending', returning
+// the confirmed ROW on success or null on REFUSAL (missing, already confirmed,
+// or terminal). Reusing approveBet means there is no parallel write path, so
+// the #89/#92/#93 review-queue protections (clean-slate grading reset + 3-day
+// sweep grace) hold automatically. No actor concept — approveBet takes only the
+// bet id — so no body is read. Exact full-id match (no LIKE/prefix). Exported
+// for direct unit testing (the repo has no HTTP/supertest harness).
+function handleApproveRoute(req, res) {
+  const raw = req.params && req.params.id;
+  const id = typeof raw === 'string' ? raw.trim() : '';
+  if (!id) {
+    return res.status(400).json({ ok: false, status: 'malformed', error: 'Missing or malformed id' });
+  }
+
+  let bet;
+  try {
+    const { approveBet } = require('../services/database');
+    bet = approveBet(id);
+  } catch (err) {
+    console.error(`[AdminAPI] approve error for ${id}: ${err.message}`);
+    return res.status(500).json({ ok: false, status: 'error', error: 'Internal error' });
+  }
+
+  if (!bet) {
+    console.log(`[AdminAPI] approve ${id} → not_approvable (409)`);
+    return res.status(409).json({
+      ok: false,
+      status: 'not_approvable',
+      error: 'Bet not in needs_review/pending state (already confirmed, missing, or terminal — revert-by-id first)',
+    });
+  }
+
+  console.log(`[AdminAPI] approve ${id} → approved (200)`);
+  return res.status(200).json({ ok: true, status: 'approved', bet });
+}
+
+router.post('/bets/:id/approve', adminAuth, handleApproveRoute);
+
 module.exports = router;
 module.exports.handleDismissRoute = handleDismissRoute;
 module.exports.handleRecoverRoute = handleRecoverRoute;
 module.exports.handleSetHandleRoute = handleSetHandleRoute;
+module.exports.handleApproveRoute = handleApproveRoute;
