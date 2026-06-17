@@ -46,6 +46,23 @@ router.use(adminAuth);
 //
 // pipeline_events.created_at is INTEGER unix-epoch SECONDS (migration 018) —
 // returned verbatim as `createdAt`; the dashboard formats it.
+//
+// `imageUrl` (joined from the EXTRACTED event by ingest_id): the bet-slip
+// image URL is NOT on the MANUAL_REVIEW_HOLD event's own payload — it rides a
+// separate pipeline_events row for the same ingest_id, in practice the
+// EXTRACTED-stage event ({imageCount, imageUrl}). We look it up per hold (the
+// most recent payload that actually parses to an imageUrl key) and surface it
+// verbatim, or null when none (text-only holds, or a hold whose ingest never
+// produced an image row). The URL is returned UNFILTERED — not every imageUrl
+// is a real slip (promo art, tweet-video thumbnails surface too) — so the
+// dashboard, not the bot, decides how to render/classify it.
+//
+// CAVEAT (not fixed here — this is a read-only field addition): the single-
+// image relay path stores imageUrl truncated to 120 chars
+// (handlers/messageHandler.js:1058), so long URLs — notably signed Discord CDN
+// attachment links (cdn.discordapp.com, ~150–250 chars) that feed human-
+// submission holds — arrive CLIPPED and may not load. Surfacing the stored
+// value verbatim is correct; widening it is a separate write-path change.
 router.get('/holds', (req, res) => {
   try {
     const { db } = require('../services/database');
@@ -64,6 +81,42 @@ router.get('/holds', (req, res) => {
         AND created_at > ?
       LIMIT 1
     `);
+
+    // Per-hold image join (mirrors the resolvedStmt per-hold pattern; ≤100
+    // lookups). The imageUrl lives on a SEPARATE pipeline_events row sharing
+    // the ingest_id (in practice the EXTRACTED event). We match on the imageUrl
+    // KEY appearing in the payload — a cheap, ingest-index-served LIKE
+    // prefilter, with no stage-name assumption — then PARSE each candidate
+    // newest-first and return the first that yields a usable string imageUrl.
+    //
+    // Parse-and-iterate (not substring-LIKE + LIMIT 1) is deliberate: the
+    // MANUAL_REVIEW_HOLD row for the same ingest is written AFTER its EXTRACTED
+    // row (created_at ≥, id >), so a hold whose `sample` text merely mentions
+    // the word "imageUrl" would otherwise win LIMIT 1 and suppress the real
+    // URL. Skipping rows whose parsed payload carries no usable imageUrl makes
+    // the lookup immune to that shadowing. NULL when no row carries one.
+    const imageUrlStmt = db.prepare(`
+      SELECT payload FROM pipeline_events
+      WHERE ingest_id = ?
+        AND payload LIKE '%"imageUrl"%'
+      ORDER BY created_at DESC, id DESC
+      LIMIT 10
+    `);
+    const imageUrlFor = (ingestId) => {
+      if (!ingestId) return null;                       // no join key → no image
+      for (const row of imageUrlStmt.all(ingestId)) {
+        if (!row || !row.payload) continue;
+        try {
+          const p = JSON.parse(row.payload);
+          // Unfiltered: return whatever URL the event carries; only require a
+          // non-empty string so a keyless/junk row yields null, not a bad value.
+          if (p && typeof p.imageUrl === 'string' && p.imageUrl) return p.imageUrl;
+        } catch (_) {
+          // malformed payload → skip this candidate, never throw
+        }
+      }
+      return null;
+    };
 
     const seen = new Set();
     const holds = [];
@@ -100,6 +153,7 @@ router.get('/holds', (req, res) => {
         capper: payload.capper || null,
         channelId: payload.channelId || null,
         messageUrl: payload.messageUrl || null,            // Discord message link, if stored
+        imageUrl: imageUrlFor(r.ingest_id),                // bet-slip image, joined from EXTRACTED event by ingest_id; null when none
         reason: payload.reason || r.drop_reason || null,   // hold / failure reason
         sample: payload.sample || null,                    // extracted text (hold sample ≤400 chars as stored; ≤80 on pre-2026-06-12 holds)
         parsed,                                            // candidate parsed payload, if stored
