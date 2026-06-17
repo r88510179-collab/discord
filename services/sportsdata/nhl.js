@@ -340,6 +340,19 @@ function parsePlayerProp(description) {
   return null;
 }
 
+// Router predicate: does this description name a *player* prop (not a team total)?
+// Delegates to parsePlayerProp so the prop-vs-team router can never disagree with the
+// parser, then guards the team-total case. parsePlayerProp matches a team total
+// greedily ("Edmonton Oilers Over 6.5 Goals" → {player:"Edmonton Oilers",
+// stat:"goals"}), so if the subject before the O/U resolves to a known team, this is a
+// team total — route it to the team grader, not the prop grader.
+function looksLikePlayerProp(description) {
+  const parsed = parsePlayerProp(description);
+  if (!parsed || !parsed.stat) return false;     // no gradeable stat
+  if (canonicalize(parsed.player)) return false; // subject is a team → team total
+  return true;
+}
+
 async function gradeNhlPlayerProp(description, dateYMD) {
   const parsed = parsePlayerProp(description);
   if (!parsed) return { resolved: false, reason: 'unparseable_player_prop' };
@@ -379,6 +392,7 @@ module.exports = {
   getGameForTeam,
   findPlayerGame,
   parsePlayerProp,
+  looksLikePlayerProp,
   canonicalize,
   _internal: { TEAM_ALIASES, STAT_MAP },
 };
