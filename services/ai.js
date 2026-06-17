@@ -1966,7 +1966,15 @@ function resolveInSeasonForOffseason(description) {
   const keywordLeagues = new Map();      // keyword → Set(leagues claiming it)
   for (const [sport, keywords] of Object.entries(SPORT_TEAM_MAP)) {
     for (const keyword of keywords) {
-      if (!desc.includes(keyword) || isMarketPhrase(keyword)) continue;
+      // Whole-word match (#103's `legTextHasTeamWord`, \b-anchored) — NOT a bare
+      // substring scan. A player surname that contains a nickname substring
+      // ("CJ Ab*rams*" ⊃ NFL "rams") would otherwise register the colliding,
+      // out-of-season league as a DEFINITE team and make the offseason drop
+      // STAND for an in-season pick (e.g. "Nationals CJ Abrams Over 1.5 Total
+      // Bases" mislabeled NFL — the real MLB Nationals leg is in season, but the
+      // phantom NFL "rams" pins it out of season). Mirrors the same fix already
+      // applied to reclassifySport / inferLegSport and validateLegSportConsistency.
+      if (!legTextHasTeamWord(desc, keyword) || isMarketPhrase(keyword)) continue;
       candidates.add(sport);
       if (!keywordLeagues.has(keyword)) keywordLeagues.set(keyword, new Set());
       keywordLeagues.get(keyword).add(sport);

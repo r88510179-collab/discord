@@ -301,5 +301,35 @@ run('San Francisco Giants ML (declared NFL) → not dropped, resolves MLB', () =
   assert.strictEqual(pick.sport, 'MLB', `expected sport adopted to MLB, got: ${pick.sport}`);
 });
 
+// Resolution G — substring-collision rescue (the #103/#114 whole-word fix, now
+// extended to this offseason bouncer). A real IN-SEASON team ("Nationals" → MLB)
+// co-occurs with a player surname that CONTAINS an out-of-season nickname as a
+// bare substring ("CJ Ab*rams*" ⊃ NFL "rams"). Pre-fix the substring scan
+// registered NFL as a DEFINITE out-of-season team and the offseason drop STOOD,
+// silently killing a valid in-season MLB pick. Post-fix the \b-anchored
+// legTextHasTeamWord ignores "rams" inside "Abrams", so only the real MLB
+// Nationals leg remains → in-season-wins adopts MLB. (Control "Nationals ML" with
+// no surname already passes above-style; the surname is the only difference.)
+run('Nationals CJ Abrams Over 1.5 Total Bases (declared NFL) → rescues MLB (surname "Abrams" ⊅ NFL "rams")', () => {
+  if (!inBugWindow) { console.log('    (skipped — outside MLB-in/NFL-out window)'); return; }
+  const pick = { sport: 'NFL', type: 'straight', description: 'Nationals CJ Abrams Over 1.5 Total Bases', odds: null, units: 1, legs: [] };
+  const r = validateParsedBet(pick, 'Nationals CJ Abrams Over 1.5 Total Bases', { hasMedia: false });
+  assert.strictEqual(r.valid, true, `expected pass, got: ${JSON.stringify(r)}`);
+  assert.strictEqual(pick.sport, 'MLB', `expected sport adopted to MLB, got: ${pick.sport}`);
+});
+
+// No-weakening G2 — the whole-word matcher must still catch a BARE real nickname.
+// "Rams ML" is the genuine NFL Rams (a whole word, not a surname substring) and is
+// NFL-only, so it pins the pick out of season and the drop must still STAND. This
+// guards that the substring fix narrowed the match to whole words WITHOUT losing
+// real-team detection (the inverse of Resolution G).
+run('Rams ML (declared NFL, real whole-word nickname) → still drops (no weakening)', () => {
+  if (!nflOut) { console.log('    (skipped — NFL is currently in season)'); return; }
+  const pick = { sport: 'NFL', type: 'straight', description: 'Rams ML', odds: null, units: 1, legs: [] };
+  const r = validateParsedBet(pick, 'Rams ML', { hasMedia: false });
+  assert.strictEqual(r.valid, false, `expected reject, got: ${JSON.stringify(r)}`);
+  assert.strictEqual(r.reason, 'offseason', `expected offseason, got: ${r.reason}`);
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
