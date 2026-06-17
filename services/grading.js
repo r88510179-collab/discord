@@ -6,6 +6,24 @@ const bets = require('./bets');
 const { buildEvidenceRecords, evaluateOffDate } = require('./evidenceRecords');
 const delay = ms => new Promise(res => setTimeout(res, ms));
 
+// Write-time grader-eligibility gate — the DUAL of getPendingBets' selection guard.
+// A terminal grader WRITE only lands if the bet is still grader-eligible (not parked
+// for human review). Closes the grader-vs-revert race (Codex finding #2): the grader
+// claims a confirmed pending bet, an operator reverts it to needs_review mid-flight
+// (revertBetToPending leaves result='pending'), and the late write — gated only on
+// result — settles a bet now parked in the review queue.
+//
+// The status list is the literal of database.js GRADER_HIDDEN_REVIEW_STATUSES —
+// KEEP IN SYNC with it and with getPendingBets' selection clause. It is inlined
+// (not imported) deliberately: this string is built at MODULE LOAD time, and
+// warRoom.js→grading.js→database.js form a require cycle in which a destructured
+// database export can still be undefined when grading.js's top level runs. A
+// hardcoded literal has no load-time cross-module dependency and cannot break under
+// require ordering. NULL-tolerant: an "AND review_status != 'needs_review'" form
+// would silently EXCLUDE NULL-review rows under SQLite three-valued logic.
+const GRADER_ELIGIBLE_WHERE =
+  "(review_status IS NULL OR review_status NOT IN ('needs_review', 'manual_review_unmodeled_sport'))";
+
 // ═══════════════════════════════════════════════════════════
 // Phase-1 deterministic grading gates (the LLM proposes; code disposes).
 //   Gate 1 — reduceParlayResult: pure parlay reducer (keystone)
@@ -893,7 +911,10 @@ function scheduleRecheckAfterDenial(betId, reason, minutes = 30) {
 
   if (attempts >= RETRY_CAP) {
     const voidTx = db.transaction(() => {
-      db.prepare(`UPDATE bets
+      // `AND ${GRADER_ELIGIBLE_WHERE}`: if an operator reverted this bet to
+      // needs_review after the grader claimed it, the void is a 0-change no-op —
+      // the bet stays safely parked instead of being voided out of the queue.
+      const info = db.prepare(`UPDATE bets
         SET grading_state = 'backoff',
             grading_next_attempt_at = datetime('now', '+24 hours'),
             grading_last_failure_reason = ?,
@@ -903,19 +924,27 @@ function scheduleRecheckAfterDenial(betId, reason, minutes = 30) {
             grade_reason = 'Auto-voided after retry cap exhausted (no evidence found after 15+ attempts).',
             graded_at = CURRENT_TIMESTAMP
         WHERE id = ?
-          AND result = 'pending'`).run(`${String(reason).slice(0, 180)}_capped`, betId);
+          AND result = 'pending'
+          AND ${GRADER_ELIGIBLE_WHERE}`).run(`${String(reason).slice(0, 180)}_capped`, betId);
 
-      bets.recordDrop({
-        betId,
-        stage: 'GRADING_DROPPED',
-        dropReason: 'GRADE_BACKOFF_EXHAUSTED',
-        payload: { denial_reason: reason, attempts },
-        ingestId: null,
-      });
+      // Only record the terminal DROP for a void that ACTUALLY landed — a no-op
+      // (review-parked) must not emit a GRADE_BACKOFF_EXHAUSTED for a void that
+      // never happened (false-success guard).
+      if (info.changes > 0) {
+        bets.recordDrop({
+          betId,
+          stage: 'GRADING_DROPPED',
+          dropReason: 'GRADE_BACKOFF_EXHAUSTED',
+          payload: { denial_reason: reason, attempts },
+          ingestId: null,
+        });
+        console.log(`[canFinalizeBet] retry cap reached (attempts=${attempts}) for bet=${String(betId).slice(0,8)} reason=${reason} — voided with GRADE_BACKOFF_EXHAUSTED`);
+      } else {
+        console.log(`[canFinalizeBet] retry cap reached for bet=${String(betId).slice(0,8)} but void was a no-op (review-parked) — left as-is`);
+      }
     });
     voidTx();
 
-    console.log(`[canFinalizeBet] retry cap reached (attempts=${attempts}) for bet=${String(betId).slice(0,8)} reason=${reason} — voided with GRADE_BACKOFF_EXHAUSTED`);
     return;
   }
 
@@ -989,7 +1018,9 @@ function shouldAutoVoidNoData(bet) {
 function autoVoidNoSearchableData(bet, info) {
   console.log(`[AutoGrade] Auto-void no-data: ${bet.id} after ${info.attempts} PENDING over ${info.hours}h`);
   try {
-    db.prepare(`UPDATE bets SET
+    // `AND ${GRADER_ELIGIBLE_WHERE}`: skip if an operator reverted the bet to
+    // needs_review after the grader claimed it (0-change no-op, left parked).
+    const res = db.prepare(`UPDATE bets SET
       result = 'void',
       profit_units = 0,
       graded_at = datetime('now'),
@@ -998,10 +1029,14 @@ function autoVoidNoSearchableData(bet, info) {
       review_status = 'auto_void_no_searchable_data',
       grading_state = 'done',
       grading_lock_until = NULL
-    WHERE id = ? AND (result = 'pending' OR result IS NULL)`).run(
+    WHERE id = ? AND (result = 'pending' OR result IS NULL)
+      AND ${GRADER_ELIGIBLE_WHERE}`).run(
       `Auto-voided: ${info.attempts} consecutive PENDING attempts over ${info.hours}h — search data unavailable for this event`,
       bet.id
     );
+    if (res.changes === 0) {
+      console.log(`[AutoGrade] Auto-void no-data no-op for ${bet.id} (review-parked or already settled) — left as-is`);
+    }
   } catch (e) {
     console.error(`[AutoGrade] Auto-void no-data write error: ${e.message}`);
   }
@@ -1575,7 +1610,12 @@ async function runAutoGrade(client) {
     }
 
     const profitUnits = calcProfit(bet.odds || -110, bet.units || 1, 'loss');
-    const sweepResult = gradeBet(bet.id, 'loss', profitUnits, 'F', `Auto-swept: pending >${SWEEP_DAYS} days with no score/confirmation`, true);
+    // requireGraderEligible: the 7-day sweeper works off a `pending` snapshot taken
+    // at the TOP of runAutoGrade, BEFORE the long await-heavy grader loop — the
+    // WIDEST revert window. evaluateSweep re-reads grading_state and skips 'done',
+    // but a revert sets grading_state='ready', so only this write-time gate stops a
+    // mid-cycle-reverted needs_review bet from being swept to a FALSE loss.
+    const sweepResult = gradeBet(bet.id, 'loss', profitUnits, 'F', `Auto-swept: pending >${SWEEP_DAYS} days with no score/confirmation`, true, { requireGraderEligible: true });
     if (!sweepResult.graded) continue;
 
     if (bet.capper_id) {
@@ -2383,13 +2423,18 @@ async function gradePropWithAI(bet) {
         // Idempotent: unlike the auto-void (which flips result→'void'), this
         // leaves result='pending', so the no-op guard is the review_status itself
         // — a re-grade of an already-parked bet changes 0 rows and re-emits nothing.
+        // GRADER_ELIGIBLE_WHERE subsumes this divert's original idempotency guard
+        // (it already excludes manual_review_unmodeled_sport, so a re-grade of an
+        // already-parked bet is still a 0-change no-op that emits no second drop)
+        // AND adds needs_review: if an operator parked the bet in the human queue
+        // mid-flight, do NOT clobber that label — leave their needs_review intact.
         const info = db.prepare(`UPDATE bets SET
           review_status = 'manual_review_unmodeled_sport',
           grading_state = 'done',
           grading_lock_until = NULL,
           grade_reason = ?
         WHERE id = ? AND (result = 'pending' OR result IS NULL)
-          AND (review_status IS NULL OR review_status != 'manual_review_unmodeled_sport')`).run(
+          AND ${GRADER_ELIGIBLE_WHERE}`).run(
           `Manual review: unmodeled league (sport=${bet.sport}) — no model/teams data; parked for human grading (NOT voided)`,
           bet.id
         );
@@ -2422,6 +2467,11 @@ async function gradePropWithAI(bet) {
     console.log(`[AutoGrade] Auto-void unscoped: ${bet.id} | sport=${bet.sport} | "${(bet.description || '').slice(0, 80)}"`);
     let voided = false;
     try {
+      // `AND ${GRADER_ELIGIBLE_WHERE}`: skip if an operator reverted the bet to
+      // needs_review after the grader claimed it — 0-change no-op (left parked);
+      // `voided` stays false so the DROP below is not recorded for a void that
+      // never happened (this is the exact bet 453e0952 incident shape: a
+      // needs_review pick auto-voided out of the war-room queue).
       const info = db.prepare(`UPDATE bets SET
         result = 'void',
         profit_units = 0,
@@ -2431,11 +2481,15 @@ async function gradePropWithAI(bet) {
         review_status = 'auto_void_unscoped_bet',
         grading_state = 'done',
         grading_lock_until = NULL
-      WHERE id = ? AND (result = 'pending' OR result IS NULL)`).run(
+      WHERE id = ? AND (result = 'pending' OR result IS NULL)
+        AND ${GRADER_ELIGIBLE_WHERE}`).run(
         `Auto-voided: sport=${bet.sport || 'null'} not in supported set`,
         bet.id
       );
       voided = info.changes > 0;
+      if (!voided) {
+        console.log(`[AutoGrade] Auto-void unscoped no-op for ${bet.id} (review-parked or already settled) — left as-is`);
+      }
     } catch (e) {
       console.error(`[AutoGrade] Auto-void write error: ${e.message}`);
     }
@@ -3268,7 +3322,10 @@ async function finalizeBetGrading(client, bet, status, evidence, opts = {}) {
     resultLower === 'win' ? 'B' : resultLower === 'void' ? 'N/A' : 'D',
     `AI Grader: ${evidence || 'Graded via search'}`,
     false,
-    { graderVersion: GRADER_VERSION, evidenceHash });
+    // requireGraderEligible: the autonomous AI grader must not settle a bet an
+    // operator reverted to needs_review mid-flight (grader-vs-revert race) — the
+    // shared write becomes a 0-change no-op handled as a benign race-loss below.
+    { graderVersion: GRADER_VERSION, evidenceHash, requireGraderEligible: true });
 
   if (!gradeResult.graded) {
     console.log(`[Grader] SKIP race-lost bet ${bet.id?.slice(0, 8)} (${gradeResult.reason})`);
