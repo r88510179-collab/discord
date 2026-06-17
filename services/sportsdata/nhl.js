@@ -5,6 +5,8 @@
 const BASE = 'https://api-web.nhle.com/v1';
 const TIMEOUT_MS = 8000;
 
+const { isTeamTotalBet } = require('./teamTotal');
+
 async function fetchJSON(url) {
   const res = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) });
   if (!res.ok) throw new Error(`NHL API HTTP ${res.status}`);
@@ -121,6 +123,13 @@ async function getGameForTeam(teamName, dateYMD) {
 // Game-level bet grading: ML, puck line, totals.
 async function gradeNhlBet(description, dateYMD) {
   const desc = description.toLowerCase();
+
+  // Single-team "Team Total" bets are about one team's score, not the game total.
+  // The total branch below computes the GAME total (away+home), which would misgrade
+  // them — refuse so the caller falls through to ESPN+AI (which understands team totals).
+  if (isTeamTotalBet(description)) {
+    return { resolved: false, reason: 'team_total_unsupported' };
+  }
 
   // Find which team(s) the bet references
   const teamHits = [];
