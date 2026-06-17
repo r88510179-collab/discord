@@ -626,6 +626,23 @@ function gradeBetRecord(betId, result, profitUnits, grade, gradeReason, allowAut
   //     026). COALESCE keeps existing values when a caller omits provenance,
   //     so legacy call sites (manual grade, sweeper, untracked win) are
   //     unaffected.
+  // Write-time grader-eligibility gate (OPT-IN via provenance.requireGraderEligible).
+  // The AUTONOMOUS grader paths — finalizeBetGrading (AI grader) and the 7-day
+  // sweeper — set this flag so a bet an operator reverted to needs_review
+  // MID-FLIGHT (after the grader claimed it but before this write lands) is a
+  // 0-change NO-OP instead of being graded out of the human review queue
+  // (grader-vs-revert race, Codex finding #2 — the last residual of the #93
+  // review-queue protection: selection was gated, the write was not). The gate
+  // mirrors getPendingBets' selection guard EXACTLY (same GRADER_HIDDEN_REVIEW_STATUSES,
+  // NULL-tolerant) so claim-time and write-time eligibility can never drift.
+  // It is OPT-IN because this shared helper is ALSO called by manual /admin grade,
+  // the war-room untracked-win, and admin revert-void — all human-driven paths that
+  // legitimately MUST write to needs_review bets; a blanket gate would regress them.
+  // On a 0-change no-op the early return below makes it benign, and the
+  // allowAutoConfirm sub-write is never reached (so it can't confirm a parked bet).
+  const reviewGate = provenance.requireGraderEligible
+    ? ` AND (review_status IS NULL OR review_status NOT IN (${GRADER_HIDDEN_REVIEW_STATUSES.map(() => '?').join(', ')}))`
+    : '';
   const info = db.prepare(`
     UPDATE bets SET
       result = ?, profit_units = ?, grade = ?, grade_reason = ?, graded_at = datetime('now'),
@@ -637,9 +654,10 @@ function gradeBetRecord(betId, result, profitUnits, grade, gradeReason, allowAut
       AND (
         bet_type NOT IN ('parlay','sgp')
         OR (SELECT COUNT(*) FROM parlay_legs WHERE bet_id = bets.id AND result = 'pending') = 0
-      )
+      )${reviewGate}
   `).run(result, profitUnits, grade, gradeReason,
-    provenance.graderVersion ?? null, provenance.evidenceHash ?? null, betId);
+    provenance.graderVersion ?? null, provenance.evidenceHash ?? null, betId,
+    ...(provenance.requireGraderEligible ? GRADER_HIDDEN_REVIEW_STATUSES : []));
 
   if (info.changes === 0) {
     return { graded: false, reason: 'already_graded_or_pending_legs' };
