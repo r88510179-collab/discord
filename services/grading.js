@@ -1778,7 +1778,34 @@ function buildGraderSearchQuery(bet, eventDate) {
   const { matchedTeams } = findMentionedTeams(description, sportContext);
   const teamList = [...matchedTeams];
   let query;
-  if (teamList.length >= 2) {
+  if (isPlayerPropDescription(description)) {
+    // Player props need an individual stat line, which lives on a box-score
+    // / game-log page — NEVER on a game "final score" recap. The team and
+    // extractSubject branches below all suffix "final score", so a prop that
+    // fell through built "<player> <sport> final score <date>" (live: NBA
+    // 52937045 looped 30 grading cycles, MLB 0f50c2bf): the LLM only ever saw
+    // game recaps without the stat and returned PENDING forever. Build a
+    // stat-seeking query that targets box-score pages instead.
+    //
+    // The subject base is extractSubject (not extractPlayerNameFromDescription)
+    // on purpose: extractSubject preserves the period qualifiers that scope a
+    // prop to a game segment ("1st Quarter", "F5", "2H") and its odds/dash/slash
+    // sanitization is already exercised by the query-builder tests — dropping
+    // those would make a segment prop search whole-game data. "box score"
+    // anchors the search on stat-line pages, and falls back gracefully when no
+    // name/stat is recoverable (still "box score", never the bare game query).
+    //
+    // The stat keyword is surfaced explicitly because extractSubject strips
+    // MOST stat tokens — but its strip-list is only a subset of
+    // PLAYER_PROP_GUARD_STATS (e.g. "Total Bases", "PRA", "threes" survive), so
+    // re-appending unconditionally would duplicate them. Append only when the
+    // subject doesn't already carry the stat, so the token never repeats.
+    const subject = extractSubject(description);
+    const statMatch = description.match(PLAYER_PROP_STAT_RX);
+    const statKeyword = statMatch ? statMatch[0] : '';
+    const statPart = statKeyword && !containsPhrase(subject, statKeyword) ? ` ${statKeyword}` : '';
+    query = `${subject}${statPart} ${dateStr} box score`.trim();
+  } else if (teamList.length >= 2) {
     const t1 = teamList[0].split(' ').pop();
     const t2 = teamList[1].split(' ').pop();
     query = `${t1} vs ${t2} ${sport} final score ${dateStr}`.trim();
