@@ -3589,6 +3589,11 @@ module.exports = {
   canonicalizeSportForGrading,
   rescueNoLegNationalTeamSport,
   SPORT_ALIAS_TO_CANONICAL,
+  // Exported so tests/grader-gate-sync.test.js can assert this write-time gate's
+  // status list stays in sync with database.js GRADER_HIDDEN_REVIEW_STATUSES (#118).
+  // It is a precomputed string constant, so exporting it adds no require() and
+  // cannot reintroduce the load-order cycle the inline literal was written to dodge.
+  GRADER_ELIGIBLE_WHERE,
   // Exported for unit tests only — do not rely on these from bot code:
   _internal: {
     looksLikePlayerProp, parsePlayerPropDescription, searchWeb, isTrustedLossLeg, aggregateParlayLegResults,
