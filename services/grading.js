@@ -930,6 +930,101 @@ function applyBackoff(betId, attempts, reason) {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// Event-aware grading recheck (Codex #3) — EVENT_AWARE_RECHECK off|shadow|enforce
+//
+// scheduleRecheckAfterDenial requeues pending_legs denials at a flat +30m, and
+// runAutoGrade re-runs the full parent grade (per-leg search/LLM) every cron
+// cycle — burning Groq's free 30 RPM on parlays whose games haven't happened
+// yet, or whose data is still settling. nextAttemptForEvent derives an
+// event-aware next-attempt window from the bet's event_date. parlay_legs has no
+// per-leg date column, so everything keys off the parent event_date, matching
+// the in-grade anchor (gradeSingleBet, ~grading.js:2877).
+//
+// Pure: no DB, no network (require('./ai') is cached). `now` is injected so the
+// helper is fully unit-testable.
+//
+// Deviations from the original Codex #3 spec, ratified with the maintainer:
+//   1. "has time" is detected on the RAW event_date string, NOT on the
+//      normalizeEventDate() output: normalizeEventDate turns an ISO date-only
+//      ("2026-06-18") into "2026-06-18T00:00:00.000Z", so testing the output
+//      would make the date-only branch dead code (every value would look timed).
+//   2. The signature takes event_date only (the created_at fallback is dropped
+//      from the defer math) — the +4h / day-end+6h buffer applies ONLY to a real
+//      event_date. A falsy/unparseable event_date preserves today's flat +30m.
+//   3. MAX_DEFER_MS = 168h (7 days), not 48h, so legitimate multi-day game
+//      parlays defer to event time; the guard still trips on typo'd years and
+//      aligns with the 7-day sweeper window.
+// ═══════════════════════════════════════════════════════════════════
+const EVENT_TO_FINAL_MS = 4 * 3600e3;    // game + settle, when event_date carries a time
+const DATEONLY_SETTLE_MS = 6 * 3600e3;   // applied after end-of-UTC-day for a date-only event_date
+const POST_EVENT_RECHECK_MS = 45 * 60e3; // event already final/settling — short recheck
+const DEFAULT_RECHECK_MS = 30 * 60e3;    // preserves today's flat +30 (no/unparseable/far-future date)
+const MAX_DEFER_MS = 168 * 3600e3;       // 7d — guards typo'd years; legit multi-day futures still defer
+
+// End-of-day (23:59:59.999) in UTC for the instant t — anchor for date-only events.
+function endOfUtcDay(t) {
+  const d = new Date(t);
+  d.setUTCHours(23, 59, 59, 999);
+  return d.getTime();
+}
+
+/**
+ * nextAttemptForEvent — pure event-aware recheck planner.
+ * @returns {{phase:string, defer:boolean, nextAttemptAt:Date, reason:string}}
+ *   phase: 'unknown' | 'pre_event' | 'post_event'
+ */
+function nextAttemptForEvent(eventDateRaw, now = Date.now()) {
+  const { normalizeEventDate } = require('./ai');
+  const raw = eventDateRaw;
+  if (!raw) {
+    return { phase: 'unknown', defer: false, nextAttemptAt: new Date(now + DEFAULT_RECHECK_MS), reason: 'no_event_date' };
+  }
+  const ev = normalizeEventDate(raw) || raw;
+  const t = Date.parse(ev);
+  if (isNaN(t)) {
+    return { phase: 'unknown', defer: false, nextAttemptAt: new Date(now + DEFAULT_RECHECK_MS), reason: 'unparseable' };
+  }
+  // Detect a carried time on the RAW string (see deviation note 1).
+  const hasTime = /T\d|\d:\d/.test(String(raw));
+  const readyAt = hasTime ? t + EVENT_TO_FINAL_MS : endOfUtcDay(t) + DATEONLY_SETTLE_MS;
+  const msUntil = readyAt - now;
+  if (msUntil > MAX_DEFER_MS) {
+    // Guards a typo'd year; the in-grade future-skip gate handles those cheaply.
+    return { phase: 'unknown', defer: false, nextAttemptAt: new Date(now + DEFAULT_RECHECK_MS), reason: 'suspect_far_future' };
+  }
+  if (msUntil > 0) {
+    return { phase: 'pre_event', defer: true, nextAttemptAt: new Date(readyAt), reason: 'event_not_final' };
+  }
+  return { phase: 'post_event', defer: false, nextAttemptAt: new Date(now + POST_EVENT_RECHECK_MS), reason: 'event_final_settling' };
+}
+
+// EVENT_AWARE_RECHECK mode — strict compare (unset/anything-else → off), same
+// idiom as GEMMA_FALLBACK_DISABLED / QUOTE_BOUND_GRADING enforce. Read at call
+// time so ops can flip the flag without a restart.
+function eventAwareRecheckMode() {
+  const m = process.env.EVENT_AWARE_RECHECK;
+  if (m === 'enforce') return 'enforce';
+  if (m === 'shadow') return 'shadow';
+  return 'off';
+}
+
+// Shadow telemetry (measure before flip): one fire-and-forget, error-swallowed
+// pipeline_events row per decision, emitted in shadow mode only. event_type
+// 'event_aware_shadow' is registered in services/pipeline-events.js; bets
+// .transitionTo writes it under sourceType='grading' (null ingest_id) and never
+// throws. Shadow measurement must never affect grading control flow.
+function emitEventAwareShadow(betId, payload) {
+  try {
+    bets.transitionTo({
+      betId,
+      toStage: 'GRADING_ENTER',
+      eventType: 'event_aware_shadow',
+      payload,
+    });
+  } catch (_) { /* observability must not break grading */ }
+}
+
 /** Gateway-denial recheck: do not change state or touch attempts; just requeue. */
 function scheduleRecheckAfterDenial(betId, reason, minutes = 30) {
   // Attempt cap — prevents backdoor around the state machine when a denial
@@ -937,7 +1032,7 @@ function scheduleRecheckAfterDenial(betId, reason, minutes = 30) {
   // the normal backoff ladder. At cap, stamp GRADE_BACKOFF_EXHAUSTED and
   // move far into the future so the grader stops re-picking.
   const RETRY_CAP = 15;
-  const bet = db.prepare('SELECT grading_attempts FROM bets WHERE id = ?').get(betId);
+  const bet = db.prepare('SELECT grading_attempts, event_date FROM bets WHERE id = ?').get(betId);
   const attempts = bet?.grading_attempts || 0;
 
   if (attempts >= RETRY_CAP) {
@@ -977,6 +1072,31 @@ function scheduleRecheckAfterDenial(betId, reason, minutes = 30) {
     voidTx();
 
     return;
+  }
+
+  // Event-aware recheck window (EVENT_AWARE_RECHECK). off → flat +minutes
+  // (unchanged). enforce → schedule at the computed event-aware time instead of
+  // the flat +30. shadow → measure the would-be window, then keep flat +minutes.
+  const mode = eventAwareRecheckMode();
+  if (mode !== 'off') {
+    const plan = nextAttemptForEvent(bet?.event_date);
+    const wouldNext = plan.nextAttemptAt.toISOString();
+    if (mode === 'enforce') {
+      // datetime(?) normalizes the ISO to the column's 'YYYY-MM-DD HH:MM:SS'
+      // format so the <= datetime('now') comparisons in claimBetForGrading /
+      // getPendingBets stay lexically correct (a raw 'T' ISO would not).
+      db.prepare(`UPDATE bets
+        SET grading_next_attempt_at = datetime(?),
+            grading_last_failure_reason = ?,
+            grading_lock_until = NULL
+        WHERE id = ?`).run(wouldNext, String(reason).slice(0, 200), betId);
+      return;
+    }
+    // shadow: emit the would-fire row + structured log, then fall through to the
+    // unchanged flat +minutes write below (behavior is identical to off).
+    const flatNext = new Date(Date.now() + minutes * 60e3).toISOString();
+    emitEventAwareShadow(betId, { kind: 'would_window', phase: plan.phase, reason: plan.reason, wouldNext, flatNext, betId });
+    console.log(`grade.event_aware_would_window betId=${betId} phase=${plan.phase} reason=${plan.reason} would_next=${wouldNext} flat_next=${flatNext}`);
   }
 
   db.prepare(`UPDATE bets
@@ -1561,6 +1681,26 @@ async function runAutoGrade(client) {
   for (const bet of pending) {
     const betAgeHours = (Date.now() - new Date(bet.created_at).getTime()) / (1000 * 60 * 60);
     console.log(`[AutoGrade] Processing: "${bet.description?.slice(0, 50)}" | ${bet.sport} | Age: ${betAgeHours.toFixed(1)}h`);
+
+    // Event-aware pre-grade skip (EVENT_AWARE_RECHECK). enforce: defer a bet
+    // whose game isn't final yet (set grading_next_attempt_at + skip the claim —
+    // no attempt burned, no search/LLM). shadow: emit the would-defer row + log
+    // but fall through to the normal claim/grade (behavior unchanged). off: no-op.
+    // getPendingBets selects b.* so bet.event_date is present.
+    const eaMode = eventAwareRecheckMode();
+    if (eaMode !== 'off') {
+      const plan = nextAttemptForEvent(bet.event_date);
+      if (plan.defer) {
+        const wouldNext = plan.nextAttemptAt.toISOString();
+        if (eaMode === 'enforce') {
+          db.prepare(`UPDATE bets SET grading_next_attempt_at = datetime(?) WHERE id = ? AND result = 'pending'`).run(wouldNext, bet.id);
+          console.log(`grade.event_aware_defer betId=${bet.id} until=${wouldNext} reason=event_not_final`);
+          continue;
+        }
+        emitEventAwareShadow(bet.id, { kind: 'would_defer', phase: plan.phase, reason: plan.reason, wouldNext, flatNext: null, betId: bet.id });
+        console.log(`grade.event_aware_would_defer betId=${bet.id} until=${wouldNext} reason=${plan.reason}`);
+      }
+    }
 
     // Atomic claim — if another worker or a concurrent /grade retry-all
     // already grabbed this bet, skip without touching state.
@@ -3463,6 +3603,7 @@ module.exports = {
     resolveGate4Mode, applyGate4, buildGate4WouldFireMarker, gate4ToleranceFor, GATE4_TOLERANCE_DAYS, // Gate 4 — off-date evidence reject
     buildEvidenceRecords, evaluateOffDate,             // evidence-record layer (re-exported from services/evidenceRecords.js)
     evaluateSweep, sweepGraceUntil,                    // Phase 2b-2 — 7-day sweeper grace for recovered bets
+    nextAttemptForEvent,                               // Codex #3 — event-aware recheck planner (EVENT_AWARE_RECHECK)
   },
   // Exported for tests + observability — these are called from
   // gradePropWithAI internally; importers MUST NOT mutate.

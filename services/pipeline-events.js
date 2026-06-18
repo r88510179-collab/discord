@@ -39,6 +39,7 @@ const EVENT_TYPES = [
   'ocr_sgp_would_hold',  // shadow (PR 2a): SGP/SGPMAX would-fire measurement — Groq parse + evaluateSgpGate run on the OCR text the SGP bail produced; measurement-only, NOT in EXPECTED_STAGES, never gates behavior (PR 2b acts on a PASS)
   'ocr_used',            // cutover (dormant): OCR parse accepted, staged in place of Gemini
   'ocr_fallback',        // cutover (dormant): degraded to the live Gemini path
+  'event_aware_shadow',  // shadow (Codex #3): EVENT_AWARE_RECHECK would-fire measurement — one row per recheck/defer decision (kind=would_window|would_defer) on stage 'GRADING_ENTER'. Additive/observational, never gates behavior (enforce acts via grading_next_attempt_at instead); not in EXPECTED_STAGES.
 ];
 const DROP_REASONS = [
   'DUPLICATE_IMAGE',
