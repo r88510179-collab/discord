@@ -1229,4 +1229,9 @@ module.exports = {
   getUserBankroll,
   payoutTailers,
   getUserBets,
+  // Exported so tests/grader-gate-sync.test.js can assert this claim-time status
+  // list stays in sync with grading.js GRADER_ELIGIBLE_WHERE — the inlined
+  // write-time dual gate (#118). Divergence silently reopens the grader-vs-revert
+  // race with no other test failure.
+  GRADER_HIDDEN_REVIEW_STATUSES,
 };
