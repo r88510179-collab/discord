@@ -202,6 +202,52 @@ const someoneElse = { ID9: { person: { fullName: 'Manny Machado', boxscoreName: 
   r = await nba.gradeNbaPlayerProp('Jayson Tatum O 25.5 Points', '2026-05-31');
   check('NBA live game in slate → fall-through', r.resolved === false && r.reason === 'player_not_found_in_games_on_date', JSON.stringify(r));
 
+  // ── NBA confirmed DNP (rostered, found in game, did not play) → VOID, not LOSS ──
+  // Authoritative ESPN signal: athlete.didNotPlay===true (empty stats array). The
+  // player WAS rostered for a final game but did not take the court → no action.
+  console.log(' NBA confirmed DNP → VOID (not LOSS); played-zero grades normally:');
+  // Builder: the QUERIED player present in a final game with a given didNotPlay flag + stats.
+  const nbaSummaryFor = (displayName, stats, didNotPlay) => ({ boxscore: { players: [{
+    team: { displayName: 'Boston Celtics' },
+    statistics: [{ keys: ['points', 'rebounds', 'assists'], athletes: [
+      // reason/active are intentionally "junk" — ESPN leaves stale values on
+      // played athletes too, so the grader must rely ONLY on didNotPlay.
+      { athlete: { displayName }, stats, didNotPlay, reason: "COACH'S DECISION", active: false },
+    ] }],
+  }] } });
+  installFetch((url) => {
+    if (url.includes('/scoreboard')) return { events: [nbaEvent('g1', true)] };
+    if (url.includes('/summary')) return nbaSummaryFor('Jayson Tatum', [], true); // true DNP: didNotPlay + empty stats
+    return undefined;
+  });
+  r = await nba.gradeNbaPlayerProp('Jayson Tatum O 25.5 Points', '2026-05-31');
+  check('true DNP (didNotPlay=true) → VOID', r.resolved === true && r.status === 'VOID', JSON.stringify(r));
+  check('DNP evidence = "did not play — no action, void."', /did not play — no action, void\.$/.test(r.evidence || ''), r.evidence);
+  // Played-all-zeros: didNotPlay=false, full zero stat line. Must grade normally,
+  // NOT be mislabeled a DNP. This is the misgrade the old all-zero fallback caused.
+  installFetch((url) => {
+    if (url.includes('/scoreboard')) return { events: [nbaEvent('g1', true)] };
+    if (url.includes('/summary')) return nbaSummaryFor('Jayson Tatum', ['0', '0', '0'], false);
+    return undefined;
+  });
+  r = await nba.gradeNbaPlayerProp('Jayson Tatum U 25.5 Points', '2026-05-31');
+  check('played, scored 0, U 25.5 → WIN (NOT a DNP loss — the misgrade fix)', r.resolved === true && r.status === 'WIN', JSON.stringify(r));
+  installFetch((url) => {
+    if (url.includes('/scoreboard')) return { events: [nbaEvent('g1', true)] };
+    if (url.includes('/summary')) return nbaSummaryFor('Jayson Tatum', ['0', '0', '0'], false);
+    return undefined;
+  });
+  r = await nba.gradeNbaPlayerProp('Jayson Tatum O 0.5 Points', '2026-05-31');
+  check('played, scored 0, O 0.5 → LOSS (graded on the real 0, not voided)', r.resolved === true && r.status === 'LOSS', JSON.stringify(r));
+  // A DNP in a game that is NOT final yet stays PENDING (don't settle early).
+  installFetch((url) => {
+    if (url.includes('/scoreboard')) return { events: [nbaEvent('g1', false)] };
+    if (url.includes('/summary')) return nbaSummaryFor('Jayson Tatum', [], true);
+    return undefined;
+  });
+  r = await nba.gradeNbaPlayerProp('Jayson Tatum O 25.5 Points', '2026-05-31');
+  check('DNP but game not final → PENDING (no early VOID)', r.resolved === true && r.status === 'PENDING', JSON.stringify(r));
+
   // ── NHL DNP → VOID ──
   console.log(' NHL DNP → VOID:');
   const nhlGame = (id, final) => ({ id, gameState: final ? 'OFF' : 'LIVE', homeTeam: { name: { default: 'Oilers' }, score: 4 }, awayTeam: { name: { default: 'Flames' }, score: 2 } });
@@ -264,6 +310,15 @@ const someoneElse = { ID9: { person: { fullName: 'Manny Machado', boxscoreName: 
   r = await mlb.gradeMlbPlayerProp('Ramon Laureano O 0.5 Hits', '2026-05-30', { absenceVoidAllowed: false });
   check('grader opts.absenceVoidAllowed=false → provable absence falls through (not VOID)',
     r.resolved === false && r.reason === 'player_not_found_in_games_on_date', JSON.stringify(r));
+  // The date gate is ABSENCE-only: a CONFIRMED DNP (player found in a concrete
+  // final game) is not subject to it and VOIDs even when the dates disagree.
+  installFetch((url) => {
+    if (url.includes('/scoreboard')) return { events: [nbaEvent('g1', true)] };
+    if (url.includes('/summary')) return nbaSummaryFor('Jayson Tatum', [], true); // found + true DNP
+    return undefined;
+  });
+  g = await tryStructured({ description: 'Jayson Tatum O 25.5 Points', sport: 'NBA', created_at: '2026-05-30 18:00:00', event_date: '2026-05-31 19:00' });
+  check('confirmed DNP VOIDs even with disagreeing dates (gate is absence-only)', g.resolved === true && g.status === 'VOID', JSON.stringify(g));
 
   // ── Straight DNP prop settles as result=void via finalizeBetGrading ──
   // Confirms the VOID terminal status flows all the way through the settle path:

@@ -476,6 +476,12 @@ async function gradeMlbPlayerProp(description, dateYMD, opts = {}) {
     } else if (parsed.stat in (result.pitching || {})) {
       value = result.pitching[parsed.stat];
     } else {
+      // MLB DNP note (PR #128 follow-up): a player who genuinely did not play is
+      // ABSENT from the box score entirely → the not-found branch above VOIDs on
+      // provable absence (the live Laureano case). A player present here with the
+      // stat missing is NOT treated as a DNP: statsapi lists pinch-runners and
+      // defensive subs (empty batting, but they DID play), so voiding would erase
+      // a real result. Stay a fall-through — under-voiding is the safe error.
       return { resolved: false, reason: `stat_not_in_boxscore: ${parsed.stat}` };
     }
     statLabel = parsed.stat;
