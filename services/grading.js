@@ -445,7 +445,15 @@ function looksLikePlayerProp(bet) {
   const desc = String(bet.description);
   // Heuristic: at least one capitalized two-word name followed later by
   // a stat hint plus a numeric threshold.
-  const hasPlayer = /\b[A-Z][a-z'’.-]+(?:\s+(?:Jr\.?|Sr\.?|I{1,3}|IV|V))?\s+[A-Z][a-z'’.-]+/.test(desc);
+  // The first token may be a normal capitalized word (with optional Jr/Sr/III
+  // suffix) OR an all-caps initials run — sports slips very commonly use
+  // initial first names ("CJ Abrams", "TJ Oshie", "JD Martinez", "RJ Barrett").
+  // The old pattern required a capital+lowercase first token, so those bets
+  // failed the gate, never reached tryStructured, and fell through to
+  // search+LLM (the looping bet 0f50c2bf). The surname is still required to be
+  // capital+lowercase, so all-caps pairs like "ML MVP" do not match. (Dotted
+  // initials like "A.J. Pollock" already matched the original pattern.)
+  const hasPlayer = /\b(?:[A-Z][a-z'’.-]+(?:\s+(?:Jr\.?|Sr\.?|I{1,3}|IV|V))?|[A-Z]{2,3})\s+[A-Z][a-z'’.-]+/.test(desc);
   const hasStat = PLAYER_PROP_STAT_HINTS.test(desc);
   const hasThreshold = /\b\d+(?:\.\d+)?\s*\+?\b/.test(desc);
   return hasPlayer && hasStat && hasThreshold;
