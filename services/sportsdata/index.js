@@ -64,10 +64,8 @@ function isPropBet(description, sport) {
   return false;
 }
 
-// Extract a YYYY-MM-DD date from a bet row.
-// Prefers created_at (always populated), falls back to event_date.
-function getBetDate(bet) {
-  const src = bet.created_at || bet.event_date;
+// Coerce a single date-ish string to YYYY-MM-DD (or null).
+function toYMD(src) {
   if (!src) return null;
   // created_at format: "2026-04-07 16:24:37"
   if (/^\d{4}-\d{2}-\d{2}/.test(src)) return src.slice(0, 10);
@@ -75,6 +73,12 @@ function getBetDate(bet) {
   const d = new Date(src);
   if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
   return null;
+}
+
+// Extract a YYYY-MM-DD date from a bet row.
+// Prefers created_at (always populated), falls back to event_date.
+function getBetDate(bet) {
+  return toYMD(bet.created_at || bet.event_date);
 }
 
 // Main entry point.
@@ -93,20 +97,33 @@ async function tryStructured(bet) {
 
   const isProp = isPropBet(bet.description, sport);
 
+  // Absence-VOID date gate. A prop grader may VOID a player who is provably
+  // absent from the date's full final slate (terminalState.js). But this layer
+  // keys the slate off created_at (getBetDate) while grading.js's future/too-
+  // recent GUARDs key off event_date. When a bet carries BOTH a created_at and
+  // an event_date that land on DIFFERENT days (e.g. a pick posted the night
+  // before its game), the slate we'd check is the WRONG day — the player's game
+  // is elsewhere, so "absent" is a date artifact, not a real DNP. Forbid the
+  // VOID in that case (the prop falls through to search, which keys off
+  // event_date). Same-day bets and bets with only one date are unaffected.
+  const createdYMD = toYMD(bet.created_at);
+  const eventYMD = toYMD(bet.event_date);
+  const absenceVoidAllowed = !(createdYMD && eventYMD && createdYMD !== eventYMD);
+
   try {
     if (sport === 'MLB') {
       return isProp
-        ? await mlb.gradeMlbPlayerProp(bet.description, dateYMD)
+        ? await mlb.gradeMlbPlayerProp(bet.description, dateYMD, { absenceVoidAllowed })
         : await mlb.gradeMlbBet(bet.description, dateYMD);
     }
     if (sport === 'NBA') {
       return isProp
-        ? await nba.gradeNbaPlayerProp(bet.description, dateYMD)
+        ? await nba.gradeNbaPlayerProp(bet.description, dateYMD, { absenceVoidAllowed })
         : await nba.gradeNbaBet(bet.description, dateYMD);
     }
     if (sport === 'NHL') {
       return isProp
-        ? await nhl.gradeNhlPlayerProp(bet.description, dateYMD)
+        ? await nhl.gradeNhlPlayerProp(bet.description, dateYMD, { absenceVoidAllowed })
         : await nhl.gradeNhlBet(bet.description, dateYMD);
     }
   } catch (err) {

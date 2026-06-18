@@ -6,6 +6,7 @@ const BASE = 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba';
 const TIMEOUT_MS = 8000;
 
 const { isTeamTotalBet } = require('./teamTotal');
+const { isProvableAbsence, voidPlayerDidNotPlay } = require('./terminalState');
 
 async function fetchJSON(url) {
   const res = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) });
@@ -351,15 +352,21 @@ function readStat(player, statFieldName) {
   return parseInt(raw, 10);
 }
 
+// On a hit, returns the player's stat line (shape unchanged). On a miss, returns
+// a not-found record carrying slate metadata so the caller can decide whether the
+// absence is PROVABLE (→ VOID) or indeterminate — see terminalState.js.
 async function findPlayerGame(lastName, dateYMD, firstName = null) {
   const events = await getGamesByDate(dateYMD);
+  let allFinal = true;
+  let anyFetchError = false;
   for (const e of events) {
+    const gameInfo = extractGameInfo(e);
+    if (!gameInfo?.finished) allFinal = false;
     try {
       const summary = await fetchJSON(`${BASE}/summary?event=${e.id}`);
       const bs = summary?.boxscore;
       const found = findPlayerInBoxscore(bs, lastName, firstName);
       if (found) {
-        const gameInfo = extractGameInfo(e);
         return {
           eventId: e.id,
           finished: gameInfo?.finished,
@@ -367,12 +374,14 @@ async function findPlayerGame(lastName, dateYMD, firstName = null) {
           ...found,
         };
       }
-    } catch (_) { /* skip */ }
+    } catch (_) { anyFetchError = true; /* skip */ }
   }
-  return null;
+  return { notFound: true, gamesOnDate: events.length, allFinal, anyFetchError };
 }
 
-async function gradeNbaPlayerProp(description, dateYMD) {
+// opts.absenceVoidAllowed (default true): the caller may forbid the provable-
+// absence VOID when the bet's date is ambiguous (see tryStructured date gate).
+async function gradeNbaPlayerProp(description, dateYMD, opts = {}) {
   const parsed = parsePlayerProp(description);
   if (!parsed) return { resolved: false, reason: 'unparseable_player_prop' };
   if (parsed.stat === null && !parsed.fields) {
@@ -384,10 +393,24 @@ async function gradeNbaPlayerProp(description, dateYMD) {
   const firstName = tokens.length > 1 ? tokens[0] : null;
 
   const result = await findPlayerGame(lastName, dateYMD, firstName);
-  if (!result) return { resolved: false, reason: 'player_not_found_in_games_on_date' };
+  if (result.notFound) {
+    // Player in no box score on the date. VOID only if absence is PROVABLE (full
+    // final slate, every box score read, player in none); otherwise the miss is
+    // indeterminate (no games / a live game / a skipped fetch / a misparsed name
+    // could all hide a real result) → fall through to search. See terminalState.js.
+    // opts.absenceVoidAllowed===false suppresses the VOID when the date is ambiguous.
+    if (opts.absenceVoidAllowed !== false && isProvableAbsence(result)) {
+      return voidPlayerDidNotPlay(parsed.player, dateYMD, result.gamesOnDate, 'NBA', 'espn_nba');
+    }
+    return { resolved: false, reason: 'player_not_found_in_games_on_date' };
+  }
   if (!result.finished) {
     return { resolved: true, status: 'PENDING', evidence: `${result.player}'s game not yet final (${result.status})`, source: 'espn_nba' };
   }
+  // Note: result.didNotPlay (player rostered for a game that occurred but logged a
+  // DNP / all-zero line) is a SEPARATE, already-resolved path left unchanged here —
+  // it does not loop, and its all-zero heuristic conflates "DNP" with "played, no
+  // production", so converting it to VOID is out of scope for this fix (see PR).
   if (result.didNotPlay) {
     return { resolved: true, status: 'LOSS', evidence: `${result.player} did not play.`, source: 'espn_nba' };
   }
