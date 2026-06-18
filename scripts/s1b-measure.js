@@ -30,12 +30,14 @@
 // gated at services/grading.js:2415:
 //     if (looksLikePlayerProp(bet) && ['MLB','NBA','NHL'].includes(sport.upper))
 //        → tryStructured(bet)   // services/sportsdata adapters
-// `isPlayerPropDescription` (grading.js:451) is broader (covers NBA/NHL stat
-// vocab) but does NOT route the structured pre-check — it powers the Gate-3
-// would-fire marker + the evidence guard. We size the primary `adapter_prop`
-// bucket with `looksLikePlayerProp` (faithful to the grader) and report the
-// `isPlayerPropDescription` delta as a secondary diagnostic so the NBA/NHL
-// props the structured pre-check currently MISSES are visible (S3 input).
+// `isPlayerPropDescription` (grading.js) is broader still (also matches NFL/other
+// stats and the "to score"/"anytime" phrasings) but does NOT route the structured
+// pre-check — it powers the Gate-3 would-fire marker + the evidence guard. We size
+// the primary `adapter_prop` bucket with `looksLikePlayerProp` (faithful to the
+// grader) and report the `isPlayerPropDescription` delta as a secondary diagnostic.
+// NOTE: fix/grader-prop-gate-nba-nhl broadened looksLikePlayerProp to MLB+NBA+NHL,
+// so the former MLB-bias gap (NBA/NHL props MISSED by the structured pre-check) is
+// now closed — the §D "missed by chosen detector" count should read ~0.
 // ───────────────────────────────────────────────────────────────────────────
 
 const path = require('path');
@@ -352,8 +354,8 @@ function formatReport(r) {
   const d = r.diagnostics;
   L.push('\n§D DIAGNOSTICS (grader-fidelity caveats)');
   L.push(`  covered-sport props MISSED by the chosen detector (isPlayerPropDescription true, looksLikePlayerProp false): ${d.coveredPropsMissedByChosenDetector}`);
-  L.push('    → chosen detector (looksLikePlayerProp, grading.js:286/2415) is MLB-biased; NBA/NHL pts/reb/ast/goals props mostly do NOT trip it,');
-  L.push('      so the live structured pre-check rarely fires for NBA/NHL. This count sizes that gap (S3 input: "BDL NBA props first").');
+  L.push('    → was the MLB-bias gap: looksLikePlayerProp (grading.js) used to key on MLB-only stat words, so NBA/NHL pts/reb/ast/goals props did not');
+  L.push('      trip it. Closed by fix/grader-prop-gate-nba-nhl (PLAYER_PROP_STAT_HINTS now covers MLB/NBA/NHL); a nonzero count here would flag any remaining gap.');
   if (d.nonCanonicalCoveredLabels.length) {
     L.push('  non-canonical covered labels (normalizeSport folds to MLB/NBA/NHL but the grader\'s LITERAL gate would not match — possible adapter_* over-count vs live grader):');
     for (const x of d.nonCanonicalCoveredLabels) L.push(`    "${x.label}" → ${x.count}`);

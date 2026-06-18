@@ -418,7 +418,27 @@ const SUPPORTED_SPORTS = new Set([
 // confident; caller falls through to ESPN/AI.
 // ═══════════════════════════════════════════════════════════
 
-const PLAYER_PROP_STAT_HINTS = /\b(hits?|runs?|rbis?|home\s*runs?|hrs?|total\s*bases?|tbs?|walks?|bbs?|strikeouts?|ks?|stolen\s*bases?|sbs?|innings?|ip|outs?|earned\s*runs?|ers?)\b/i;
+// Stat-name hints that mark a description as a player prop for the structured
+// pre-check gate (looksLikePlayerProp). Covers the sports the structured layer
+// grades — MLB, NBA, NHL. Was MLB-only ("the MLB-bias gap"): NBA/NHL props never
+// tripped it, so they never reached tryStructured. Scoped to the structured
+// allowlist (MLB/NBA/NHL) on purpose — NFL stats are intentionally excluded so
+// this stays narrower than the cross-sport PLAYER_PROP_GUARD_STATS list below.
+const PLAYER_PROP_STAT_HINTS = new RegExp(
+  '\\b(' + [
+    // MLB (batting + pitching)
+    'hits?', 'runs?', 'rbis?', 'home\\s*runs?', 'hrs?', 'total\\s*bases?', 'tbs?',
+    'walks?', 'bbs?', 'strikeouts?', 'ks?', 'stolen\\s*bases?', 'sbs?',
+    'innings?', 'ip', 'outs?', 'earned\\s*runs?', 'ers?',
+    // NBA
+    'points?', 'pts?', 'rebounds?', 'rebs?', 'assists?', 'asts?',
+    'steals?', 'stl', 'blocks?', 'blk', 'turnovers?',
+    'threes', 'three\\s*pointers?', '3pm', '3pt', 'pra',
+    // NHL (goals/assists/points shared with the above)
+    'goals?', 'saves?', 'shots?(?:\\s*on\\s*goal)?', 'sog', 'blocked\\s*shots?',
+  ].join('|') + ')\\b',
+  'i',
+);
 
 function looksLikePlayerProp(bet) {
   if (!bet || !bet.description) return false;
@@ -717,8 +737,11 @@ const PLAYER_PROP_BET_VOCAB = new Set([
 
 /**
  * Returns true if the description looks like a single-player prop
- * across any major sport. Intentionally broader than
- * `looksLikePlayerProp` (which is MLB-specific via stat hints).
+ * across any major sport. Overlapping with but NOT a strict superset of
+ * `looksLikePlayerProp`: this one additionally matches NFL/other stats and the
+ * "to score"/"anytime" phrasings (and needs no player name / numeric threshold),
+ * while `looksLikePlayerProp` matches a few tokens this one omits (e.g. pitching
+ * stats, `turnovers`). They serve different callers — see each definition.
  */
 function isPlayerPropDescription(description) {
   if (!description) return false;

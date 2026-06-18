@@ -22,9 +22,10 @@
 //   5 mlb-mixed   MLB       parlay    yes    Betts(Hits)=prop, Dodgers ML  adapter_prop / mixed
 //   6 nba-noprop  NBA       parlay    no     Celtics -3.5, Lakers ML       adapter_gamelevel / no-prop
 //   7 nhl-nolegs  NHL       parlay    no     (none)                        adapter_gamelevel / no-legs
-//   8 nba-prop*   NBA       straight  *      LeBron Over 25.5 Points       adapter_gamelevel (chosen detector MISSES NBA "Points")
+//   8 nba-prop    NBA       straight  yes    LeBron Over 25.5 Points       adapter_prop (detector now covers NBA "Points")
 //   9 baseball    Baseball  straight  no     —                             adapter_gamelevel (normalizeSport folds → non-canonical label)
-//   *#8: isPlayerPropDescription=true but looksLikePlayerProp=false → the MLB-bias gap (§D diagnostic).
+//   #8: post fix/grader-prop-gate-nba-nhl, looksLikePlayerProp covers NBA/NHL stats →
+//       the former MLB-bias gap (§D diagnostic) is closed; #8 now classifies adapter_prop.
 // ═══════════════════════════════════════════════════════════
 
 const path = require('path');
@@ -123,13 +124,15 @@ check('§2 raw has NO "Soccer" row', !findRow(r.perSportRaw, 'Soccer'));
 check('§2 raw "Baseball" distinct from MLB', !!findRow(r.perSportRaw, 'Baseball') && !!findRow(r.perSportRaw, 'MLB'));
 
 // ── §3 Source classification ──
-check('§3 adapter_prop = 2 (mlb-prop, mlb-mixed)', r.source.adapter_prop === 2, r.source.adapter_prop);
-check('§3 adapter_gamelevel = 5 (nba-game, nba-noprop, nhl-nolegs, nba-prop, baseball)', r.source.adapter_gamelevel === 5, r.source.adapter_gamelevel);
+// Post fix/grader-prop-gate-nba-nhl: looksLikePlayerProp now covers NBA/NHL stat
+// words, so the NBA "Points" prop (nba-prop) classifies adapter_prop, not gamelevel.
+check('§3 adapter_prop = 3 (mlb-prop, mlb-mixed, nba-prop)', r.source.adapter_prop === 3, r.source.adapter_prop);
+check('§3 adapter_gamelevel = 4 (nba-game, nba-noprop, nhl-nolegs, baseball)', r.source.adapter_gamelevel === 4, r.source.adapter_gamelevel);
 check('§3 search_only = 2 (tennis, soccer)', r.source.search_only === 2, r.source.search_only);
 check('§3 source total = 9', r.source.total === 9, r.source.total);
-// NBA "Points" prop is misclassified gamelevel because the CHOSEN detector misses it:
+// NBA "Points" prop now correctly classified adapter_prop (the detector covers it):
 const smNBA = findRow(r.sourceMatrix, 'NBA');
-check('§3 matrix NBA = 3G/0P/0S (chosen detector misses NBA Points prop)', smNBA && smNBA.adapter_gamelevel === 3 && smNBA.adapter_prop === 0, smNBA);
+check('§3 matrix NBA = 2G/1P/0S (detector now catches NBA Points prop)', smNBA && smNBA.adapter_gamelevel === 2 && smNBA.adapter_prop === 1, smNBA);
 const smMLB = findRow(r.sourceMatrix, 'MLB');
 check('§3 matrix MLB = 0G/2P/0S', smMLB && smMLB.adapter_prop === 2 && smMLB.adapter_gamelevel === 0, smMLB);
 
@@ -173,7 +176,9 @@ check('§5 created_at newest', r.honesty.createdAt.newest === '2026-05-12 10:00:
 
 // ── §D Diagnostics (grader-fidelity caveats) ──
 const d = r.diagnostics;
-check('§D NBA "Points" prop missed by chosen detector = 1', d.coveredPropsMissedByChosenDetector === 1, d.coveredPropsMissedByChosenDetector);
+// MLB-bias gap now closed: looksLikePlayerProp covers NBA/NHL stats, so the NBA
+// "Points" prop is no longer missed by the chosen detector.
+check('§D covered props missed by chosen detector = 0 (MLB-bias gap closed)', d.coveredPropsMissedByChosenDetector === 0, d.coveredPropsMissedByChosenDetector);
 check('§D non-canonical covered label "Baseball" surfaced', d.nonCanonicalCoveredLabels.some(x => x.label === 'Baseball' && x.count === 1), d.nonCanonicalCoveredLabels);
 
 // ── Helper-level sanity (pure functions) ──
