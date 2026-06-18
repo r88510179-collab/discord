@@ -1625,6 +1625,24 @@ function evaluateSweep(bet, now = Date.now()) {
   const betType = (bet.bet_type || '').toLowerCase();
   const desc = (bet.description || '').toLowerCase();
   if (betType === 'prop' || PROP_KEYWORDS.test(desc)) return { eligible: false, reason: 'prop' };
+
+  // Event-aware sweep guard (EVENT_AWARE_RECHECK=enforce). The grader loop earlier
+  // THIS cycle may have deferred this bet's recheck to its (future) event time via an
+  // UPDATE that the stale `pending` snapshot the sweeper filters does not reflect. The
+  // grading_state='done' read below does NOT catch it — an event-aware defer leaves
+  // grading_state at 'ready'/'backoff'. Re-derive from the immutable event_date with
+  // the SAME planner runAutoGrade used to defer it (~grading.js:1692): if the event
+  // still hasn't happened, the bet is not "pending >7d with no score" — it is waiting
+  // for its game — so the 7-day sweeper must not finalize it to a FALSE loss before
+  // its recheck fires. Gated on enforce so off/shadow stay byte-identical: shadow
+  // never writes the defer and must remain behavior-identical to off. event_date is
+  // set at parse time and never mutated mid-cycle, so the snapshot value is
+  // authoritative (no live re-read needed). suspect_far_future/unknown → defer=false
+  // → not protected → year-typo'd dates still sweep normally.
+  if (eventAwareRecheckMode() === 'enforce' && nextAttemptForEvent(bet.event_date, now).defer) {
+    return { eligible: false, reason: 'event_pending' };
+  }
+
   // Live-state guard against the stale-snapshot race: runAutoGrade captures
   // `pending = getPendingBets()` ONCE, then its grader loop can PARK a bet to a
   // terminal grading_state mid-cycle — most importantly the unmodeled-league
@@ -1767,6 +1785,9 @@ async function runAutoGrade(client) {
     const verdict = evaluateSweep(bet);
     if (verdict.reason === 'grace') {
       console.log(`[Sweeper] Grace skip "${(bet.description || '').slice(0, 40)}" — sweep_exempt_until=${verdict.graceUntil} (grace window from recovery/approval, not yet sweep-eligible)`);
+    }
+    if (verdict.reason === 'event_pending') {
+      console.log(`[Sweeper] Event-pending skip "${(bet.description || '').slice(0, 40)}" — event_date=${bet.event_date} not final yet (EVENT_AWARE_RECHECK=enforce); deferred recheck owns this bet, not the 7d sweep`);
     }
     return verdict.eligible;
   });
