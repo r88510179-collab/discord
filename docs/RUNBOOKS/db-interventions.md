@@ -302,6 +302,21 @@ db.transaction(() => { for (const id of ids) changed += upd.run(id).changes; })(
 console.log(`relabeled ${changed}/${ids.length} (0 is fine — means they confirmed via Approve or haven't settled)`);
 ```
 
+### `graded_at` is UTC — compare it to the deploy time in UTC before blaming code
+
+When investigating why some bet auto-voided (or graded wrong) *after* a fix
+deployed, the first question is whether it was actually graded **after** the new
+code went live. `graded_at` is written by `datetime('now')` / `CURRENT_TIMESTAMP`
+(`services/database.js`, `services/grading.js` — both are UTC in SQLite), so it is
+stored in **UTC**, not local/ET. Convert the Fly **deploy time to UTC** and compare it against
+`graded_at` *before* theorizing about which code path fired. A UTC-vs-ET
+confusion once made a batch of **pre-deploy** World Cup auto-void casualties look
+like a live code bug — their `graded_at` values were several hours "after" a
+deploy that, once both timestamps were in the same zone, had clearly landed
+*later* than the voids. The grades were stale, not a regression. Pull
+`graded_at` alongside `created_at` in the readonly pass (the Class-3 query above
+already selects it) and line both timestamps up against the deploy in UTC first.
+
 ---
 
 ## Case study 1 — wrong column name (aborted, no write)
