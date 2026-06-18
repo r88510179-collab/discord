@@ -16,11 +16,11 @@ A Code tab agent CAN read the local filesystem — that is a separate runtime. C
 
 ## Rule 0b: CODEMAP wins over memory
 
-`userMemories` is a 30-slot LRU working set, not a knowledge graveyard. When memory and `docs/CODEMAP.md` disagree, CODEMAP wins. Memory entries that reference files, line numbers, or schemas should be cross-checked against CODEMAP §7 (filesystem facts) and §1 (schemas) before being trusted.
+`userMemories` is a 30-slot LRU working set, not a knowledge graveyard. When memory and `docs/CODEMAP.md` disagree, CODEMAP wins. Memory entries that reference files, line numbers, or schemas should be cross-checked against CODEMAP's per-file call-site tables (the "Ingestion pipeline" / per-service sections that carry line numbers) and the "Schemas" section before being trusted.
 
 ## Rule 1: Before any DB work
 
-Always run `PRAGMA table_info(<table>)` before assuming columns exist. CODEMAP §1 lists the verified schemas, but it can drift between verification passes. Verify, then act.
+Always run `PRAGMA table_info(<table>)` before assuming columns exist. CODEMAP's "Schemas" section lists the verified schemas, but it can drift between verification passes. Verify, then act.
 
 The `bets` table primary key is `id`, NOT `bet_id`. This trips at least one query per session if memory leads.
 
@@ -40,7 +40,7 @@ For dry-run / commit toggle on mutation scripts use a `COMMIT=1` env-var pattern
 fly ssh console -a bettracker-discord-bot -C 'node -e "console.log(process.env.X || \"MISSING\")"'
 ```
 
-`fly secrets set` without subsequent `fly deploy` leaves the secret **staged but not in the running container**. This caused the 5-day silent no-op of ADMIN_LOG_CHANNEL_ID before v447. DEPLOY_CHECKLIST.md Step 5.5 codifies this check.
+`fly secrets set` without subsequent `fly deploy` leaves the secret **staged but not in the running container**. This caused the 5-day silent no-op of ADMIN_LOG_CHANNEL_ID before v447. The `node -e` command above proves the secret is live in the container; DEPLOY_CHECKLIST.md **Step 9** (External auth round-trip — Fly secrets / Surface Pro env vars) codifies the post-deploy secret/env-var verification. (Step 5a is the separate "merged ≠ deployed" check — it greps for a new *code* marker, not a secret.)
 
 ## Rule 3: Before assuming a commit is shipped
 
@@ -77,7 +77,7 @@ Run dry first, paste output, get explicit "commit it" from Smokke, then re-run w
 
 ## Rule 6: Channel routing is env-driven
 
-There are **no** hardcoded channel-ID constants in source. All channel routing reads from env vars (`HUMAN_SUBMISSION_CHANNEL_IDS`, `CAPPER_CHANNEL_MAP`, `WAR_ROOM_CHANNEL_ID`, etc — see CODEMAP §4). Don't grep source for channel IDs; query env or `bets.source_channel_id` instead.
+There are **no** hardcoded channel-ID constants in source. All channel routing reads from env vars (`HUMAN_SUBMISSION_CHANNEL_IDS`, `CAPPER_CHANNEL_MAP`, `WAR_ROOM_CHANNEL_ID`, etc — see CODEMAP's "Channels — ingestion routing" and "Env vars that gate behavior" sections). Don't grep source for channel IDs; query env or `bets.source_channel_id` instead.
 
 ## Rule 7: File paths to know
 
@@ -89,11 +89,11 @@ There are **no** hardcoded channel-ID constants in source. All channel routing r
 - `services/grading.js` — grader waterfall, isTrustedLossLeg
 - `services/sportsdata/` — structured grading adapters (mlb/nhl/nba)
 
-See CODEMAP §7 for line numbers of key call sites.
+See CODEMAP's per-file "Ingestion pipeline" / per-service sections for line numbers of key call sites.
 
 ## Rule 8: Before claiming "deployed ✅"
 
-Run `docs/DEPLOY_CHECKLIST.md` all 8 steps + Step 5.5 (env-var-in-container). No exceptions for "small" changes that touch production paths.
+Run `docs/DEPLOY_CHECKLIST.md` all 9 steps, including Step 5a (grep the new marker inside the running container — merged ≠ deployed). No exceptions for "small" changes that touch production paths.
 
 ## Rule 9: Reporting back to Smokke
 

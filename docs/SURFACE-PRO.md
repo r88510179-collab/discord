@@ -214,10 +214,15 @@ took `:8443`. The dashboard is deliberately `serve` (tailnet) not `funnel` (publ
 
 **Inbound (Fly bot → Surface Pro):**
 1. OCR slip text — Fly `services/localOcr.js` → Funnel `:8443` → `:11436` `zonetracker-ocr`.
-2. Ollama/Gemma vision fallback — Fly `services/ai.js:140,819` / `services/grading.js:2326` /
-   `commands/admin.js:998,1024` send `x-ollama-secret` to `OLLAMA_URL`
-   (`https://tracker-surface-pro.tail65f8f0.ts.net`, the Funnel root `:443`) → `:11435`
-   `ollama-proxy` → `:11434` `ollama`.
+2. Ollama LLM grading + Gemma vision fallback — Fly `services/ai.js:140` (text LLM,
+   `llama3.2:3b`) / `services/ai.js:823` (Gemma vision, `gemma3:4b`) / `services/grading.js:3076`
+   (AI grader, `llama3.2:3b`) / `commands/admin.js:1042,1068` (ollama-health probe) send
+   `x-ollama-secret` to `OLLAMA_URL` (`https://tracker-surface-pro.tail65f8f0.ts.net`, the
+   Funnel root `:443`) → `:11435` `ollama-proxy` → `:11434` `ollama`. **Note:** the **Gemma
+   vision** fallback (`ai.js:823`, behind `shouldFallbackToGemma`) is **disabled in production
+   via `GEMMA_FALLBACK_DISABLED=true`** (Fly secret; v431, `cf58b4c` — Surface Pro CPU inference
+   exceeds Fly's 90s timeout). The code is retained but inert. The `llama3.2:3b` text/grading
+   paths through the same proxy remain live.
 
 **Outbound (Surface Pro → Fly bot):**
 3. `zonetracker-scraper` → `POST /api/mobile-ingest` (`x-mobile-secret`).
@@ -237,8 +242,10 @@ took `:8443`. The dashboard is deliberately `serve` (tailnet) not `funnel` (publ
 - **`:11435` (ollama-proxy)** → consumer = **the Fly bot**, via Funnel root `:443`. Evidence:
   - On the box, `grep -rn 11435` matched only `ollama-proxy/proxy.js` (the listener itself)
     and its logs ⇒ no on-box caller.
-  - In the discord checkout: `x-ollama-secret` senders at `services/ai.js:140,819`,
-    `services/grading.js:2326`, `commands/admin.js:998,1024`; `OLLAMA_URL` confirmed set on
-    Fly to the Funnel host (`docs/BACKLOG.md:786`, `docs/DEPLOY_CHECKLIST.md`).
+  - In the discord checkout: `x-ollama-secret` senders at `services/ai.js:140,823`,
+    `services/grading.js:3076`, `commands/admin.js:1042,1068`; `OLLAMA_URL` confirmed set on
+    Fly to the Funnel host (`docs/BACKLOG.md` "Verified 2026-05-14: OLLAMA_URL IS set on Fly", `docs/DEPLOY_CHECKLIST.md`). The
+    `services/ai.js:823` Gemma vision sender is disabled via `GEMMA_FALLBACK_DISABLED=true`
+    (see step 2 above); the proxy is still exercised by the live `llama3.2:3b` text/grading paths.
 
 No consumer was left UNKNOWN.

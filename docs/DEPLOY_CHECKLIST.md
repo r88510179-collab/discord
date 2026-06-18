@@ -128,7 +128,7 @@ This complements Step 4a and Step 5: 4a checks *which branch* (`main`, clean), 4
 
 ### 5. Fly deploy ran and succeeded
 
-**Before deploying, confirm the merge is local:** `git checkout main && git pull` MUST show main advancing (e.g. `05400f3..db52a8c`). If it says **"Already up to date"** and you just merged a PR, the merge isn't on your local main — **stop and re-pull/merge**. `fly deploy` builds from local `main`, so deploying here ships the *prior* state. After deploy, verify the change is actually in the running image (`fly ssh console -C 'ls /app/<changed-file>'` or `grep -c <new-symbol> /app/<file>`) before trusting it.
+**Before deploying, confirm the merge is local:** `git checkout main && git pull` MUST show main advancing (e.g. `05400f3..db52a8c`). If it says **"Already up to date"** and you just merged a PR, the merge isn't on your local main — **stop and re-pull/merge**. `fly deploy` builds from local `main`, so deploying here ships the *prior* state. After deploy, you MUST run Step 5a to prove the change is actually in the running image — a green `fly deploy` and a merged PR do **not** prove the new code is live.
 
 Deploys are **manual**. There is no GitHub Action or git-push hook on this repo. After committing and pushing, run:
 
@@ -152,6 +152,22 @@ fly releases -a bettracker-discord-bot | head -3
 ```
 
 The latest version must be newer than before the deploy and have a timestamp within the last few minutes. If `fly deploy` errored, exited non-zero, or was killed mid-build, the release will not advance — Step 6 will then fail and you stop and report rather than retry.
+
+### 5a. Merged ≠ deployed — grep the new marker inside the running container (mandatory)
+
+**A merged PR and a green `fly deploy` do NOT prove the new code is live.** We have shipped phantom deploys this way twice (v281, v289 — `--no-cache` stale `COPY . .` layer; see the discipline section below), and the deploy-before-merge cases (#40, #44) shipped the *prior* tree from a clean-looking deploy. After every deploy, prove the change is in the running image by grepping for a distinctive symbol the change introduced, **inside the Fly container**:
+
+```bash
+# Count the new symbol in the deployed file. Expect a non-zero count.
+fly ssh console -a bettracker-discord-bot -C 'grep -c <new-symbol> /app/<changed-file>'
+
+# For a brand-new file, confirm it exists at all:
+fly ssh console -a bettracker-discord-bot -C 'ls -l /app/<new-file>'
+```
+
+Pick a symbol that is unique to this change (a new function name, a new enum/drop-reason string, a new SQL-gate constant, a new route path). A count of `0` — or `ls` reporting "No such file" — means the running container is on the **previous** build even though the deploy "succeeded": **stop, re-run `flydeploy` (the alias already forces `--no-cache`), and re-grep.** Do not trust the change until this returns a non-zero count.
+
+The grep is run against the deployed `/app/...` path, not your local tree — that is the whole point: it compares *what is running* against *what you merged*. Step 6 (runtime-log grep) and Step 2 (call-site grep in the repo) are complementary, but this is the one step that catches "merged but not deployed."
 
 ### 6. Bot picked up the new code
 
@@ -209,6 +225,7 @@ Adapt the command for whatever credential rotated.
 A code change is "deployed ✅" when ALL of the following are true:
 
 - [ ] Steps 1, 2, 4, 5 outputs pasted
+- [ ] Step 5a output pasted (running-container grep returned a non-zero count for the new marker)
 - [ ] Steps 3 and 6 outputs pasted (if applicable)
 - [ ] Step 9 output pasted (if shared secret rotated)
 - [ ] Step 7 confirms no regression
@@ -251,6 +268,9 @@ Step 4 (push):
 
 Step 5 (Fly release):
 [paste fly releases output]
+
+Step 5a (merged ≠ deployed — running-container grep):
+[paste `fly ssh ... grep -c <marker> /app/<file>` output — must be non-zero]
 
 Step 6 (bot picked up):
 [paste log grep or runtime check]
