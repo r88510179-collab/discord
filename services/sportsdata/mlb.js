@@ -97,6 +97,53 @@ async function getGameForTeam(teamName, dateYMD) {
   return null;
 }
 
+// Player-stat tokens — baseball PLAYER stats the run-total grader cannot grade. Whole-word
+// (\b-anchored) and scanned across the WHOLE description, deliberately NOT via the prop
+// parser's resolved stat: in the failing format "Team vs Team Over 0.5 PLAYER STAT" the
+// player name sits in the stat field, where the prop grader's loose resolveStat picks a stray
+// letter (the 'r' in "Tarik" → "runs", the 'r' in "Cruz" → "runs") and mis-resolves the stat,
+// so keying on the parser would MISS exactly the cases we must catch. A full-text token scan
+// is immune to player-name placement. Covers every non-run STAT_MAP stat — full words plus the
+// standard book abbreviations (ks/k/so, bb, sb, er, po, hr) that two adversarial-review passes
+// found a narrower draft missed (walks/earned-runs/outs, then K/SO/SB). All abbreviations are
+// \b-anchored and verified collision-free against the 30 MLB team aliases/names, EXCEPT "tb",
+// which is excluded because it is Tampa Bay's book code ("TB vs BOS …") — its full form "total
+// bases" is still covered. "runs"/"r" is intentionally ABSENT so real run totals and inning/
+// NRFI "Under 0.5 Runs" lines still grade (see looksLikeMisroutedPlayerProp).
+const PLAYER_STAT_TOKEN_RX = /\bhits?\b|to record 1\+|\bstrikeouts?\b|\bks\b|\bso\b|\bk\b|\brbis?\b|\btotal bases\b|\bhome runs?\b|\bhrs?\b|\bstolen bases?\b|\bsb\b|\bwalks?\b|\bbb\b|\bearned runs?\b|\ber\b|\bouts?\b|\bpo\b/;
+
+// Does this description look like a PLAYER prop that mis-routed to the team/total grader?
+//
+// gradeMlbBet's total branch only computes the GAME RUN total (away + home), so the ONLY
+// over/under it can legitimately grade is a run total. A player prop reaches here when its
+// subject fails player-prop routing — an unrecognized name, or one that spuriously
+// canonicalizes to a team (e.g. "Masyn Winn" → 'as' → Athletics). Without a guard the total
+// branch reads the prop's "Over 0.5" as a run line, sees the real game total (always > 0.5),
+// and mints a FALSE WIN that ignores the player (the −74.42u incident).
+//
+// Refuse whenever the description names a non-run player stat. No game-total-marker or line
+// check is needed (or safe): a real run total / ML / run line never contains a player-stat
+// word, while a player prop with a high line (e.g. "Over 5.5 Strikeouts") still must be
+// refused — so keying on the line (≥4.5) the way a first draft did re-opened a false-WIN hole.
+// The only real bets carrying a player-stat word are game-level stat markets ("Total Hits",
+// "Total Bases") which gradeMlbBet also cannot grade as runs, so refusing them to manual
+// review is correct, not a regression. It only REFUSES (resolved:false) — it does not
+// re-route to the prop grader (guard-only, per spec).
+//
+// Fallback: a bare single-letter stat abbrev ("H") is too collision-prone to scan for as a
+// free-floating letter, so it is caught only when the description actually parses as a player
+// prop whose subject canonicalizes to a team (i.e. it genuinely mis-routed here) and resolves
+// to a non-run stat — a stray letter in a real total never satisfies all three, so this adds
+// no false refusals. A player-RUNS prop whose name spuriously canonicalizes to a team is an
+// accepted residual: "runs" is inherently ambiguous with the game run total, the same
+// ambiguity the spec keeps, and out of scope for this guard.
+function looksLikeMisroutedPlayerProp(description) {
+  if (typeof description !== 'string' || !description) return false;
+  if (PLAYER_STAT_TOKEN_RX.test(description.toLowerCase())) return true;
+  const parsed = parsePlayerProp(description);
+  return !!(parsed && !parsed.fields && parsed.stat && parsed.stat !== 'runs' && canonicalize(parsed.player));
+}
+
 // Public API — used by the grader.
 // description: "New York Yankees -1.5" or "Atlanta Braves ML" or "Dodgers Blue Jays Over 8"
 // dateYMD: "2026-04-07"
@@ -110,6 +157,13 @@ async function gradeMlbBet(description, dateYMD) {
   // them — refuse so the caller falls through to ESPN+AI (which understands team totals).
   if (isTeamTotalBet(description)) {
     return { resolved: false, reason: 'team_total_unsupported' };
+  }
+
+  // A player prop that mis-routed here (its subject failed player-prop routing). Refuse
+  // before the ML/RL/total branches so it falls through to ESPN+AI / manual review
+  // instead of being auto-WON on the game total. See looksLikeMisroutedPlayerProp.
+  if (looksLikeMisroutedPlayerProp(description)) {
+    return { resolved: false, reason: 'player_prop_misrouted_to_total' };
   }
 
   // Find which team(s) the bet references
@@ -428,6 +482,7 @@ module.exports = {
   findPlayerGame,
   parsePlayerProp,
   looksLikePlayerProp,
+  looksLikeMisroutedPlayerProp,
   canonicalize,
   _internal: { TEAM_ALIASES, STAT_MAP, COMPOUND_STATS },
 };
