@@ -100,15 +100,21 @@ async function tryStructured(bet) {
   // Absence-VOID date gate. A prop grader may VOID a player who is provably
   // absent from the date's full final slate (terminalState.js). But this layer
   // keys the slate off created_at (getBetDate) while grading.js's future/too-
-  // recent GUARDs key off event_date. When a bet carries BOTH a created_at and
-  // an event_date that land on DIFFERENT days (e.g. a pick posted the night
-  // before its game), the slate we'd check is the WRONG day — the player's game
-  // is elsewhere, so "absent" is a date artifact, not a real DNP. Forbid the
-  // VOID in that case (the prop falls through to search, which keys off
-  // event_date). Same-day bets and bets with only one date are unaffected.
+  // recent GUARDs key off event_date. The slate is only TRUSTWORTHY enough to
+  // anchor an absence-VOID when event_date is PRESENT and lands on the SAME day
+  // as created_at. Two cases must forbid the VOID:
+  //   - DIFFERENT days (e.g. a pick posted the night before its game): the slate
+  //     we'd check is the WRONG day — the player's game is elsewhere, so "absent"
+  //     is a date artifact, not a real DNP.
+  //   - NULL event_date: the slate date is UNPROVEN. A pick posted the night
+  //     before carries created_at = day N but its real game may be N+1; absence
+  //     against day N's final slate would VOID before the game is even played —
+  //     a false VOID. An untrusted (null) event_date cannot anchor the slate.
+  // In both cases the prop falls through to search (which keys off event_date).
+  // Only a present, same-day event_date allows the VOID.
   const createdYMD = toYMD(bet.created_at);
   const eventYMD = toYMD(bet.event_date);
-  const absenceVoidAllowed = !(createdYMD && eventYMD && createdYMD !== eventYMD);
+  const absenceVoidAllowed = Boolean(eventYMD && createdYMD === eventYMD);
 
   try {
     if (sport === 'MLB') {

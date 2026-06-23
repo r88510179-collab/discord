@@ -224,12 +224,15 @@ const someoneElse = { ID9: { person: { fullName: 'Manny Machado', boxscoreName: 
   r = await nhl.gradeNhlPlayerProp('Connor McDavid O 0.5 Goals', '2026-05-31');
   check('NHL box-score fetch error → fall-through (no false VOID)', r.resolved === false && r.reason === 'player_not_found_in_games_on_date', JSON.stringify(r));
 
-  // ── Absence-VOID date gate: created_at vs event_date disagreement ──
+  // ── Absence-VOID date gate: event_date must anchor a trustworthy slate ──
   // The structured layer keys the slate off created_at (getBetDate); grading.js's
-  // future/too-recent GUARDs key off event_date. A night-before pick (created_at
-  // = day N, event_date = N+1) would otherwise VOID against day N's wrong-but-
-  // final slate — a false VOID. tryStructured forbids the VOID when the two dates
-  // land on different days.
+  // future/too-recent GUARDs key off event_date. An absence-VOID is only allowed
+  // when event_date is PRESENT and lands on the SAME day as created_at. A night-
+  // before pick (created_at = day N, event_date = N+1) would otherwise VOID
+  // against day N's wrong-but-final slate — a false VOID. A NULL event_date is
+  // just as unsafe: the slate date is UNPROVEN (the real game may be a later day),
+  // so absence against the created_at slate doesn't prove a DNP. tryStructured
+  // forbids the VOID unless event_date is present and same-day.
   console.log(' absence-VOID date gate (created_at vs event_date):');
   const provableSlate = (url) => {
     if (url.includes('/schedule')) return mlbSchedule([mlbGame(501, true)]);
@@ -243,9 +246,19 @@ const someoneElse = { ID9: { person: { fullName: 'Manny Machado', boxscoreName: 
   installFetch(provableSlate);
   g = await tryStructured({ description: 'Ramon Laureano O 0.5 Hits', sport: 'MLB', created_at: '2026-05-31 09:00:00', event_date: '2026-05-31 19:00' });
   check('dates AGREE → VOID fires', g.resolved === true && g.status === 'VOID', JSON.stringify(g));
+  // event_date NULL → the slate date is UNPROVEN, so absence can't VOID (Codex P1
+  // on PR #128: a null event_date left absenceVoidAllowed true → premature VOID).
+  // A pick posted the night before its game carries created_at = day N but its
+  // real game may be N+1; checking day N's final slate, missing the player, and
+  // VOIDing would erase a real result before the game is even played.
   installFetch(provableSlate);
-  g = await tryStructured({ description: 'Ramon Laureano O 0.5 Hits', sport: 'MLB', created_at: '2026-05-31 09:00:00' }); // no event_date
-  check('only one date present → VOID fires (no disagreement)', g.resolved === true && g.status === 'VOID', JSON.stringify(g));
+  g = await tryStructured({ description: 'Ramon Laureano O 0.5 Hits', sport: 'MLB', created_at: '2026-05-31 22:00:00', event_date: null });
+  check('night-before, event_date null → slate UNPROVEN → VOID suppressed (fall-through, no premature VOID)',
+    g.resolved === false && g.reason === 'player_not_found_in_games_on_date', JSON.stringify(g));
+  installFetch(provableSlate);
+  g = await tryStructured({ description: 'Ramon Laureano O 0.5 Hits', sport: 'MLB', created_at: '2026-05-31 09:00:00' }); // event_date absent → null
+  check('event_date absent → slate UNPROVEN → VOID suppressed (fall-through)',
+    g.resolved === false && g.reason === 'player_not_found_in_games_on_date', JSON.stringify(g));
   // Grader-level gate, independent of tryStructured: opts.absenceVoidAllowed===false suppresses.
   installFetch(provableSlate);
   r = await mlb.gradeMlbPlayerProp('Ramon Laureano O 0.5 Hits', '2026-05-30', { absenceVoidAllowed: false });
