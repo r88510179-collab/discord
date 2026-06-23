@@ -38,11 +38,122 @@ const { adminAuth } = require('./adminAuth');
 
 router.use(adminAuth);
 
+// ── Hold-queue selection (pure, exported for testing) ─────────
+// Trailing message-id segment of a Discord permalink (.../channels/G/C/<id>).
+// Mirrors scripts/backfill-hold-embeds.js urlMessageId so the queue collapse
+// picks the SAME representative the embed backfill does.
+function urlMessageId(messageUrl) {
+  const tail = String(messageUrl || '').split('/').pop() || '';
+  const m = tail.match(/^(\d+)/);
+  return m ? m[1] : null;
+}
+
+// selectHoldQueue(rows, isResolved) — turns the raw MANUAL_REVIEW_HOLD rows
+// (SELECTed created_at DESC, id DESC) into the representative rows to render,
+// newest first, ≤100. Exported as a pure function (mirrors how
+// routes/adminCommands.js exports handleDismissRoute) so it can be unit-tested
+// without an HTTP harness. `isResolved(ingestId, createdAt)` is injected — the
+// handler passes a closure over its resolvedStmt.
+//
+// Operations (the prose order in prompts/holds-dedup-messageurl.md, reconciled
+// with its acceptance tests):
+//   b. dedup by ingest_id, keep newest (rows arrive newest first; NULL-ingest
+//      rows are never deduped — each stays distinct).
+//   c. DEDUP-MSGURL (holds queue collapse): collapse the survivors by
+//      messageUrl. A buffered multi-message post (image-album split, or
+//      TweetShift posting text + media as separate messages) writes N
+//      MANUAL_REVIEW_HOLD rows with DISTINCT ingest_ids but ONE shared primary
+//      messageUrl (stageAll records the hold per constituent for trace), while
+//      the live pipeline calls sendHoldReviewEmbed only ONCE per aggregated
+//      post — so collapsing the queue by messageUrl is LOSSLESS and matches
+//      live behavior. Representative = the ingest_id equal to
+//      `disc_<urlMessageId(messageUrl)>` (the permalink's own message), else the
+//      OLDEST row (min created_at, tiebreak min id) — same rule as
+//      scripts/backfill-hold-embeds.js dedupByMessageUrl.
+//   a. drop resolved — evaluated on the collapsed group's REPRESENTATIVE, not
+//      per raw row. The `disc_<urlMessageId>` primary is the ONLY ingest_id the
+//      live Release/Dismiss button resolves (handlers/messageHandler.js sends
+//      the embed with primaryIngestId; services/holdReview.js writes
+//      MANUAL_REVIEW_RELEASED/DISMISSED for that one id), so a resolved buffered
+//      post is dropped ENTIRELY rather than leaving its non-primary constituent
+//      rows behind as ghosts. For a singleton group this is byte-identical to
+//      the previous per-ingest "drop if newest resolved".
+//   d. cap at 100 AFTER the collapse.
+// Rows whose messageUrl is empty/non-string (or whose payload won't parse) are
+// NEVER merged — each stays a distinct row keyed by its own event id.
+function selectHoldQueue(rows, isResolved) {
+  // b. dedup by ingest_id, keep newest.
+  const seen = new Set();
+  const deduped = [];
+  for (const r of rows) {
+    if (r.ingest_id) {
+      if (seen.has(r.ingest_id)) continue;   // dup hold for same ingest_id (older)
+      seen.add(r.ingest_id);
+    }
+    deduped.push(r);
+  }
+
+  // c. DEDUP-MSGURL (holds queue collapse) — group survivors by messageUrl;
+  // rows without a usable (non-empty string) messageUrl get a unique per-row
+  // key so they are never merged.
+  const messageUrlOf = (r) => {
+    try {
+      const p = JSON.parse(r.payload) || {};
+      if (typeof p.messageUrl === 'string' && p.messageUrl.trim()) return p.messageUrl;
+    } catch (_) { /* unparseable payload → not groupable */ }
+    return null;
+  };
+  const annotated = deduped.map((r) => {
+    const url = messageUrlOf(r);
+    // Only collapse rows whose messageUrl identifies a SPECIFIC message — a
+    // Discord permalink with a trailing numeric message id (urlMessageId != null),
+    // the only shape the live hold path writes (holdPayload.messageUrl =
+    // message.url) and the only shape the `disc_<urlMessageId>` rep rule can
+    // attribute. A non-empty but non-permalink messageUrl (e.g. a placeholder)
+    // can't be tied to one post, so each such row stays distinct rather than
+    // merging unrelated holds.
+    const groupable = url != null && urlMessageId(url) != null;
+    return { row: r, key: groupable ? `url:${url}` : `row:${r.id}`, url: groupable ? url : null };
+  });
+  const groups = new Map();   // key → { url, members[] } (members in newest-first order)
+  for (const a of annotated) {
+    let g = groups.get(a.key);
+    if (!g) { g = { url: a.url, members: [] }; groups.set(a.key, g); }
+    g.members.push(a.row);
+  }
+  const repOf = (g) => {
+    if (g.members.length === 1 || !g.url) return g.members[0];
+    const mid = urlMessageId(g.url);
+    const primary = mid ? g.members.find((m) => m.ingest_id === `disc_${mid}`) : null;
+    if (primary) return primary;
+    return g.members
+      .slice()
+      .sort((a, b) => (a.created_at - b.created_at) || (a.id - b.id))[0];   // oldest, tiebreak min id
+  };
+
+  // a + d. Emit each group's rep at the position of its newest member (so the
+  // queue stays newest-first), dropping groups whose rep is resolved, capping
+  // at 100 AFTER the collapse.
+  const done = new Set();
+  const out = [];
+  for (const a of annotated) {
+    if (done.has(a.key)) continue;
+    done.add(a.key);
+    const rep = repOf(groups.get(a.key));
+    if (rep.ingest_id && isResolved(rep.ingest_id, rep.created_at)) continue; // resolved post → drop group
+    out.push(rep);
+    if (out.length >= 100) break;
+  }
+  return out;
+}
+
 // ── GET /holds ────────────────────────────────────────────────
-// Unresolved MANUAL_REVIEW_HOLD review queue. "Unresolved" mirrors
-// services/replayHolds.js exactly: collapse duplicate holds per ingest_id
-// (keep newest), then drop any whose ingest_id later got a
-// MANUAL_REVIEW_RELEASED / MANUAL_REVIEW_DISMISSED event. Newest first, ≤100.
+// Unresolved MANUAL_REVIEW_HOLD review queue. Selection is delegated to the
+// pure, exported selectHoldQueue (above): dedup duplicate holds per ingest_id
+// (keep newest), collapse buffered multi-message posts that share one primary
+// messageUrl into a single row (DEDUP-MSGURL — see selectHoldQueue), drop any
+// whose representative ingest_id later got a MANUAL_REVIEW_RELEASED /
+// MANUAL_REVIEW_DISMISSED event, then cap at 100. Newest first, ≤100.
 //
 // pipeline_events.created_at is INTEGER unix-epoch SECONDS (migration 018) —
 // returned verbatim as `createdAt`; the dashboard formats it.
@@ -118,15 +229,10 @@ router.get('/holds', (req, res) => {
       return null;
     };
 
-    const seen = new Set();
-    const holds = [];
-    for (const r of rows) {
-      if (r.ingest_id && seen.has(r.ingest_id)) continue;      // dup hold for same ingest_id
-      if (r.ingest_id) seen.add(r.ingest_id);
-      if (r.ingest_id && resolvedStmt.get(r.ingest_id, r.created_at)) continue; // already resolved
-      holds.push(r);
-      if (holds.length >= 100) break;
-    }
+    // Pure selection (dedup by ingest_id → DEDUP-MSGURL collapse → drop
+    // resolved reps → cap 100). isResolved closes over resolvedStmt.
+    const isResolved = (ingestId, createdAt) => !!resolvedStmt.get(ingestId, createdAt);
+    const holds = selectHoldQueue(rows, isResolved);
 
     const items = holds.map(r => {
       let payload = {};
@@ -283,3 +389,4 @@ router.get('/logs', async (req, res) => {
 router.use((req, res) => res.status(404).json({ error: 'Not found' }));
 
 module.exports = router;
+module.exports.selectHoldQueue = selectHoldQueue;
