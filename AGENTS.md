@@ -6,6 +6,7 @@
 - The repo is the source of truth. Before starting, read the relevant live docs:
   - `docs/CODEMAP.md` — file/line map, schemas, enums (authoritative for code facts).
   - `docs/BACKLOG.md` — current priorities and shipped history.
+  - `docs/MEMORY.md` — the shipped-changes ledger — recent "what shipped, when, why, see #N" context.
   - `docs/PREFLIGHT.md` and `docs/DEPLOY_CHECKLIST.md` — operational gates.
   - `docs/SURFACE-PRO.md` — off-Fly service/port map.
 - Worktree discipline: confirm `pwd` / `git rev-parse --show-toplevel` and work only inside your assigned worktree. Never write to another checkout by absolute path.
