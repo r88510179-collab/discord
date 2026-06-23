@@ -6,6 +6,7 @@ const BASE = 'https://statsapi.mlb.com/api/v1';
 const TIMEOUT_MS = 8000;
 
 const { isTeamTotalBet } = require('./teamTotal');
+const { isProvableAbsence, voidPlayerDidNotPlay } = require('./terminalState');
 
 async function fetchJSON(url) {
   const res = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) });
@@ -400,10 +401,17 @@ function resolveStat(statText) {
 
 // Find the gamePk for a specific player on a date by checking the schedule for any game they played in.
 // Strategy: pull all games for the date, fetch each game's boxscore until we find the player.
+// On a hit, returns the player's stat line (shape unchanged). On a miss, returns a
+// not-found record carrying the slate metadata the caller needs to decide whether
+// the absence is PROVABLE (→ VOID) or merely indeterminate — see terminalState.js.
 async function findPlayerGame(playerLastName, dateYMD, playerFirstName = null) {
   const data = await fetchJSON(`${BASE}/schedule?sportId=1&date=${dateYMD}`);
   const games = data?.dates?.[0]?.games || [];
+  let allFinal = true;
+  let anyFetchError = false;
   for (const g of games) {
+    const gameFinal = g.status?.abstractGameState === 'Final';
+    if (!gameFinal) allFinal = false;
     try {
       const feed = await fetchJSON(`https://statsapi.mlb.com/api/v1.1/game/${g.gamePk}/feed/live`);
       const bs = feed?.liveData?.boxscore;
@@ -411,18 +419,20 @@ async function findPlayerGame(playerLastName, dateYMD, playerFirstName = null) {
       if (found) {
         return {
           gamePk: g.gamePk,
-          finished: g.status?.abstractGameState === 'Final',
+          finished: gameFinal,
           detailedState: g.status?.detailedState,
           ...found,
         };
       }
-    } catch (_) { /* skip game, try next */ }
+    } catch (_) { anyFetchError = true; /* skip game, try next */ }
   }
-  return null;
+  return { notFound: true, gamesOnDate: games.length, allFinal, anyFetchError };
 }
 
 // Grade a single player prop.
-async function gradeMlbPlayerProp(description, dateYMD) {
+// opts.absenceVoidAllowed (default true): the caller may forbid the provable-
+// absence VOID when the bet's date is ambiguous (see tryStructured date gate).
+async function gradeMlbPlayerProp(description, dateYMD, opts = {}) {
   const parsed = parsePlayerProp(description);
   if (!parsed) return { resolved: false, reason: 'unparseable_player_prop' };
   if (parsed.stat === null && !parsed.fields) {
@@ -435,7 +445,17 @@ async function gradeMlbPlayerProp(description, dateYMD) {
   const firstName = tokens.length > 1 ? tokens[0] : null;
 
   const result = await findPlayerGame(lastName, dateYMD, firstName);
-  if (!result) return { resolved: false, reason: 'player_not_found_in_games_on_date' };
+  if (result.notFound) {
+    // Player in no box score on the date. VOID only if absence is PROVABLE (full
+    // final slate, every box score read, player in none); otherwise the miss is
+    // indeterminate (no games / a live game / a skipped fetch / a misparsed name
+    // could all hide a real result) → fall through to search. See terminalState.js.
+    // opts.absenceVoidAllowed===false suppresses the VOID when the date is ambiguous.
+    if (opts.absenceVoidAllowed !== false && isProvableAbsence(result)) {
+      return voidPlayerDidNotPlay(parsed.player, dateYMD, result.gamesOnDate, 'MLB', 'mlb_statsapi');
+    }
+    return { resolved: false, reason: 'player_not_found_in_games_on_date' };
+  }
   if (!result.finished) {
     return { resolved: true, status: 'PENDING', evidence: `${result.player}'s game not yet final (${result.detailedState})`, source: 'mlb_statsapi' };
   }
