@@ -421,7 +421,15 @@ async function gradeNbaPlayerProp(description, dateYMD, opts = {}) {
   // findPlayerInBoxscore); a player who PLAYED and recorded zeros has
   // didNotPlay=false and grades normally below (value 0 vs the line).
   if (result.didNotPlay) {
-    return voidPlayerInactive(result.player, 'espn_nba');
+    // The structured slate is keyed off created_at (getBetDate); on a back-to-back
+    // the created_at-day game can be the WRONG game — the player can be a DNP that
+    // day yet PLAY the event_date game. So a found-in-game DNP only VOIDs under the
+    // same date guard the provable-absence path uses (opts.absenceVoidAllowed);
+    // when the dates disagree, fall through to grade the real event_date game.
+    if (opts.absenceVoidAllowed !== false) {
+      return voidPlayerInactive(result.player, 'espn_nba');
+    }
+    return { resolved: false, reason: 'dnp_date_unconfirmed' };
   }
 
   // Compute value

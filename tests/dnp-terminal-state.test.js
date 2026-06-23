@@ -310,15 +310,46 @@ const someoneElse = { ID9: { person: { fullName: 'Manny Machado', boxscoreName: 
   r = await mlb.gradeMlbPlayerProp('Ramon Laureano O 0.5 Hits', '2026-05-30', { absenceVoidAllowed: false });
   check('grader opts.absenceVoidAllowed=false → provable absence falls through (not VOID)',
     r.resolved === false && r.reason === 'player_not_found_in_games_on_date', JSON.stringify(r));
-  // The date gate is ABSENCE-only: a CONFIRMED DNP (player found in a concrete
-  // final game) is not subject to it and VOIDs even when the dates disagree.
-  installFetch((url) => {
+  // The date gate ALSO applies to a CONFIRMED DNP. The structured slate is keyed
+  // off created_at (getBetDate), but on a back-to-back a player can be a DNP in
+  // the created_at day's game yet PLAY the event_date game — so a found-in-game
+  // DNP is the "right game" only when the dates agree. When they disagree the
+  // slate may be the wrong day, so the VOID is suppressed and the prop falls
+  // through (to grade the real event_date game) rather than premature-VOIDing.
+  const nbaDnpSlate = (url) => {
     if (url.includes('/scoreboard')) return { events: [nbaEvent('g1', true)] };
     if (url.includes('/summary')) return nbaSummaryFor('Jayson Tatum', [], true); // found + true DNP
     return undefined;
-  });
+  };
+  // Night-before back-to-back: created_at = day N, event_date = N+1. The day-N
+  // slate shows Tatum as a DNP, but his real game is N+1 → suppress the VOID.
+  installFetch(nbaDnpSlate);
   g = await tryStructured({ description: 'Jayson Tatum O 25.5 Points', sport: 'NBA', created_at: '2026-05-30 18:00:00', event_date: '2026-05-31 19:00' });
-  check('confirmed DNP VOIDs even with disagreeing dates (gate is absence-only)', g.resolved === true && g.status === 'VOID', JSON.stringify(g));
+  check('confirmed DNP + disagreeing dates → VOID suppressed, falls through (back-to-back wrong-day slate)',
+    g.resolved === false && g.reason === 'dnp_date_unconfirmed', JSON.stringify(g));
+  // Same-day companion: created_at and event_date land on the same day → the
+  // slate is the right game → a confirmed DNP still VOIDs.
+  installFetch(nbaDnpSlate);
+  g = await tryStructured({ description: 'Jayson Tatum O 25.5 Points', sport: 'NBA', created_at: '2026-05-31 18:00:00', event_date: '2026-05-31 19:00' });
+  check('confirmed DNP + agreeing dates → VOID fires', g.resolved === true && g.status === 'VOID', JSON.stringify(g));
+  // Grader-level gate, independent of tryStructured: opts.absenceVoidAllowed=false
+  // suppresses the confirmed-DNP VOID too (mirrors the MLB absence case above).
+  installFetch(nbaDnpSlate);
+  r = await nba.gradeNbaPlayerProp('Jayson Tatum O 25.5 Points', '2026-05-30', { absenceVoidAllowed: false });
+  check('NBA grader opts.absenceVoidAllowed=false → confirmed DNP falls through (not VOID)',
+    r.resolved === false && r.reason === 'dnp_date_unconfirmed', JSON.stringify(r));
+  // Gate safety property: the date guard suppresses ONLY the DNP/absence branches.
+  // A player who PLAYED still grades on the real line even when the dates disagree
+  // (absenceVoidAllowed=false) — guards against a future over-broadening of the
+  // gate silently turning real wins into fall-throughs.
+  installFetch((url) => {
+    if (url.includes('/scoreboard')) return { events: [nbaEvent('g1', true)] };
+    if (url.includes('/summary')) return nbaSummaryFor('Jayson Tatum', ['30', '5', '7'], false); // played, 30 pts
+    return undefined;
+  });
+  r = await nba.gradeNbaPlayerProp('Jayson Tatum O 25.5 Points', '2026-05-30', { absenceVoidAllowed: false });
+  check('absenceVoidAllowed=false + player PLAYED → still grades on the real line (WIN; gate does not touch played path)',
+    r.resolved === true && r.status === 'WIN', JSON.stringify(r));
 
   // ── Straight DNP prop settles as result=void via finalizeBetGrading ──
   // Confirms the VOID terminal status flows all the way through the settle path:
