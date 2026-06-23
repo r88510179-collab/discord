@@ -6,7 +6,7 @@ const BASE = 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba';
 const TIMEOUT_MS = 8000;
 
 const { isTeamTotalBet } = require('./teamTotal');
-const { isProvableAbsence, voidPlayerDidNotPlay } = require('./terminalState');
+const { isProvableAbsence, voidPlayerDidNotPlay, voidPlayerInactive } = require('./terminalState');
 
 async function fetchJSON(url) {
   const res = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) });
@@ -332,7 +332,14 @@ function findPlayerInBoxscore(boxscore, lastName, firstName = null) {
         team: teamName,
         keys,
         stats: a.stats,
-        didNotPlay: a.didNotPlay || (a.stats || []).every(s => s === '0' || s === '0-0' || s === ''),
+        // AUTHORITATIVE DNP signal only. ESPN sets a.didNotPlay=true (with an
+        // empty stats array) for a true DNP — coach's decision / inactive. The
+        // old `|| all-zero stats` fallback conflated that with a player who DID
+        // play and recorded zeros: it both (a) mislabeled a played-zero line as a
+        // DNP and (b) — since the caller graded a DNP as LOSS — flipped a real
+        // UNDER win into a loss. a.reason / a.active are unreliable (ESPN leaves
+        // stale values on players who played), so neither is used.
+        didNotPlay: a.didNotPlay === true,
       };
     }
   }
@@ -407,12 +414,22 @@ async function gradeNbaPlayerProp(description, dateYMD, opts = {}) {
   if (!result.finished) {
     return { resolved: true, status: 'PENDING', evidence: `${result.player}'s game not yet final (${result.status})`, source: 'espn_nba' };
   }
-  // Note: result.didNotPlay (player rostered for a game that occurred but logged a
-  // DNP / all-zero line) is a SEPARATE, already-resolved path left unchanged here —
-  // it does not loop, and its all-zero heuristic conflates "DNP" with "played, no
-  // production", so converting it to VOID is out of scope for this fix (see PR).
+  // Confirmed DNP: the player was rostered for a game that DID occur (we found
+  // their box-score row) but did not take the court. The prop had NO ACTION →
+  // VOID (stake returned, no W/L, no capper effect), per Smokke's rule (PR #128).
+  // result.didNotPlay is now the authoritative ESPN flag only (see
+  // findPlayerInBoxscore); a player who PLAYED and recorded zeros has
+  // didNotPlay=false and grades normally below (value 0 vs the line).
   if (result.didNotPlay) {
-    return { resolved: true, status: 'LOSS', evidence: `${result.player} did not play.`, source: 'espn_nba' };
+    // The structured slate is keyed off created_at (getBetDate); on a back-to-back
+    // the created_at-day game can be the WRONG game — the player can be a DNP that
+    // day yet PLAY the event_date game. So a found-in-game DNP only VOIDs under the
+    // same date guard the provable-absence path uses (opts.absenceVoidAllowed);
+    // when the dates disagree, fall through to grade the real event_date game.
+    if (opts.absenceVoidAllowed !== false) {
+      return voidPlayerInactive(result.player, 'espn_nba');
+    }
+    return { resolved: false, reason: 'dnp_date_unconfirmed' };
   }
 
   // Compute value

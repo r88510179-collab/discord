@@ -56,6 +56,22 @@ function isProvableAbsence({ gamesOnDate, allFinal, anyFetchError } = {}) {
   return Number(gamesOnDate) > 0 && allFinal === true && anyFetchError === false;
 }
 
+// Build the VOID contract for a player who WAS rostered for a game that occurred
+// but did NOT take the court — a CONFIRMED DNP (coach's decision / inactive),
+// established from the box score's authoritative did-not-play flag (NOT an all-
+// zero stat line, which is a player who played and produced nothing). Same "no
+// action, void" semantics as an absent player; only the evidence wording differs
+// (we located their game, so no slate/date qualifier is needed). See the NBA
+// grader. Per Smokke's rule (PR #128): a player who did not play VOIDs, never LOSS.
+function voidPlayerInactive(playerName, source) {
+  return {
+    resolved: true,
+    status: 'VOID',
+    evidence: `${playerName} did not play — no action, void.`,
+    source,
+  };
+}
+
 // Build the VOID contract for a player who provably did not appear in any game
 // on the date. Matches the structured contract { resolved, status, evidence,
 // source } so grading.js's structured pre-check uses it directly (no fall-
@@ -73,4 +89,4 @@ function voidPlayerDidNotPlay(playerName, dateYMD, gameCount, leagueLabel, sourc
   };
 }
 
-module.exports = { isProvableAbsence, voidPlayerDidNotPlay };
+module.exports = { isProvableAbsence, voidPlayerDidNotPlay, voidPlayerInactive };

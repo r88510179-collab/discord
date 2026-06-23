@@ -396,6 +396,10 @@ async function gradeNhlPlayerProp(description, dateYMD, opts = {}) {
   if (!result.finished) {
     return { resolved: true, status: 'PENDING', evidence: `${result.player}'s game not yet final (${result.gameState})`, source: 'nhl_api' };
   }
+  // NHL DNP note (PR #128 follow-up): NHL has no in-box-score did-not-play flag —
+  // a healthy scratch is simply ABSENT from playerByGameStats, so a true DNP is
+  // handled by the provable-absence VOID above. A player who dressed but recorded
+  // nothing has a real 0 stat line and grades normally below. No separate branch.
 
   const value = result.stats[parsed.stat];
   if (value === undefined || value === null) {
