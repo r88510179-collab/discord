@@ -42,6 +42,7 @@ const EVENT_TYPES = [
   'ocr_fallback',        // cutover (dormant): degraded to the live Gemini path
   'event_aware_shadow',  // shadow (Codex #3): EVENT_AWARE_RECHECK would-fire measurement — one row per recheck/defer decision (kind=would_window|would_defer) on stage 'GRADING_ENTER'. Additive/observational, never gates behavior (enforce acts via grading_next_attempt_at instead); not in EXPECTED_STAGES.
   'slate_shadow',        // shadow (EVENT_DATE_SLATE): structured-grading slate-date would-change measurement — one row per bet whose event_date is present AND differs from created_at (the population 'enforce' would re-slate from created_at→event_date) on stage 'GRADING_ENTER'. Emitted by services/sportsdata/index.js tryStructured. Additive/observational, never gates behavior (enforce re-keys the slate + absenceVoidAllowed instead); not in EXPECTED_STAGES.
+  'soccer_grade_shadow', // shadow (SOCCER_GRADER_MODE): match-level ESPN soccer adapter would-fire measurement — one row per soccer bet/leg the adapter settles (would_status WIN/LOSS/PUSH/VOID) or audits (match_not_final/no_match_found) on stage 'GRADING_ENTER'. Emitted by services/sportsdata/index.js routeSoccer; payload {bet_id, would_status, reason, evidence, source:'espn_soccer', match_id, slug:'fifa.world', desc_or_leg}. Additive/observational, NO grade write — shadow returns fall-through so the real grade is unchanged (enforce returns the resolved status instead); not in EXPECTED_STAGES.
 ];
 const DROP_REASONS = [
   'DUPLICATE_IMAGE',
