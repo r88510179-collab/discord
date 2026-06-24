@@ -1459,6 +1459,9 @@ clone (secrets excluded: `ecosystem.config.js`/logs gitignored, `ecosystem.confi
 ### normalizeDescription: player-index nickname over-match
 Same class as the team-nickname guard (3d12196) but in the player index — e.g. "Judge" → Aaron Judge fires in prose. Fix: reuse `hasBetContext` on the player replacement path. Firing rate unmeasured.
 
+### MLB prop: identical-full-name collision unresolvable from box score
+`findPlayerInBoxscore` now refuses a single-token (surname-only) leg when 2+ same-surname players are active that day (returns `null` → safe refuse / VOID-on-provable-absence, never a wrong-player grade). Residual: two players with the **identical full name** on the same slate (e.g. two "Will Smith") cannot be disambiguated from a box score even with a first name — a roster / MLBAM-ID source would be needed. Out of scope for the word-boundary `canonicalize` PR; low frequency. See `tests/mlb-canonicalize-substring-surname.test.js`.
+
 ### Install Codex CLI on the Mac
 Codex CLI was absent all session; the audit step fell back to an independent sub-agent substitute. Install it so hot-path diffs get a real second-opinion pass.
 

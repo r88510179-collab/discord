@@ -52,7 +52,14 @@ console.log('mlb-prop-total-guard:');
     'Angels vs Athletics Over 0.5 Zach Neto - HITS',
     'Diamondbacks vs Giants Over 0.5 Matt Chapman - HITS',
     'St. Louis Cardinals vs Pirates Over 0.5 MASYN WINN - HITS',
-    'Masyn Winn Over 0.5 Hits',                                   // name canonicalizes via 'as'
+    // NOTE: post the word-boundary canonicalize fix, the single-player clean form
+    // "Masyn Winn …" no longer canonicalizes to a team, so in the LIVE path it routes
+    // to the player-prop grader (looksLikePlayerProp=true) — it is no longer mis-routed
+    // to gradeMlbBet. looksLikeMisroutedPlayerProp still returns true for it via the
+    // whole-text PLAYER_STAT_TOKEN_RX scan (a harmless backstop if it ever reached the
+    // team grader). The genuine mis-route targets are the matchup-prefixed (team-subject)
+    // forms above, where the subject canonicalizes to a team and looksLikePlayerProp=false.
+    'Masyn Winn Over 0.5 Hits',                                   // "hits" token
     'Cardinals vs Pirates Over 0.5 Nolan Gorman - TO RECORD 1+ HITS', // variant phrasing
     'Tigers vs Guardians Over 0.5 Tarik Skubal Ks',              // strikeouts (Ks)
     'Yankees vs Red Sox Over 0.5 Aaron Judge - RBI',             // rbi
@@ -60,8 +67,9 @@ console.log('mlb-prop-total-guard:');
     'Mets vs Braves Over 0.5 Pete Alonso Home Run',             // home run
     'Reds vs Cubs Over 0.5 Elly De La Cruz - Stolen Base',       // stolen base
     // ── Holes an earlier narrower draft missed (adversarial review): every non-run
-    //    STAT_MAP stat is now a token. The name must canonicalize to a team
-    //    (Masyn Winn → 'as' → Athletics) so the leg actually mis-routes to gradeMlbBet.
+    //    STAT_MAP stat is now a token, so the whole-text scan catches each one (these
+    //    single-player forms route to the prop grader live — see the NOTE above; the
+    //    helper's true verdict here is the token-scan backstop, not a canonicalize hit).
     'Masyn Winn Over 0.5 Walks',                                 // baseOnBalls
     'Masyn Winn Over 0.5 BB',                                    // baseOnBalls (abbrev)
     'Masyn Winn Over 0.5 Earned Runs',                           // earnedRuns
@@ -77,8 +85,11 @@ console.log('mlb-prop-total-guard:');
     'Masyn Winn Over 0.5 SO',                                    // strikeOuts (SO)
     'Cardinals vs Pirates Over 0.5 Nolan Gorman - K',           // team-vs-team bare K
     'Masyn Winn Over 0.5 SB',                                    // stolenBases (SB)
-    // ── Bare single-letter "H": caught by the parser fallback, not a free-floating \bh\b:
-    'Masyn Winn Over 0.5 H',                                     // hits (bare H, single player)
+    // ── Bare single-letter "H": caught by the parser fallback (subject canonicalizes to a
+    //    team + non-run stat), not a free-floating \bh\b. Post the word-boundary canonicalize
+    //    fix this fires ONLY for the matchup (team-subject) form — the single-player
+    //    "Masyn Winn Over 0.5 H" now routes to the prop grader (looksLikePlayerProp=true),
+    //    so it is no longer a mis-route and is intentionally NOT asserted true here.
     'Cardinals vs Pirates Over 0.5 Nolan Gorman - H',           // team-vs-team bare H
   ];
   for (const d of misrouted) {
