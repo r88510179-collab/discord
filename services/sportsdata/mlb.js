@@ -145,6 +145,73 @@ function looksLikeMisroutedPlayerProp(description) {
   return !!(parsed && !parsed.fields && parsed.stat && parsed.stat !== 'runs' && canonicalize(parsed.player));
 }
 
+// ── Matchup-prefixed player prop → canonical prop string (REROUTE; #130 follow-up) ──
+//
+// #130's guard REFUSES a leg shaped "Team vs Team Over N PLAYER [-] STAT" so the run-
+// total grader can't read its "Over 0.5" as a run line and false-WIN. This is the
+// inverse for the RECOGNIZED ones: strip the matchup prefix and rewrite to the canonical
+// "<PLAYER> Over/Under <N> <stat>" form so the player-prop grader (gradeMlbPlayerProp)
+// can settle it. The router (services/sportsdata/index.js) calls this BEFORE its team/
+// total dispatch; a non-null result is graded via gradeMlbPlayerProp — which can only
+// ever return a player result, a DNP VOID, or { resolved:false }, NEVER a game total.
+// So a wrong extraction or an unresolvable name degrades to a SAFE refuse, never a false
+// WIN (exactly the property #130 protects). gradeMlbPlayerProp looks the player up by
+// SURNAME in the box score, so a name that merely canonicalizes to a team ("Masyn Winn"
+// → 'as' → Athletics) — which broke the OLD team-total misroute — now resolves fine. The
+// residual that still safely refuses: a SURNAME carrying a diacritic the slip spells in
+// ASCII ("José Ramírez" vs "Jose Ramirez"), since the box-score match is ASCII-exact.
+//
+// Returns the canonical string, or null (→ routing unchanged) unless ALL hold:
+//   • matchup-prefixed: "<teams> (vs|v|@) <teams> (Over|Under|O|U) <N> <rest>"
+//   • <rest> names a NON-RUN player stat — the SAME PLAYER_STAT_TOKEN_RX signal #130
+//     refuses on (so a real run total "… Under 8.5 Total Runs" → null → still a total)
+//   • <rest> splits into a non-empty <player> AND a <stat> (so a bare game-stat market
+//     "… Over 8.5 Total Bases" with no player → null → still refused by #130's guard)
+const MATCHUP_PREFIXED_PROP_RX =
+  /^.+?\s+(?:vs?\.?|@)\s+.+?\s+(over|under|o|u)\s+(\d+(?:\.\d+)?)\s+(.+)$/i;
+
+function rewriteMatchupPrefixedProp(description) {
+  if (typeof description !== 'string' || !description) return null;
+  const m = description.trim().match(MATCHUP_PREFIXED_PROP_RX);
+  if (!m) return null;
+  const [, dirRaw, num, restRaw] = m;
+  const rest = restRaw.trim();
+  // Only reroute a NON-RUN player stat (#130's signal, inverted). A run total ("Total
+  // Runs") has no PLAYER_STAT_TOKEN_RX match → null → still grades as a game total.
+  if (!PLAYER_STAT_TOKEN_RX.test(rest.toLowerCase())) return null;
+
+  // Split <rest> into "<player> [-] <stat>".
+  let player = null;
+  let stat = null;
+  const dash = rest.split(/\s+[-–—]\s+/); // slip convention "<player> - <stat>" (spaced dash;
+  if (dash.length >= 2 && dash[0].trim()) { // an intra-name hyphen like "Saint-Denis" has no
+    player = dash[0].trim();                //  surrounding spaces, so it survives the split)
+    stat = dash.slice(1).join(' ').trim();
+  } else {
+    // No dash: the stat is the trailing recognized stat phrase, the player is the prefix.
+    // Locate it with the SAME non-run signal (lowercase only to find the index; positions
+    // align with the original, so the player slice keeps its real casing). Require the
+    // inferred player to be a real first+last name (≥2 tokens): WITHOUT the explicit dash
+    // delimiter a 1-token prefix is a game-market lead word, not a person — "… Over 8.5
+    // Total Hits" → "Total", "… Over 8.5 Team Total Bases" → "Team". Rerouting those would
+    // auto-VOID a game-stat market that #130 deliberately sends to manual review; rejecting
+    // them (→ null → gradeMlbBet's refuse) preserves that intent. The dash form keeps its
+    // single-name players ("Gorman - Hits") because the delimiter is explicit there.
+    const hit = rest.toLowerCase().match(PLAYER_STAT_TOKEN_RX);
+    if (hit && hit.index > 0) {
+      const candidate = rest.slice(0, hit.index).trim();
+      if (candidate.split(/\s+/).filter(Boolean).length >= 2) {
+        player = candidate;
+        stat = rest.slice(hit.index).trim();
+      }
+    }
+  }
+  if (!player || !stat) return null;
+
+  const direction = dirRaw.toLowerCase().startsWith('o') ? 'Over' : 'Under';
+  return `${player} ${direction} ${num} ${stat}`;
+}
+
 // Public API — used by the grader.
 // description: "New York Yankees -1.5" or "Atlanta Braves ML" or "Dodgers Blue Jays Over 8"
 // dateYMD: "2026-04-07"
@@ -509,6 +576,7 @@ module.exports = {
   parsePlayerProp,
   looksLikePlayerProp,
   looksLikeMisroutedPlayerProp,
+  rewriteMatchupPrefixedProp,
   canonicalize,
   _internal: { TEAM_ALIASES, STAT_MAP, COMPOUND_STATS },
 };
