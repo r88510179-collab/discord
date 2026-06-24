@@ -1239,7 +1239,7 @@ Empty-text image-only posts (DatDude HRB pattern) keep hitting MANUAL_REVIEW_HOL
 **Phased plan:**
 - **A — shadow (`feat/link-reader-shadow`, PR #96, live as v641/v642).** `services/linkReader.js` detects allow-listed book/shortlink URLs in messages headed for MANUAL_REVIEW_HOLD and, under `LINK_READER_MODE=shadow`, annotates the *existing* hold event with an additive `share_link: {url, domain, kind}` field. `LINK_READER_MODE` unset/off → no annotation (feature dormant, no behavior change). Also bumps the hold `sample` slice 80→400 chars so reviewers see more body text. Allow-list: `share.hardrock.bet`, `sportsbook.fanduel.com`, `sportsbook.draftkings.com`, `dkng.co`, `bit.ly`, `tinyurl.com`.
   - **A.1 — share_link on `sportsbook_brand` rejections (`feat/link-reader-shadow-brandsite`, no deploy).** Live observation 2026-06-12: share-wrapper text has **three terminal exits**, and Phase A only instrumented one — so shadow undercounts. (a) `ai_is_bet_false` → MANUAL_REVIEW_HOLD — **instrumented, Phase A**. (b) parser hallucinates a bet from the wrapper text → `sportsbook_brand` validator → `BOUNCER_REJECTED` — **instrumented, this PR** (Discord `dropAll` site, `handlers/messageHandler.js` ~1370; `share_link` from `cleanText`, gated on `reason==='sportsbook_brand'`, shadow-only additive field). (c) parser hallucinates a *gradeable-looking* bet → staged `needs_review` garbage (`sport=Unknown`) absorbed by the war-room human gate — **observed, not instrumented (acceptable)**. The twitter `sportsbook_brand` drop (`services/twitter-handler.js` ~258) is the same shape but **intentionally not annotated**: the scraper mangles relayed URLs (see "Twitter-side caveat" below), so detection there is unreliable — revisit when the scraper captures the anchor `href`. Shadow live since v641/v642.
-- **B — Surface Pro `zonetracker-link-reader` service.** New microservice (sibling to `zonetracker-ocr` / scraper): takes a share URL, follows redirects, renders headless, returns a screenshot. Tailscale-fronted; ~10s timeout; any failure falls back to the existing MANUAL_REVIEW_HOLD path (never blocks ingest).
+- **B — Surface Pro `zonetracker-link-reader` service.** New microservice (sibling to `zonetracker-ocr` / scraper): takes a share URL, follows redirects, renders headless, returns a screenshot. Tailscale-fronted; ~10s timeout; any failure falls back to the existing MANUAL_REVIEW_HOLD path (never blocks ingest). SHELVED 2026-06-24 - see entry below
 - **C — cutover.** On a (shadow-confirmed) share link: Surface Pro service → screenshot → `parseBetSlipImage` → save legs as if the bot read the slip directly. Gated by `LINK_READER_MODE=cutover` (strict; treated as off until C ships).
 
 **Twitter-side caveat:** the Surface scraper's *display text* mangles URLs — injected spaces + ellipsis truncation (`bit.ly/Din… ger`) — so Twitter-relayed links are unusable for detection until the scraper captures the anchor **href** instead of the rendered text. Promo domains (dubclub/whop/linktr) never expand to a slip; **allow-list only**.
@@ -1272,6 +1272,35 @@ Per-book selector hints:
 **Why high value:** Single feature unlocks 5+ real picks per day from Cody/Dan/Harry alone, currently 100% lost. Same machinery extends to any future capper who shares via shortlink, which is most of them.
 
 **Tracking:** First spotted 2026-05-20 during 33-hold audit. 4 of 33 (12%) were link-only.
+
+### Phase B link-reader (Playwright screenshot) - SHELVED (2026-06-24)
+
+Decision: do NOT build the Phase B/C Playwright share-link screenshotter (the "Playwright shortlink expander" plan described in the services/linkReader.js header). Phase A shadow (#96 v641, #101 v657) ran ~10 weeks; a read-only audit of pipeline_events (93,385 rows) settled it.
+
+Evidence:
+- detectShareLink's 6 allow-list hosts (share.hardrock.bet, sportsbook.fanduel.com, sportsbook.draftkings.com, dkng.co, bit.ly, tinyurl.com) appear 0 times across all 93k payloads.
+- MANUAL_REVIEW_HOLD: 467 rows, 0 carry a URL in payload.sample.
+- BOUNCER_REJECTED (drop_reason, the #1 drop reason at ~11.9k rows): only 5 are validator=sportsbook_brand, the sole slice linkReader touches (messageHandler.js:1450). The rest are guardReason / placeholder / offseason / leg_shape_invalid. That drop path persists no raw text / URL / messageUrl (payload keys: validator, issues, description, guardReason, channelId, channelName, author), so its link content is unmeasurable - but the brand surface is 5 messages.
+- Net real opportunity surface in ~10 weeks = 467 holds + 5 brand-rejects = 472 messages; link-reader matched 0.
+- The actual unreadable-slip vector is images: pbs.twimg.com (1083), cdn.discordapp.com (73), assets.gamescript.ai (16) - already handled by OCR-first + Gemini Vision.
+
+Three reasons (any one sufficient):
+1. Demand is noise (above).
+2. Mechanism mismatch: the two observed real share-link shapes do not screenshot. Capper wrappers (e.g. g.codybrownbonusbets.com) embed the slip image as a slip_image= URL param - fetch it, no browser. Hard Rock "Share My Bet" is an AppsFlyer OneLink app deep-link (app.hardrock.bet -> hardrock://betslip/<ids>) that renders no slip on desktop web - recoverable only via the book API/app.
+3. Cost to serve noise: the Surface Pro scraper is a pure polling loop with no HTTP server (see docs/SURFACE-PRO.md), so Phase B would need a brand-new always-on service (Playwright + Chromium, the last free funnel port :10000, a new token) for an empty population.
+
+Keep: LINK_READER_MODE=shadow stays ON - free, additive, passive tripwire; it annotates pipeline_events if an allow-listed link ever lands.
+
+Corroborates the 2026-05-29 link-gated-recovery shelving - now measured, not estimated.
+
+Caveat: raw bounce text is not persisted, so this is a practical, not literal-mathematical, zero.
+
+### QUEUED - browser-free share-link param-fetch (replaces the Phase B screenshotter)
+
+Cheap, no-new-service path for the one share-link shape with recoverable content (capper wrappers that embed slip_image=). Phased, shadow-first:
+- Q1 (measure): add observed wrapper host(s) - start with g.codybrownbonusbets.com - to detectShareLink as a new "wrapper" kind, shadow-only (LINK_READER_MODE is already shadow). Watch pipeline_events for wrapper-host share_link captures for ~1-2 weeks to confirm the shape has volume before building anything.
+- Q2 (only if Q1 shows volume): on a wrapper match, parse the slip_image= param and route that image into the existing OCR/vision path (services/ocrFirst.js / services/localOcr.js / Gemini vision). No Playwright, no Surface Pro service, reuses existing infra.
+- Out of scope: the AppsFlyer app-deeplink shape (app.hardrock.bet / hardrock://betslip/<ids>) - needs the book API, not a param or a screenshot.
 
 ---
 
