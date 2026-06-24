@@ -9,18 +9,123 @@
 const mlb = require('./mlb');
 const nhl = require('./nhl');
 const nba = require('./nba');
+const soccer = require('./soccer');
 const { etParts } = require('../eventDate');
 
-// Normalized sport → adapter, for prop-vs-team routing.
-const ADAPTERS = { MLB: mlb, NBA: nba, NHL: nhl };
+// Normalized sport → adapter, for prop-vs-team routing. SOCCER is registered for
+// direct/structural access, but is NOT reached via isPropBet below: that lookup
+// is keyed by normalizeSport(), which deliberately does NOT map soccer (see the
+// note on normalizeSport). Soccer routing goes through isSoccerSport/routeSoccer.
+const ADAPTERS = { MLB: mlb, NBA: nba, NHL: nhl, SOCCER: soccer };
 
 // Normalize sport string. The grader uses many spellings: "MLB", "NBA", "NHL", "Baseball", etc.
+//
+// DELIBERATELY scoped to {MLB,NBA,NHL,null}. Soccer is handled by a dedicated
+// path (isSoccerSport/routeSoccer), NOT by mapping it here, because this helper
+// is reused as a coverage proxy by scripts/s1b-measure.js — whose §4b leg-routed
+// view indexes a fixed { MLB, NBA, NHL } map by this return value
+// (routedCovered[normalizeSport(...)]) and would crash on a 'SOCCER' key — and
+// is asserted to return null for soccer by tests/sport-casing.test.js. Returning
+// 'SOCCER' here would break both. The dedicated path keeps that contract intact.
 function normalizeSport(sport) {
   const s = String(sport || '').toUpperCase();
   if (s.includes('MLB') || s.includes('BASEBALL')) return 'MLB';
   if (s.includes('NBA') || s === 'BASKETBALL') return 'NBA';
   if (s.includes('NHL') || s === 'HOCKEY') return 'NHL';
   return null;
+}
+
+// ── SOCCER (match-level, shadow-gated) ───────────────────────────────────────
+// Mode flag SOCCER_GRADER_MODE = off | shadow | enforce (strict compare;
+// unset / anything else → off). Default off = byte-identical to today: soccer
+// never reaches the adapter (the grading.js gate excludes it via
+// soccerStructuredEligible, and routeSoccer guards again for direct callers).
+//   off     — never touch the adapter.
+//   shadow  — run the adapter, emit ONE 'soccer_grade_shadow' pipeline_events
+//             row on a settleable would-verdict OR match_not_final/no_match_found
+//             (audit), then RETURN fall-through so the real grade is unchanged.
+//   enforce — return the adapter's real {resolved:true,status,...} so it grades.
+function soccerGraderMode() {
+  const m = process.env.SOCCER_GRADER_MODE;
+  if (m === 'shadow') return 'shadow';
+  if (m === 'enforce') return 'enforce';
+  return 'off';
+}
+
+// Soccer sport detector — separate from normalizeSport on purpose (see above).
+function isSoccerSport(sport) {
+  const s = String(sport || '').toUpperCase();
+  return s.includes('SOCCER') || s.includes('WORLD CUP') || s.includes('FIFA');
+}
+
+// Whether grading.js should route this bet into tryStructured for the soccer
+// adapter: a soccer sport AND the mode is on. off → false → byte-identical to
+// today (soccer falls straight through to ESPN→search→PENDING, untouched).
+function soccerStructuredEligible(bet) {
+  return !!bet && isSoccerSport(bet.sport) && soccerGraderMode() !== 'off';
+}
+
+// One fire-and-forget pipeline_events row for the soccer shadow measurement.
+// Mirrors emitSlateShadow: lazy-required bets layer, error-swallowed, NON-DROP
+// eventType so bets.transitionTo writes ONLY a pipeline_events row (no bet
+// mutation, no grade write). Never throws — observability must not affect grading.
+function emitSoccerShadow(betId, payload) {
+  try {
+    const bets = require('../bets');
+    bets.transitionTo({
+      betId: betId || null,
+      toStage: 'GRADING_ENTER',
+      eventType: 'soccer_grade_shadow',
+      payload,
+    });
+  } catch (_) { /* observability must not break grading */ }
+}
+
+// Emit the shadow row for settleable would-verdicts AND for the two audit
+// fall-throughs (match_not_final, no_match_found). Other fall-throughs
+// (unsupported_market_soccer, ambiguous_*, fetch_error) are silent — they are
+// the props-pass / search waterfall's job, not measured here.
+function shouldEmitSoccerShadow(result) {
+  if (result.resolved) return ['WIN', 'LOSS', 'PUSH', 'VOID'].includes(result.status);
+  return result.reason === 'match_not_final' || result.reason === 'no_match_found';
+}
+
+// Route a soccer bet/leg through the adapter under SOCCER_GRADER_MODE. dateYMD is
+// derived from created_at (getBetDate) — event_date is NULL/garbage on the stuck
+// World Cup rows; the adapter itself queries dateYMD ± 1 for timezone slack.
+async function routeSoccer(bet) {
+  const mode = soccerGraderMode();
+  if (mode === 'off') return { resolved: false, reason: 'soccer_grader_off' };
+
+  const dateYMD = getBetDate(bet);
+  if (!dateYMD) return { resolved: false, reason: 'no_bet_date' };
+
+  let result;
+  try {
+    result = await soccer.gradeSoccerBet(bet.description, dateYMD, { slug: 'fifa.world' });
+  } catch (err) {
+    return { resolved: false, reason: `adapter_error: ${err.message}` };
+  }
+
+  if (mode === 'shadow') {
+    if (shouldEmitSoccerShadow(result)) {
+      emitSoccerShadow(bet.id, {
+        bet_id: bet.id || null,
+        would_status: result.resolved ? result.status : null,
+        reason: result.resolved ? null : result.reason,
+        evidence: result.evidence || null,
+        source: 'espn_soccer',
+        match_id: result.match_id != null ? result.match_id : null,
+        slug: 'fifa.world',
+        desc_or_leg: bet.description,
+      });
+    }
+    // NO grade write in shadow — fall through so the real grade is unchanged.
+    return { resolved: false, reason: 'soccer_shadow' };
+  }
+
+  // enforce
+  return result;
 }
 
 // Detect if a description is a player prop (single-player stat bet) vs a team-level bet.
@@ -168,6 +273,14 @@ async function tryStructured(bet) {
     return { resolved: false, reason: 'no_description' };
   }
 
+  // SOCCER (match-level, shadow-gated). Checked BEFORE the MLB/NBA/NHL
+  // normalizeSport gate because normalizeSport deliberately does not map soccer
+  // (see its note). routeSoccer owns the mode handling (off → fall-through,
+  // shadow → emit + fall-through, enforce → real result).
+  if (isSoccerSport(bet.sport)) {
+    return await routeSoccer(bet);
+  }
+
   const sport = normalizeSport(bet.sport);
   if (!sport) return { resolved: false, reason: 'sport_not_supported' };
 
@@ -264,4 +377,8 @@ module.exports = {
   isPlayerProp,
   isPropBet,
   getBetDate,
+  // soccer (match-level, shadow-gated)
+  soccerGraderMode,
+  isSoccerSport,
+  soccerStructuredEligible,
 };

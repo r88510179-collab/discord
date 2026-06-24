@@ -3085,10 +3085,16 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
   console.log(`[AI Grader] Bet teams: [${betTeamList.join(', ')}] | Sport: ${sportContext || '?'}`);
 
   // ── STRUCTURED DATA PRE-CHECK (replaces old MLB resolver) ──
-  // Runs structured-data adapters for MLB/NBA/NHL player props.
+  // Runs structured-data adapters for MLB/NBA/NHL player props, and — when
+  // SOCCER_GRADER_MODE is shadow/enforce — match-level SOCCER bets/legs. Soccer
+  // is admitted regardless of prop-ness (match-level markets are not player
+  // props) and ONLY when the mode is on, so off is byte-identical to today
+  // (soccer falls straight through to ESPN→search). soccerStructuredEligible
+  // reads the mode; a load failure leaves it false (safe fall-through).
   // Falls through to ESPN+AI for game-level bets and unsupported sports.
-  // Game-level bets continue through tryGradeViaESPN below (unchanged).
-  if (looksLikePlayerProp(bet) && ['MLB', 'NBA', 'NHL'].includes((bet.sport || '').toUpperCase())) {
+  let soccerEligible = false;
+  try { soccerEligible = require('./sportsdata').soccerStructuredEligible(bet); } catch (_) {}
+  if ((looksLikePlayerProp(bet) && ['MLB', 'NBA', 'NHL'].includes((bet.sport || '').toUpperCase())) || soccerEligible) {
     try {
       const { tryStructured } = require('./sportsdata');
       const structured = await tryStructured(bet);
