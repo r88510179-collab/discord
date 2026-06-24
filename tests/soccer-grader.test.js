@@ -486,116 +486,209 @@ async function grade(desc) { return soccer.gradeSoccerBet(desc, D); }
     check('prop win shape', r.resolved === true && r.source === 'espn_soccer' && r.match_id === 'pe-1' && typeof r.evidence === 'string', r);
   }
 
-  // ═══════════════ Mode gating via tryStructured ═══════════════
+  // ═══════════════ marketClass tag (Build 1c) ═══════════════
+  // Every gradeSoccerBet result carries marketClass: 'match_level' | 'prop', on
+  // resolved AND fall-through, additive to the existing shape.
+  installFetch();
+  check('marketClass: match-level resolved tagged match_level', (await grade('USA ML')).marketClass === 'match_level');
+  check('marketClass: match-level fall-through tagged match_level', (await grade('Italy ML')).marketClass === 'match_level');
+  check('marketClass: prop resolved tagged prop', (await gradeP('Brian Brobbey 3+ Shots')).marketClass === 'prop');
+  check('marketClass: prop fall-through tagged prop', (await gradeP('Pedri Gonzalez Anytime Goalscorer')).marketClass === 'prop');
+
+  // ═══════════════ slate_empty distinct reason (Build 1c, job 2c) ═══════════════
+  // An empty slate (ESPN returned nothing across ±1) is `slate_empty`, NOT
+  // `no_match_found` — both the prop path and the match-level path. A populated
+  // slate with no team match stays `no_match_found`.
+  installFetch();
+  {
+    const r = await soccer.gradeSoccerBet('USA ML', '2026-09-09', { slug: 'fifa.world' }); // no scoreboard for 0909±1
+    check('slate_empty: match-level empty slate → slate_empty', r.reason === 'slate_empty' && r.marketClass === 'match_level', r);
+    const p = await soccer.gradeSoccerBet('Brian Brobbey Anytime Goalscorer', '2026-09-09', { slug: 'fifa.world' });
+    check('slate_empty: prop empty slate → slate_empty', p.reason === 'slate_empty' && p.marketClass === 'prop', p);
+    check('slate_empty: populated-but-unmatched stays no_match_found', (await grade('Italy ML')).reason === 'no_match_found');
+  }
+
+  // ═══════════════ Mode-ladder helper (Build 1c) ═══════════════
+  // Pure soccerEffectiveModes(masterRaw, propsRaw) → { matchMode, propMode }.
+  // Master is the kill-switch; props inherit min(master,'shadow') unless explicit.
+  const EM = sportsdata.soccerEffectiveModes;
+  const modeCases = [
+    // [masterRaw, propsRaw, expectMatch, expectProp]
+    [undefined, undefined, 'off', 'off'],        // unset → off
+    ['off', undefined, 'off', 'off'],            // explicit master off
+    ['off', 'enforce', 'off', 'off'],            // kill-switch beats explicit prop enforce
+    ['off', 'shadow', 'off', 'off'],
+    ['junk', 'shadow', 'off', 'off'],            // unknown master → off
+    ['shadow', undefined, 'shadow', 'shadow'],   // props inherit shadow
+    ['shadow', 'off', 'shadow', 'off'],          // props explicitly off
+    ['shadow', 'shadow', 'shadow', 'shadow'],
+    ['shadow', 'enforce', 'shadow', 'enforce'],  // props explicitly enforce
+    ['enforce', undefined, 'enforce', 'shadow'], // INHERITED ENFORCE CAPPED AT SHADOW
+    ['enforce', 'junk', 'enforce', 'shadow'],    // unknown props → inherit (cap)
+    ['enforce', 'off', 'enforce', 'off'],
+    ['enforce', 'shadow', 'enforce', 'shadow'],
+    ['enforce', 'enforce', 'enforce', 'enforce'],// props reach enforce ONLY when explicit
+  ];
+  for (const [m, p, em, ep] of modeCases) {
+    const r = EM(m, p);
+    check(`modes(${m}, ${p}) → ${em}/${ep}`, r.matchMode === em && r.propMode === ep, r);
+  }
+
+  // ═══════════════ Mode-split matrix via tryStructured ═══════════════
   const baseBet = { id: 'bet-soccer-1', sport: 'Soccer', description: 'USA ML', created_at: '2026-06-12 12:00:00', event_date: null };
+  const propBet = { id: 'bet-prop-1', sport: 'World Cup', description: 'Brian Brobbey Anytime Goalscorer', created_at: '2026-06-20 12:00:00', event_date: null };
+  function setModes(master, props) {
+    if (master === undefined) delete process.env.SOCCER_GRADER_MODE; else process.env.SOCCER_GRADER_MODE = master;
+    if (props === undefined) delete process.env.SOCCER_PROPS_MODE; else process.env.SOCCER_PROPS_MODE = props;
+  }
 
-  // off → adapter NOT reached (no fetch), fall-through, no shadow row
-  delete process.env.SOCCER_GRADER_MODE;
+  // ── master=off (props unset) → neither class routes: no fetch, no emit, no grade ──
+  setModes(undefined, undefined);
   installFetch();
   transitionCalls = [];
   {
-    const r = await sportsdata.tryStructured(baseBet);
-    check('off: tryStructured falls through', r.resolved === false, r);
-    check('off: adapter not reached (zero fetches)', fetchCount === 0, fetchCount);
-    check('off: no shadow row', transitionCalls.length === 0, transitionCalls.length);
-    check('off: soccerStructuredEligible=false', sportsdata.soccerStructuredEligible(baseBet) === false);
+    const rm = await sportsdata.tryStructured(baseBet);
+    const rp = await sportsdata.tryStructured(propBet);
+    check('master=off: both fall through', rm.resolved === false && rp.resolved === false, { rm, rp });
+    check('master=off: zero fetches (adapter dormant)', fetchCount === 0, fetchCount);
+    check('master=off: no shadow rows', transitionCalls.length === 0, transitionCalls.length);
+    check('master=off: soccerStructuredEligible=false', sportsdata.soccerStructuredEligible(baseBet) === false);
   }
 
-  // shadow → adapter runs, emits ONE shadow row, returns fall-through, NO grade
-  process.env.SOCCER_GRADER_MODE = 'shadow';
+  // ── master=off, props=enforce → STILL off (master kill-switch wins, zero fetch) ──
+  setModes(undefined, 'enforce');
   installFetch();
   transitionCalls = [];
   {
-    const r = await sportsdata.tryStructured(baseBet);
-    check('shadow: returns fall-through (NO grade write)', r.resolved === false && r.reason === 'soccer_shadow', r);
-    check('shadow: emitted exactly one row', transitionCalls.length === 1, transitionCalls.length);
-    const row = transitionCalls[0] || {};
-    check('shadow: row event_type', row.eventType === 'soccer_grade_shadow', row.eventType);
-    check('shadow: row stage GRADING_ENTER', row.toStage === 'GRADING_ENTER', row.toStage);
-    check('shadow: row betId', row.betId === 'bet-soccer-1', row.betId);
-    const p = row.payload || {};
-    check('shadow: payload would_status=WIN', p.would_status === 'WIN', p);
-    check('shadow: payload source/slug/match_id/desc', p.source === 'espn_soccer' && p.slug === 'fifa.world' && p.match_id === 'm-usa' && p.desc_or_leg === 'USA ML', p);
-    check('shadow: soccerStructuredEligible=true', sportsdata.soccerStructuredEligible(baseBet) === true);
+    const rp = await sportsdata.tryStructured(propBet);
+    check('master=off+props=enforce: prop still off', rp.resolved === false, rp);
+    check('master=off+props=enforce: zero fetches', fetchCount === 0, fetchCount);
+    check('master=off+props=enforce: no shadow row', transitionCalls.length === 0, transitionCalls.length);
   }
 
-  // shadow audit emit on no_match_found, and NO emit for unsupported player prop
-  process.env.SOCCER_GRADER_MODE = 'shadow';
+  // ── DEPLOY-SAFETY: master=shadow, props unset → match-level shadow AND props
+  //    inherited-shadow. Both emit + fall through; NEITHER grades. This is the
+  //    current prod secret (SOCCER_GRADER_MODE=shadow) — deploying changes NOTHING. ──
+  setModes('shadow', undefined);
+  installFetch();
+  transitionCalls = [];
+  {
+    const rm = await sportsdata.tryStructured(baseBet);
+    check('deploy-safety: match-level shadow fall-through (NO grade)', rm.resolved === false && rm.reason === 'soccer_shadow', rm);
+    check('deploy-safety: match-level emitted one row', transitionCalls.length === 1, transitionCalls.length);
+    const pm = (transitionCalls[0] || {}).payload || {};
+    check('deploy-safety: match-level payload would_status=WIN, market_class=match_level',
+      pm.would_status === 'WIN' && pm.market_class === 'match_level' && pm.match_id === 'm-usa' && pm.source === 'espn_soccer' && pm.slug === 'fifa.world', pm);
+    check('deploy-safety: shadow soccerStructuredEligible=true', sportsdata.soccerStructuredEligible(baseBet) === true);
+
+    transitionCalls = [];
+    const rp = await sportsdata.tryStructured(propBet);
+    check('deploy-safety: prop inherited-shadow fall-through (NO grade)', rp.resolved === false && rp.reason === 'soccer_shadow', rp);
+    check('deploy-safety: prop emitted one row', transitionCalls.length === 1, transitionCalls.length);
+    const pp = (transitionCalls[0] || {}).payload || {};
+    check('deploy-safety: prop payload would_status=WIN, market_class=prop',
+      pp.would_status === 'WIN' && pp.market_class === 'prop' && pp.match_id === 'pe-1', pp);
+  }
+
+  // ── HEADLINE: master=enforce, props unset → match-level GRADES (resolved),
+  //    props stay SHADOW (inherited cap: fall-through + emit, NOT enforced). ──
+  setModes('enforce', undefined);
+  installFetch();
+  transitionCalls = [];
+  {
+    const rm = await sportsdata.tryStructured(baseBet);
+    check('HEADLINE: match-level enforce → resolved WIN', rm.resolved === true && rm.status === 'WIN' && rm.source === 'espn_soccer' && rm.marketClass === 'match_level', rm);
+    check('HEADLINE: match-level enforce emits NO shadow row', transitionCalls.length === 0, transitionCalls.length);
+
+    transitionCalls = [];
+    const rp = await sportsdata.tryStructured(propBet);
+    check('HEADLINE: prop stays shadow (NOT enforced) → fall-through', rp.resolved === false && rp.reason === 'soccer_shadow', rp);
+    check('HEADLINE: prop still emits a shadow row', transitionCalls.length === 1, transitionCalls.length);
+    const pp = (transitionCalls[0] || {}).payload || {};
+    check('HEADLINE: prop shadow payload would_status=WIN, market_class=prop', pp.would_status === 'WIN' && pp.market_class === 'prop', pp);
+  }
+
+  // ── master=enforce, props=enforce (explicit) → prop GRADES (resolved) ──
+  setModes('enforce', 'enforce');
+  installFetch();
+  transitionCalls = [];
+  {
+    const rp = await sportsdata.tryStructured(propBet);
+    check('explicit props=enforce → prop resolved WIN', rp.resolved === true && rp.status === 'WIN' && rp.match_id === 'pe-1' && rp.marketClass === 'prop', rp);
+    check('explicit props=enforce → no shadow row', transitionCalls.length === 0, transitionCalls.length);
+  }
+
+  // ── master=enforce, props=off → prop discards to fall-through (no grade, no emit);
+  //    behaves as pre-feature waterfall. Match-level still grades. ──
+  setModes('enforce', 'off');
+  installFetch();
+  transitionCalls = [];
+  {
+    const rp = await sportsdata.tryStructured(propBet);
+    check('props=off: prop falls through (soccer_props_off), no grade', rp.resolved === false && rp.reason === 'soccer_props_off', rp);
+    check('props=off: prop emits NO shadow row', transitionCalls.length === 0, transitionCalls.length);
+    const rm = await sportsdata.tryStructured(baseBet);
+    check('props=off: match-level still enforces (resolved WIN)', rm.resolved === true && rm.status === 'WIN', rm);
+  }
+
+  // ═══════════════ Shadow-emit fidelity (Build 1c, job 2) ═══════════════
+  // Every shadow outcome is now observable — the prop-resolution reasons that used
+  // to be SILENTLY dropped emit a row carrying market_class + the exact reason.
+
+  // player_not_found — previously SILENT, now emits.
+  setModes('shadow', undefined);
+  installFetch();
+  transitionCalls = [];
+  {
+    await sportsdata.tryStructured({ ...propBet, id: 'bet-pnf', description: 'Cristiano Ronaldo Anytime Goalscorer' });
+    const p = (transitionCalls[0] || {}).payload || {};
+    check('fidelity: player_not_found now EMITS (was silent)', transitionCalls.length === 1 && p.reason === 'player_not_found', transitionCalls);
+    check('fidelity: player_not_found row market_class=prop, would_status=null', p.market_class === 'prop' && p.would_status === null, p);
+  }
+
+  // no_unique_player — previously SILENT, now emits.
+  installFetch();
+  transitionCalls = [];
+  {
+    await sportsdata.tryStructured({ ...propBet, id: 'bet-amb', description: 'Garcia Anytime Goalscorer' });
+    const p = (transitionCalls[0] || {}).payload || {};
+    check('fidelity: no_unique_player now EMITS (was silent)', transitionCalls.length === 1 && p.reason === 'no_unique_player', transitionCalls);
+    check('fidelity: no_unique_player row market_class=prop', p.market_class === 'prop', p);
+  }
+
+  // DNP would-VOID still emits (settleable would-verdict), now tagged prop.
+  installFetch();
+  transitionCalls = [];
+  {
+    await sportsdata.tryStructured({ ...propBet, id: 'bet-void', description: 'Wesley Bench Anytime Goalscorer' });
+    const p = (transitionCalls[0] || {}).payload || {};
+    check('fidelity: DNP would-VOID emits, market_class=prop', transitionCalls.length === 1 && p.would_status === 'VOID' && p.market_class === 'prop', p);
+  }
+
+  // slate_empty — emits with the distinct reason, both classes.
+  installFetch();
+  transitionCalls = [];
+  {
+    await sportsdata.tryStructured({ ...propBet, id: 'bet-empty-prop', created_at: '2026-09-09 12:00:00' });
+    const p = (transitionCalls[0] || {}).payload || {};
+    check('fidelity: prop slate_empty emits reason=slate_empty', transitionCalls.length === 1 && p.reason === 'slate_empty' && p.market_class === 'prop', p);
+
+    transitionCalls = [];
+    await sportsdata.tryStructured({ ...baseBet, id: 'bet-empty-ml', created_at: '2026-09-09 12:00:00' });
+    const pm = (transitionCalls[0] || {}).payload || {};
+    check('fidelity: match-level slate_empty emits reason=slate_empty', transitionCalls.length === 1 && pm.reason === 'slate_empty' && pm.market_class === 'match_level', pm);
+  }
+
+  // match-level no_match_found (populated, unmatched team) still emits, tagged match_level.
   installFetch();
   transitionCalls = [];
   {
     await sportsdata.tryStructured({ ...baseBet, description: 'Italy ML' });
-    check('shadow: no_match_found emits audit row', transitionCalls.length === 1 && transitionCalls[0].payload.reason === 'no_match_found', transitionCalls);
-  }
-  installFetch();
-  transitionCalls = [];
-  {
-    await sportsdata.tryStructured({ ...baseBet, description: 'Pulisic Anytime Goal Scorer' });
-    check('shadow: unresolved player prop (player_not_found) emits NO row', transitionCalls.length === 0, transitionCalls.length);
-  }
-
-  // enforce → returns the adapter's real resolved status
-  process.env.SOCCER_GRADER_MODE = 'enforce';
-  installFetch();
-  transitionCalls = [];
-  {
-    const r = await sportsdata.tryStructured(baseBet);
-    check('enforce: returns resolved status', r.resolved === true && r.status === 'WIN' && r.source === 'espn_soccer', r);
-    check('enforce: no shadow row', transitionCalls.length === 0, transitionCalls.length);
-  }
-  delete process.env.SOCCER_GRADER_MODE;
-
-  // ── PLAYER PROP obeys the SAME mode wiring (inherited via routeSoccer) ──
-  const propBet = { id: 'bet-prop-1', sport: 'World Cup', description: 'Brian Brobbey Anytime Goalscorer', created_at: '2026-06-20 12:00:00', event_date: null };
-
-  // off → prop adapter not reached
-  delete process.env.SOCCER_GRADER_MODE;
-  installFetch();
-  transitionCalls = [];
-  {
-    const r = await sportsdata.tryStructured(propBet);
-    check('prop off: falls through, zero fetches', r.resolved === false && fetchCount === 0, { r, fetchCount });
-    check('prop off: no shadow row', transitionCalls.length === 0, transitionCalls.length);
-  }
-
-  // shadow → prop WIN would-verdict emitted, returns fall-through (NO grade write)
-  process.env.SOCCER_GRADER_MODE = 'shadow';
-  installFetch();
-  transitionCalls = [];
-  {
-    const r = await sportsdata.tryStructured(propBet);
-    check('prop shadow: fall-through, no grade', r.resolved === false && r.reason === 'soccer_shadow', r);
-    check('prop shadow: emitted exactly one row', transitionCalls.length === 1, transitionCalls.length);
     const p = (transitionCalls[0] || {}).payload || {};
-    check('prop shadow: would_status=WIN, match_id=pe-1', p.would_status === 'WIN' && p.match_id === 'pe-1', p);
+    check('fidelity: match-level no_match_found emits, market_class=match_level', transitionCalls.length === 1 && p.reason === 'no_match_found' && p.market_class === 'match_level', p);
   }
 
-  // shadow → DNP would-VOID also emits (VOID is a settleable would-verdict)
-  installFetch();
-  transitionCalls = [];
-  {
-    await sportsdata.tryStructured({ ...propBet, id: 'bet-prop-void', description: 'Wesley Bench Anytime Goalscorer' });
-    check('prop shadow: DNP would-VOID emits a row', transitionCalls.length === 1 && transitionCalls[0].payload.would_status === 'VOID', transitionCalls);
-  }
-
-  // shadow → unresolved prop (no_unique_player) is SILENT (no row)
-  installFetch();
-  transitionCalls = [];
-  {
-    await sportsdata.tryStructured({ ...propBet, id: 'bet-prop-amb', description: 'Garcia Anytime Goalscorer' });
-    check('prop shadow: ambiguous player emits NO row', transitionCalls.length === 0, transitionCalls.length);
-  }
-
-  // enforce → prop returns the real resolved WIN
-  process.env.SOCCER_GRADER_MODE = 'enforce';
-  installFetch();
-  transitionCalls = [];
-  {
-    const r = await sportsdata.tryStructured(propBet);
-    check('prop enforce: resolved WIN', r.resolved === true && r.status === 'WIN' && r.source === 'espn_soccer' && r.match_id === 'pe-1', r);
-    check('prop enforce: no shadow row', transitionCalls.length === 0, transitionCalls.length);
-  }
-  delete process.env.SOCCER_GRADER_MODE;
+  setModes(undefined, undefined);
 
   console.log(`\nsoccer-grader: ${pass} passed, ${fail} failed`);
   process.exit(fail === 0 ? 0 : 1);

@@ -196,7 +196,13 @@ async function resolveMatch(descNorm, dateYMD, slug) {
   }
 
   if (candidates.length === 0) {
-    return { reason: anyFetchError && events.length === 0 ? 'fetch_error' : 'no_match_found' };
+    // Build 1c — distinguish an EMPTY slate (ESPN returned nothing across dateYMD±1:
+    // transient empty-200, genuinely empty day, or an out-of-window advance bet) from
+    // a populated slate where no event names the team. Only the truly-empty case gets
+    // the distinct `slate_empty`; a populated-but-unmatched slate stays `no_match_found`.
+    // Relabel only — the fall-through outcome (which bets resolve) is unchanged.
+    if (events.length === 0) return { reason: anyFetchError ? 'fetch_error' : 'slate_empty' };
+    return { reason: 'no_match_found' };
   }
   if (candidates.length > 1) return { reason: 'no_match_found' }; // ambiguous → never guess
   return candidates[0];
@@ -239,6 +245,20 @@ function no(reason, matchId) {
   const r = { resolved: false, reason };
   if (matchId != null) r.match_id = matchId;
   return r;
+}
+
+// Build 1c — additive market-class tag. The mode router (index.js routeSoccer)
+// gates the MATCH-LEVEL path and the PROP path independently, so every result must
+// carry which path produced it. Default-tag the result `cls` unless it already
+// self-identified (the prop path tags itself 'prop' at the fork). Pure + additive:
+// the existing {resolved,status,reason,source,evidence,match_id} shape is preserved
+// — only the marketClass field is added. ok()/no()/settleOverUnder are shared by
+// both paths, so the tag is applied at the gradeSoccerBet boundary, never inside
+// the settlement helpers.
+function tagClass(result, cls) {
+  if (!result || typeof result !== 'object') return result;
+  if (result.marketClass) return result;
+  return { ...result, marketClass: cls };
 }
 
 // Parse an over/under line: direction + numeric threshold. Reads the RAW lower
@@ -492,7 +512,11 @@ async function scanSlateForPlayer(prop, eventList, slug, cache) {
 // Player-first match resolution + settle, for a CONFIRMED prop.
 async function gradeSoccerProp(prop, descNorm, dateYMD, slug, cache) {
   const { events, anyFetchError } = await fetchSlateEvents(dateYMD, slug);
-  if (events.length === 0) return no(anyFetchError ? 'fetch_error' : 'no_match_found');
+  // Build 1c — empty slate is `slate_empty`, NOT `no_match_found`: it means ESPN
+  // gave us nothing (transient empty-200 / empty day / out-of-window advance bet),
+  // which is categorically different from "match resolved but the player didn't
+  // match." Keeping them distinct is what makes the shadow prop metric readable.
+  if (events.length === 0) return no(anyFetchError ? 'fetch_error' : 'slate_empty');
 
   // Narrow to events naming a competitor in the leg (e.g. the "(vs Austria)"
   // opponent) — this both cuts fetches and lets an annotation disambiguate a
@@ -579,12 +603,12 @@ function settleSoccerProp(prop, found) {
 }
 
 /**
- * Grade a single match-level soccer leg/bet.
+ * Grade a single match-level soccer leg/bet (untagged core).
  * @param {string} description  one pick string ("USA ML", "Over 2.5 Goals - USA vs Paraguay")
  * @param {string} dateYMD      slate date (YYYY-MM-DD); the adapter also checks ±1 day
  * @param {object} opts         { slug = 'fifa.world' }
  */
-async function gradeSoccerBet(description, dateYMD, opts = {}) {
+async function gradeSoccerBetImpl(description, dateYMD, opts = {}) {
   if (!description || !dateYMD) return no('bad_input');
   const slug = opts.slug || DEFAULT_SLUG;
   // Strip American/decimal odds FIRST so a price can never be parsed as a goal
@@ -616,7 +640,9 @@ async function gradeSoccerBet(description, dateYMD, opts = {}) {
   // below — UNCHANGED behavior.
   if (!isBtts) {
     const prop = parseSoccerProp(description);
-    if (prop) return await gradeSoccerProp(prop, descNorm, dateYMD, slug, new Map());
+    // Self-tag the prop path 'prop' at the fork (the only place that knows the path);
+    // the public wrapper defaults everything else to 'match_level'.
+    if (prop) return tagClass(await gradeSoccerProp(prop, descNorm, dateYMD, slug, new Map()), 'prop');
   }
   if (!isBtts && /(goal\s*scorer|anytime scorer|first scorer|last scorer|to score|to score or assist|\bassists?\b|shots?\s*on\s*(target|goal)|\bsot\b|\bsog\b|\bsaves?\b|\bcards?\b|booking|\bcorners?\b)/.test(descLower)) {
     return no('unsupported_market_soccer');
@@ -756,6 +782,17 @@ async function gradeSoccerBet(description, dateYMD, opts = {}) {
   }
 
   return no('unsupported_market_soccer', matchId);
+}
+
+/**
+ * Public entry. Runs the grader, then tags the result with its market class so the
+ * mode router (index.js routeSoccer) can gate match-level vs prop independently
+ * (Build 1c). The prop path self-tags 'prop' at its fork; everything else — including
+ * the bad_input guard and every match-level fall-through/verdict — defaults here to
+ * 'match_level'. Additive only: no settlement, parsing, or guard logic is touched.
+ */
+async function gradeSoccerBet(description, dateYMD, opts = {}) {
+  return tagClass(await gradeSoccerBetImpl(description, dateYMD, opts), 'match_level');
 }
 
 module.exports = {

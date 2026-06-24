@@ -35,21 +35,61 @@ function normalizeSport(sport) {
   return null;
 }
 
-// ── SOCCER (match-level, shadow-gated) ───────────────────────────────────────
-// Mode flag SOCCER_GRADER_MODE = off | shadow | enforce (strict compare;
-// unset / anything else → off). Default off = byte-identical to today: soccer
-// never reaches the adapter (the grading.js gate excludes it via
-// soccerStructuredEligible, and routeSoccer guards again for direct callers).
-//   off     — never touch the adapter.
-//   shadow  — run the adapter, emit ONE 'soccer_grade_shadow' pipeline_events
-//             row on a settleable would-verdict OR match_not_final/no_match_found
-//             (audit), then RETURN fall-through so the real grade is unchanged.
+// ── SOCCER (match-level + props, per-class mode-gated) ───────────────────────
+// TWO flags split the adapter's two paths (Build 1c) so the recon-verified
+// MATCH-LEVEL grader can enforce while PLAYER PROPS stay shadow:
+//
+//   SOCCER_GRADER_MODE  (master)  = off | shadow | enforce   — the match-level mode
+//                                                              AND the master kill-switch
+//   SOCCER_PROPS_MODE   (props)   = off | shadow | enforce | <unset>
+//
+// Effective modes (soccerEffectiveModes):
+//   master === 'off'  → BOTH classes off (master is the kill-switch; the whole
+//                       adapter is dormant — byte-identical to no-feature).
+//   else              → matchMode = master;
+//                       propMode  = SOCCER_PROPS_MODE if explicitly set, ELSE
+//                                   min(master,'shadow') — inherited enforce is
+//                                   CAPPED at shadow. Props reach enforce ONLY by an
+//                                   explicit SOCCER_PROPS_MODE=enforce. Safety: a
+//                                   match-level enforce flip never silently enforces props.
+//
+// Per-class behavior (routeSoccer, keyed off the result's marketClass):
+//   off     — that class never grades; falls through (waterfall handles it).
+//   shadow  — run the adapter, emit a 'soccer_grade_shadow' pipeline_events row
+//             (every outcome — see shouldEmitSoccerShadow), then RETURN fall-through
+//             so the real grade is unchanged.
 //   enforce — return the adapter's real {resolved:true,status,...} so it grades.
+//
+// Default (both unset) = byte-identical to today: master off → adapter never reached
+// (the grading.js gate excludes it via soccerStructuredEligible). Current prod secret
+// SOCCER_GRADER_MODE=shadow with SOCCER_PROPS_MODE unset → match-level shadow AND props
+// inherited-shadow → deploying this PR changes NO behavior.
 function soccerGraderMode() {
   const m = process.env.SOCCER_GRADER_MODE;
   if (m === 'shadow') return 'shadow';
   if (m === 'enforce') return 'enforce';
   return 'off';
+}
+
+// Raw read of the props flag: an explicit off|shadow|enforce, or null = "inherit".
+function soccerPropsModeRaw() {
+  const m = process.env.SOCCER_PROPS_MODE;
+  if (m === 'off' || m === 'shadow' || m === 'enforce') return m;
+  return null;
+}
+
+// Pure mode-ladder helper — fully unit-tested. Given the RAW env values, returns the
+// effective { matchMode, propMode }. masterRaw is normalized (unset/unknown → off);
+// propsRaw is null when unset (→ inherit, capped at shadow). The master-off case forces
+// BOTH off regardless of propsRaw (kill-switch wins).
+const SOCCER_MODE_RANK = { off: 0, shadow: 1, enforce: 2 };
+function minSoccerMode(a, b) { return SOCCER_MODE_RANK[a] <= SOCCER_MODE_RANK[b] ? a : b; }
+function soccerEffectiveModes(masterRaw, propsRaw) {
+  const master = (masterRaw === 'shadow' || masterRaw === 'enforce') ? masterRaw : 'off';
+  if (master === 'off') return { matchMode: 'off', propMode: 'off' };
+  const explicitProp = (propsRaw === 'off' || propsRaw === 'shadow' || propsRaw === 'enforce') ? propsRaw : null;
+  const propMode = explicitProp != null ? explicitProp : minSoccerMode(master, 'shadow');
+  return { matchMode: master, propMode };
 }
 
 // Soccer sport detector — separate from normalizeSport on purpose (see above).
@@ -81,21 +121,34 @@ function emitSoccerShadow(betId, payload) {
   } catch (_) { /* observability must not break grading */ }
 }
 
-// Emit the shadow row for settleable would-verdicts AND for the two audit
-// fall-throughs (match_not_final, no_match_found). Other fall-throughs
-// (unsupported_market_soccer, ambiguous_*, fetch_error) are silent — they are
-// the props-pass / search waterfall's job, not measured here.
+// Shadow-emit fidelity (Build 1c): in shadow mode EVERY adapter outcome is
+// observable so the prop metric is readable. Emit for resolved would-verdicts
+// (WIN/LOSS/PUSH/VOID) AND for ALL fall-through reasons — the prop-resolution
+// reasons that used to be silently dropped (player_not_found, no_unique_player,
+// slate_too_large, player_stat_missing, keyevents_incomplete, match_not_final,
+// fetch_error) and the distinct empty-slate `slate_empty`, plus the match-level
+// reasons. Nothing is silently dropped. (Adapter-routing failures generated by
+// routeSoccer BEFORE the grader runs — no_bet_date, adapter_error — short-circuit
+// and never reach here.) Enforce mode never calls this (the real grade is the record).
 function shouldEmitSoccerShadow(result) {
+  if (!result || typeof result !== 'object') return false;
   if (result.resolved) return ['WIN', 'LOSS', 'PUSH', 'VOID'].includes(result.status);
-  return result.reason === 'match_not_final' || result.reason === 'no_match_found';
+  return typeof result.reason === 'string' && result.reason.length > 0;
 }
 
-// Route a soccer bet/leg through the adapter under SOCCER_GRADER_MODE. dateYMD is
-// derived from created_at (getBetDate) — event_date is NULL/garbage on the stuck
-// World Cup rows; the adapter itself queries dateYMD ± 1 for timezone slack.
+// Route a soccer bet/leg through the adapter under the per-class effective modes
+// (Build 1c). dateYMD is derived from created_at (getBetDate) — event_date is
+// NULL/garbage on the stuck World Cup rows; the adapter itself queries dateYMD ± 1
+// for timezone slack. The result's marketClass (match_level | prop) selects which
+// class's mode applies.
 async function routeSoccer(bet) {
-  const mode = soccerGraderMode();
-  if (mode === 'off') return { resolved: false, reason: 'soccer_grader_off' };
+  const { matchMode, propMode } = soccerEffectiveModes(process.env.SOCCER_GRADER_MODE, process.env.SOCCER_PROPS_MODE);
+
+  // Master kill-switch: both classes off → adapter dormant, NO fetch (byte-identical
+  // to no-feature; this is the deploy-safety / zero-fetch guarantee).
+  if (matchMode === 'off' && propMode === 'off') {
+    return { resolved: false, reason: 'soccer_grader_off' };
+  }
 
   const dateYMD = getBetDate(bet);
   if (!dateYMD) return { resolved: false, reason: 'no_bet_date' };
@@ -107,10 +160,21 @@ async function routeSoccer(bet) {
     return { resolved: false, reason: `adapter_error: ${err.message}` };
   }
 
-  if (mode === 'shadow') {
+  // Pick the class mode from the path that produced the result. The adapter must run
+  // first to learn marketClass, so a prop reaching here with propMode 'off' (only via
+  // an explicit SOCCER_PROPS_MODE=off while master is on) discards the result to a
+  // fall-through: no grade, no shadow row — behaves as today's pre-feature waterfall.
+  const classMode = result && result.marketClass === 'prop' ? propMode : matchMode;
+
+  if (classMode === 'off') {
+    return { resolved: false, reason: 'soccer_props_off' };
+  }
+
+  if (classMode === 'shadow') {
     if (shouldEmitSoccerShadow(result)) {
       emitSoccerShadow(bet.id, {
         bet_id: bet.id || null,
+        market_class: (result && result.marketClass) || null,
         would_status: result.resolved ? result.status : null,
         reason: result.resolved ? null : result.reason,
         evidence: result.evidence || null,
@@ -124,7 +188,7 @@ async function routeSoccer(bet) {
     return { resolved: false, reason: 'soccer_shadow' };
   }
 
-  // enforce
+  // enforce → real grade
   return result;
 }
 
@@ -377,8 +441,10 @@ module.exports = {
   isPlayerProp,
   isPropBet,
   getBetDate,
-  // soccer (match-level, shadow-gated)
+  // soccer (match-level + props, per-class mode-gated)
   soccerGraderMode,
+  soccerPropsModeRaw,
+  soccerEffectiveModes,
   isSoccerSport,
   soccerStructuredEligible,
 };
