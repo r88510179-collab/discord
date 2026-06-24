@@ -225,6 +225,18 @@ async function tryStructured(bet) {
 
   try {
     if (sport === 'MLB') {
+      // Matchup-prefixed player prop ("Team vs Team Over N PLAYER [-] STAT"): strip the
+      // matchup, rewrite to the canonical "<PLAYER> Over/Under N <stat>", and grade through
+      // the player-prop path. #130 REFUSES these (player_prop_misrouted_to_total) so they
+      // never false-WIN as a game total; this reroutes the RECOGNIZED ones to grade. A failed
+      // extraction or player lookup stays inside gradeMlbPlayerProp (→ resolved:false / VOID),
+      // never the game-total grader — so the no-false-WIN guarantee is preserved. Checked
+      // BEFORE the isProp branch (these legs fail isProp: their subject canonicalizes to a
+      // team) so the rewrite wins; non-matchup descriptions return null → routing unchanged.
+      const rewritten = mlb.rewriteMatchupPrefixedProp(bet.description);
+      if (rewritten) {
+        return await mlb.gradeMlbPlayerProp(rewritten, slateYMD, { absenceVoidAllowed });
+      }
       return isProp
         ? await mlb.gradeMlbPlayerProp(bet.description, slateYMD, { absenceVoidAllowed })
         : await mlb.gradeMlbBet(bet.description, slateYMD);
