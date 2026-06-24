@@ -23,6 +23,7 @@ const STAGES = [
   'PURE_SLIP_SKIP_HOLD', // PR #2: pure-slip channel skipped MANUAL_REVIEW_HOLD staging (trace-only marker, NOT a drop; like MANUAL_REVIEW_HOLD it is intentionally absent from pipelineHealth.EXPECTED_STAGES)
   'RECOVERY_ATTEMPT_FAILED', // hold-recovery attempt burned vision+OCR but yielded no bet (validator_drop / no_bet_found / extract threw) — services/holdReview.js records one per failed attempt; COUNT(*) per ingest_id is the retry-cap counter (RECOVERY_RETRY_CAP). Trace-only marker, NOT a drop (the hold stays open); intentionally absent from pipelineHealth.EXPECTED_STAGES.
   'OCR_FIRST',           // OCR-first wiring observability marker (services/ocrFirstWiring.js): shadow compare + cutover route. Trace-only, NOT a drop; intentionally absent from pipelineHealth.EXPECTED_STAGES.
+  'PRE_FILTER_WOULD_DROP', // shadow (PRE_FILTER_MODE): pre-hold classifier (services/preFilter.js) matched a held non-bet (promo/recap/sweat) it WOULD drop under enforce — one STAGE_ENTER per held post on the primary ingest_id, emitted just before the MANUAL_REVIEW_HOLD stageAll in handlers/messageHandler.js. Measurement-only, never gates behavior (the hold still fires in shadow); intentionally absent from pipelineHealth.EXPECTED_STAGES.
   // Grading-side stages (added alongside BetService skeleton — migration 020)
   'GRADING_ENTER',
   'GRADING_SEARCH',
@@ -48,6 +49,14 @@ const DROP_REASONS = [
   'AGE_GATE',
   'PRE_FILTER_NO_BET_CONTENT',
   'PRE_FILTER_PROMO',
+  // PRE_FILTER_MODE=enforce drops a held non-bet the pre-hold classifier
+  // (services/preFilter.js) bucketed, instead of staging MANUAL_REVIEW_HOLD.
+  // One reason per bucket so each measured/enforced class is queryable apart
+  // from the generic PRE_FILTER_NO_BET_CONTENT. Registered so the warn-only
+  // write-boundary tripwire stays quiet when an enforce drop is recorded.
+  'PRE_FILTER_PROMO_SHEET',     // promo / sheet / marketing post
+  'PRE_FILTER_RECAP',           // past-tense recap ("cashed", "yesterday", "last night")
+  'PRE_FILTER_SWEAT_COMMENTARY',// sweat / commentary on an existing bet
   'PRE_FILTER_AI_EMPTY_RESULT', // post-Vision indeterminate branch (handlers/messageHandler.js:1302) — F-04 enum-drift registration
   'GUARD5_INSUFFICIENT_SIGNALS', // GUARD 5 pre-buffer signal heuristic dropped a message (looksLikePick <2 signals, no celebration, no images) — distinct from PRE_FILTER_NO_BET_CONTENT so "a real bare total was discarded by the heuristic" is queryable apart from genuine non-bet text (handlers/messageHandler.js GUARD 5). Incident 2026-06-11.
   'BOUNCER_REJECTED',
