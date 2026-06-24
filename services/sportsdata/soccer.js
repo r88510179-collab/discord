@@ -97,10 +97,11 @@ function shiftYMD(ymd, deltaDays) {
   return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
 }
 
-// All identity strings (normalized) for a competitor: full names + abbreviation
-// (≥3 chars, to avoid 2-letter collisions).
-function competitorIdentity(competitor) {
-  const t = competitor.team || {};
+// All identity strings (normalized) for a team object: full names + abbreviation
+// (≥3 chars, to avoid 2-letter collisions). Works for both scoreboard
+// competitors (competitor.team) and summary rosters (roster.team).
+function teamIdentity(t) {
+  t = t || {};
   const out = new Set();
   for (const v of [t.displayName, t.shortDisplayName, t.name, t.location]) {
     const n = norm(v);
@@ -109,6 +110,20 @@ function competitorIdentity(competitor) {
   const ab = norm(t.abbreviation);
   if (ab && ab.length >= 3) out.add(ab);
   return [...out];
+}
+function competitorIdentity(competitor) {
+  return teamIdentity(competitor.team || {});
+}
+// Does a (normalized) subject string name this team, whole-word, incl. aliases?
+// Used by the goalkeeper-saves path to resolve "<Team> Goalkeeper" → that team's
+// roster. subjNorm is the prop subject (e.g. "qatar"), already norm()'d.
+function teamMatchesSubject(team, subjNorm) {
+  const ids = teamIdentity(team);
+  for (const s of ids) if (hasToken(subjNorm, s)) return true;
+  for (const [aliasN, canonN] of ALIAS_PAIRS) {
+    if (ids.includes(canonN) && hasToken(subjNorm, aliasN)) return true;
+  }
+  return false;
 }
 
 // Does this competitor's team appear (whole-word) in the description?
@@ -145,10 +160,10 @@ function getCompetition(event) {
   return event && event.competitions && event.competitions[0];
 }
 
-// Resolve the single match the description refers to, across dateYMD ± 1 (TZ
-// slack). Returns { event, comp, matched } or a { reason } fall-through.
-// `matched` is the list of competitors named in the description.
-async function resolveMatch(descNorm, dateYMD, slug) {
+// Fetch the day's slate of events across dateYMD ± 1 (TZ slack), de-duplicated by
+// id. Returns { events, anyFetchError }. Shared by the match-level resolver and
+// the player-prop resolver so both query the SAME slate (no duplication).
+async function fetchSlateEvents(dateYMD, slug) {
   const seen = new Set();
   const events = [];
   let anyFetchError = false;
@@ -162,6 +177,14 @@ async function resolveMatch(descNorm, dateYMD, slug) {
       if (ev && ev.id != null && !seen.has(ev.id)) { seen.add(ev.id); events.push(ev); }
     }
   }
+  return { events, anyFetchError };
+}
+
+// Resolve the single match the description refers to, across dateYMD ± 1 (TZ
+// slack). Returns { event, comp, matched } or a { reason } fall-through.
+// `matched` is the list of competitors named in the description.
+async function resolveMatch(descNorm, dateYMD, slug) {
+  const { events, anyFetchError } = await fetchSlateEvents(dateYMD, slug);
 
   const candidates = [];
   for (const ev of events) {
@@ -238,6 +261,323 @@ function settleOverUnder(value, direction, line, label, matchId) {
   return ok(status, `${label}: ${value}, ${direction} ${line}.`, matchId);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// PLAYER PROPS (additive — Build 1b, SHADOW-gated by the same SOCCER_GRADER_MODE)
+// ───────────────────────────────────────────────────────────────────────────
+// CONFIRMED ESPN summary fields (recon vs live 2026 WC, 44 completed matches):
+//   shots → totalShots, shots-on-target → shotsOnTarget, GK saves → saves
+//   (present only on goalkeepers), goalscorer/assist → keyEvents[].scoringPlay
+//   + participants[0]=scorer / participants[1]=assist (both invariants 44/44 &
+//   22/22). Own goals have scoringPlay==true (type.id 97) → MUST be excluded;
+//   penalties (type.id 98) DO count. keyEvents are complete vs the scoreline
+//   (44/44) — we still guard on a mismatch (data gap → fall through).
+//
+// Player props need the SUMMARY endpoint, not the scoreboard. Most prop legs
+// (graded independently, see grading.js gradeParlay) name ONLY the player, so we
+// resolve the match player-first: scan the day's completed events for a UNIQUE
+// roster match. A named opponent ("... (vs Austria)") narrows the scan but the
+// safety guarantee is GLOBAL UNIQUENESS — a player/surname matching >1 athlete
+// (or 0) falls through, never guesses (PR #135 surname-collision lesson).
+//
+// A false grade is worse than a pending: every ambiguity → {resolved:false}.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const SUMMARY_BASE = 'https://site.api.espn.com/apis/site/v2/sports/soccer';
+const MAX_SLATE_SUMMARIES = 16; // bound the player-first scan (WC daily slate is small)
+// Trailing generational suffixes stripped before name comparison so "Vinicius
+// Jr" ↔ ESPN "Vinícius Júnior" and "Edmilson Junior" ↔ "...Júnior" match.
+const NAME_SUFFIXES = new Set(['jr', 'jnr', 'junior', 'sr', 'snr', 'senior', 'ii', 'iii', 'iv']);
+
+async function fetchSummary(eventId, slug, cache) {
+  const key = String(eventId);
+  if (cache && cache.has(key)) return cache.get(key);
+  let data = null;
+  try { data = await fetchJSON(`${SUMMARY_BASE}/${slug}/summary?event=${eventId}`); } catch (_) { data = null; }
+  if (cache) cache.set(key, data);
+  return data;
+}
+
+// Accent-folded, lowercased name tokens with a single trailing generational
+// suffix dropped. Returns [] for empty input.
+function nameTokens(s) {
+  const toks = norm(s).split(' ').filter(Boolean);
+  while (toks.length > 1 && NAME_SUFFIXES.has(toks[toks.length - 1])) toks.pop();
+  return toks;
+}
+
+// Conservative athlete match: the query and the athlete's displayName/fullName
+// must be token-subsets of one another (so "Erling Braut Haaland" ⊇ ESPN "Erling
+// Haaland"), share a substantive (≥3-char) token, and agree on a surname anchor.
+// A bare surname matches but is disambiguated by GLOBAL uniqueness at the call
+// site (two athletes sharing it → no_unique_player), per the PR #135 lesson.
+function athleteNameMatches(qTokens, athlete) {
+  if (!qTokens.length || !athlete) return false;
+  const qSet = new Set(qTokens);
+  for (const src of [athlete.displayName, athlete.fullName]) {
+    const a = nameTokens(src);
+    if (!a.length) continue;
+    const aSet = new Set(a);
+    if (!qTokens.some(t => t.length >= 3 && aSet.has(t))) continue; // substantive overlap
+    const qSubsetA = qTokens.every(t => aSet.has(t));
+    const aSubsetQ = a.every(t => qSet.has(t));
+    if (!qSubsetA && !aSubsetQ) continue;                            // one contains the other
+    if (aSet.has(qTokens[qTokens.length - 1]) || qSet.has(a[a.length - 1])) return true; // surname anchor
+  }
+  return false;
+}
+
+// Numeric stat value for a roster player by ESPN stat `name`, or null if absent
+// (outfield players have no `saves` stat → null → can't grade a saves prop).
+function readStatRaw(player, name) {
+  const stats = (player && player.stats) || [];
+  for (const s of stats) {
+    if (s && s.name === name) {
+      const v = Number(s.value);
+      return Number.isFinite(v) ? v : null;
+    }
+  }
+  return null;
+}
+
+// Did this player take the field? appearances stat is 1 when they played, 0 for
+// an unused sub; starter/subbedIn flags are the backup signal.
+function playerAppeared(player) {
+  if (!player) return false;
+  if (player.starter === true || player.subbedIn === true) return true;
+  const app = readStatRaw(player, 'appearances');
+  return app != null && app >= 1;
+}
+
+function isKeeper(player) {
+  const pos = (player && player.position) || {};
+  if (pos.abbreviation === 'G' || pos.name === 'Goalkeeper') return true;
+  return readStatRaw(player, 'saves') != null; // only goalkeepers carry the saves stat
+}
+
+// ── prop parser ──────────────────────────────────────────────────────────────
+// Returns { market, threshold, subject, isTeamKeeper } for a CONFIRMED prop, or
+// null (→ caller leaves the existing unsupported_market_soccer fall-through to
+// catch cards/corners/bookings/bare "to score"/last-scorer). market ∈
+// shots | sot | saves | anytime | first | scoreassist.
+function parseSoccerProp(descRaw) {
+  if (!descRaw) return null;
+  // Drop parentheticals (opponent context — kept for team-filtering via descNorm)
+  // and leading bullets; strip bare ±NNN odds.
+  const raw = String(descRaw).replace(/\([^)]*\)/g, ' ').replace(/^[\s•*▪◦\-–—]+/, ' ');
+  const low = raw.toLowerCase().replace(/[+-]\d{3,}(?![.\d])/g, ' ');
+
+  const isTeamKeeper = /\bgoal\s*keeper\b|\bkeeper\b/.test(low);
+
+  let market = null;
+  if (/\bsaves?\b/.test(low)) market = 'saves';
+  else if (/shots?\s*on\s*(?:target|goal)\b|\bsot\b|\bsog\b/.test(low)) market = 'sot';
+  else if (/\bshots?\b/.test(low)) market = 'shots';
+  else if (/to\s+score\s+or\s+(?:give\s+)?assist|\bscore\s+or\s+assist\b/.test(low)) market = 'scoreassist';
+  else if (/first\s+goal\s*scorer/.test(low)) market = 'first';
+  else if (/any\s*time\s+goal\s*scorer/.test(low)) market = 'anytime';
+  if (!market) return null;
+
+  let threshold = null;
+  const ou = low.match(/\b(over|under)\s+(\d+(?:\.\d+)?)/);
+  if (ou) {
+    threshold = { kind: 'ou', direction: ou[1] === 'over' ? 'over' : 'under', line: parseFloat(ou[2]) };
+  } else {
+    const plus = low.match(/(\d+)\s*\+/) || low.match(/(\d+)\s+or\s+more/);
+    if (plus) threshold = { kind: 'plus', n: parseInt(plus[1], 10) };
+  }
+
+  // Subject = the leg with every market phrase / threshold token removed.
+  let name = raw
+    .replace(/\b(?:over|under)\s+\d+(?:\.\d+)?/ig, ' ')
+    .replace(/\d+\s*\+/g, ' ')
+    .replace(/\d+\s+or\s+more/ig, ' ')
+    .replace(/player\s+to\s+(?:have|record|make|get)/ig, ' ')
+    .replace(/\bto\s+(?:make|have|record|get)\b/ig, ' ')
+    .replace(/to\s+score\s+or\s+give\s+assist|to\s+score\s+or\s+assist|score\s+or\s+assist/ig, ' ')
+    .replace(/any\s*time\s+goal\s*scorer|first\s+goal\s*scorer|goal\s*scorer/ig, ' ')
+    .replace(/shots?\s*on\s*(?:target|goal)|\bsot\b|\bsog\b|total\s+shots?|shots?/ig, ' ')
+    .replace(/total\s+saves?|saves?/ig, ' ')
+    .replace(/\bgoal\s*keeper\b|\bkeeper\b/ig, ' ')
+    .replace(/\bplayer\b/ig, ' ')
+    .replace(/[•*▪◦]/g, ' ')
+    .replace(/\s*[-–—:]\s*/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // No subject left (e.g. a team/match "Over 9.5 Shots on Target" total, not a
+  // player prop) → return null so the unsupported fall-through handles it.
+  if (!name) return null;
+
+  return { market, threshold, subject: name, isTeamKeeper };
+}
+
+// ── summary readers ──────────────────────────────────────────────────────────
+function summaryHeaderComp(summary) {
+  const comps = (summary && summary.header && summary.header.competitions) || [];
+  return comps[0] || null;
+}
+function summaryCompleted(summary) {
+  const c = summaryHeaderComp(summary);
+  const st = (c && c.status && c.status.type) || {};
+  return st.completed === true;
+}
+function scorelineTotal(summary) {
+  const c = summaryHeaderComp(summary);
+  const cs = (c && c.competitors) || [];
+  if (cs.length < 2) return null;
+  let total = 0;
+  for (const x of cs) {
+    const v = parseInt(x && x.score, 10);
+    if (!Number.isFinite(v)) return null;
+    total += v;
+  }
+  return total;
+}
+function isOwnGoalEvent(e) {
+  const t = (e && e.type) || {};
+  return t.id === '97' || t.type === 'own-goal' || /own\s*goal/i.test(t.text || '');
+}
+function participantAthleteId(e, i) {
+  const p = (e && e.participants) || [];
+  return p[i] && p[i].athlete && p[i].athlete.id != null ? p[i].athlete.id : null;
+}
+function clockValue(e) {
+  const v = Number(e && e.clock && e.clock.value);
+  return Number.isFinite(v) ? v : Infinity;
+}
+
+// Find the unique roster player a prop names within ONE event's rosters.
+// Returns { player } | { ambiguous:true } | {} (not found here).
+function findPlayerInRosters(prop, rosters) {
+  rosters = rosters || [];
+  if (prop.isTeamKeeper) {
+    const subjNorm = norm(prop.subject);
+    if (!subjNorm) return {};
+    const teamRosters = rosters.filter(r => r && teamMatchesSubject(r.team, subjNorm));
+    if (teamRosters.length !== 1) return {};                       // team not uniquely on this card
+    const keepers = (teamRosters[0].roster || []).filter(p => isKeeper(p) && playerAppeared(p));
+    if (keepers.length > 1) return { ambiguous: true };            // ≥2 keepers played → don't guess
+    if (keepers.length === 1) return { player: keepers[0] };
+    return {};
+  }
+  const qTokens = nameTokens(prop.subject);
+  if (!qTokens.length) return {};
+  const hits = [];
+  for (const r of rosters) {
+    for (const p of (r.roster || [])) {
+      if (athleteNameMatches(qTokens, p.athlete)) hits.push(p);
+    }
+  }
+  const ids = new Set(hits.map(h => h.athlete && h.athlete.id));
+  if (ids.size > 1) return { ambiguous: true };
+  if (ids.size === 1) return { player: hits[0] };
+  return {};
+}
+
+// Scan a list of events for the prop's player. Returns { ambiguous:eventId } on a
+// within-event collision, else { found, foundCount, summaryFetchError }. fetchSummary
+// caches per call so a re-scan over a superset re-fetches nothing.
+async function scanSlateForPlayer(prop, eventList, slug, cache) {
+  let found = null, foundCount = 0, summaryFetchError = false;
+  for (const ev of eventList) {
+    const summary = await fetchSummary(ev.id, slug, cache);
+    if (!summary) { summaryFetchError = true; continue; } // a failed fetch could HIDE the player
+    const res = findPlayerInRosters(prop, summary.rosters);
+    if (res.ambiguous) return { ambiguous: ev.id };       // collision within one event
+    if (res.player) { foundCount++; found = { ev, summary, player: res.player }; }
+  }
+  return { found, foundCount, summaryFetchError };
+}
+
+// Player-first match resolution + settle, for a CONFIRMED prop.
+async function gradeSoccerProp(prop, descNorm, dateYMD, slug, cache) {
+  const { events, anyFetchError } = await fetchSlateEvents(dateYMD, slug);
+  if (events.length === 0) return no(anyFetchError ? 'fetch_error' : 'no_match_found');
+
+  // Narrow to events naming a competitor in the leg (e.g. the "(vs Austria)"
+  // opponent) — this both cuts fetches and lets an annotation disambiguate a
+  // cross-match name collision. A named subset that resolves the player is
+  // TRUSTED (the bettor's opponent tag picks that fixture).
+  const named = events.filter(ev => {
+    const comp = getCompetition(ev);
+    const cs = (comp && comp.competitors) || [];
+    return cs.length === 2 && cs.some(c => competitorNamed(descNorm, c));
+  });
+
+  let scan;
+  if (named.length) {
+    scan = await scanSlateForPlayer(prop, named, slug, cache);
+    // The narrowing can MISFIRE: a player-name token may coincidentally equal a
+    // team name/abbrev on the slate, excluding the player's real match. If the
+    // narrowed subset matched ZERO, fall back to the full slate (cache dedups
+    // the already-fetched summaries) so we don't false-report player_not_found.
+    if (!scan.ambiguous && scan.foundCount === 0 && events.length > named.length) {
+      if (events.length > MAX_SLATE_SUMMARIES) return no('slate_too_large');
+      scan = await scanSlateForPlayer(prop, events, slug, cache);
+    }
+  } else {
+    if (events.length > MAX_SLATE_SUMMARIES) return no('slate_too_large');
+    scan = await scanSlateForPlayer(prop, events, slug, cache);
+  }
+
+  if (scan.ambiguous) return no('no_unique_player', scan.ambiguous);
+  const { found, foundCount, summaryFetchError } = scan;
+  if (foundCount > 1) return no('no_unique_player');               // same name across two events
+  if (foundCount === 0) return no(summaryFetchError ? 'fetch_error' : 'player_not_found');
+  if (!summaryCompleted(found.summary)) return no('match_not_final', found.ev.id);
+  return settleSoccerProp(prop, found);
+}
+
+function settleSoccerProp(prop, found) {
+  const { player, summary } = found;
+  const matchId = found.ev.id;
+  const pname = (player.athlete && (player.athlete.displayName || player.athlete.fullName)) || prop.subject;
+
+  // DNP → VOID. Smokke's rule (PR #128/#129): a player who did not play had NO
+  // ACTION, so the prop VOIDs (stake returned), NEVER a LOSS. A VOID leg REDUCES
+  // a parlay. (This is a deliberate deviation from the build prompt's literal
+  // "LOSS for confirmed-in-squad-0", to stay consistent with the rest of the
+  // codebase; flagged in the PR for sign-off before enforce.)
+  if (!playerAppeared(player)) {
+    return ok('VOID', `${pname} did not play (DNP) — no action, void.`, matchId);
+  }
+
+  if (prop.market === 'shots' || prop.market === 'sot' || prop.market === 'saves') {
+    const statName = prop.market === 'shots' ? 'totalShots' : prop.market === 'sot' ? 'shotsOnTarget' : 'saves';
+    const v = readStatRaw(player, statName);
+    if (v == null) return no('player_stat_missing', matchId);      // e.g. saves prop on an outfielder
+    if (!prop.threshold) return no('no_threshold', matchId);       // "X Shots on Target" w/ no number
+    const label = `${pname} ${statName}`;
+    if (prop.threshold.kind === 'plus') {
+      return ok(v >= prop.threshold.n ? 'WIN' : 'LOSS', `${label}=${v}, needed ${prop.threshold.n}+.`, matchId);
+    }
+    return settleOverUnder(v, prop.threshold.direction, prop.threshold.line, label, matchId);
+  }
+
+  // goalscorer / score-or-assist — keyEvents.
+  const scoring = (summary.keyEvents || []).filter(e => e && e.scoringPlay === true);
+  const total = scorelineTotal(summary);
+  if (total != null && scoring.length !== total) return no('keyevents_incomplete', matchId); // data gap
+  const pid = player.athlete && player.athlete.id;
+  const nonOwn = scoring.filter(e => !isOwnGoalEvent(e)); // own goals never credit a scorer/assister
+  const goals = nonOwn.filter(e => participantAthleteId(e, 0) === pid).length;
+
+  if (prop.market === 'anytime') {
+    return ok(goals >= 1 ? 'WIN' : 'LOSS', `${pname} scored ${goals} goal(s) — anytime goalscorer.`, matchId);
+  }
+  if (prop.market === 'first') {
+    if (!nonOwn.length) return no('no_regular_scorer', matchId);   // 0-0 / all own goals → don't guess
+    const first = nonOwn.slice().sort((a, b) => clockValue(a) - clockValue(b))[0];
+    const won = participantAthleteId(first, 0) === pid;
+    return ok(won ? 'WIN' : 'LOSS', `${pname} ${won ? 'was' : 'was not'} the first goalscorer.`, matchId);
+  }
+  // scoreassist (default threshold 1 = binary "to score or assist")
+  const assists = nonOwn.filter(e => participantAthleteId(e, 1) === pid).length;
+  const n = prop.threshold && prop.threshold.kind === 'plus' ? prop.threshold.n : 1;
+  const combined = goals + assists;
+  return ok(combined >= n ? 'WIN' : 'LOSS', `${pname} goals=${goals}+assists=${assists}=${combined}, needed ${n}+ — score or assist.`, matchId);
+}
+
 /**
  * Grade a single match-level soccer leg/bet.
  * @param {string} description  one pick string ("USA ML", "Over 2.5 Goals - USA vs Paraguay")
@@ -264,8 +604,20 @@ async function gradeSoccerBet(description, dateYMD, opts = {}) {
     return no('unsupported_market_soccer');
   }
   const isBtts = /both teams to score|\bbtts\b|\bgg\b\/?\bng\b/.test(descLower);
-  // ANY player prop / unsupported side market. "both teams to score" contains
-  // "to score", so BTTS is detected first and excluded here.
+
+  // ── Player props (CONFIRMED markets only — Build 1b) ──
+  // parseSoccerProp returns non-null ONLY for shots / shots-on-target /
+  // goalkeeper-saves / anytime|first goalscorer / to-score-or-assist — the prop
+  // types whose backing ESPN summary field was recon-verified present. Those get
+  // real grading (player-first match resolution + summary fetch). "both teams to
+  // score" contains "to score" so BTTS is detected first and skips this. Every
+  // other player/side market (cards, corners, bookings, bare "to score", last
+  // scorer, standalone assists) returns null here and falls through unsupported
+  // below — UNCHANGED behavior.
+  if (!isBtts) {
+    const prop = parseSoccerProp(description);
+    if (prop) return await gradeSoccerProp(prop, descNorm, dateYMD, slug, new Map());
+  }
   if (!isBtts && /(goal\s*scorer|anytime scorer|first scorer|last scorer|to score|to score or assist|\bassists?\b|shots?\s*on\s*(target|goal)|\bsot\b|\bsog\b|\bsaves?\b|\bcards?\b|booking|\bcorners?\b)/.test(descLower)) {
     return no('unsupported_market_soccer');
   }
@@ -411,5 +763,8 @@ module.exports = {
   // exported for tests / inspection
   _internal: {
     TEAM_ALIASES, norm, competitorNamed, resolveMatch, parseTotalLine, shiftYMD,
+    // player props (Build 1b)
+    parseSoccerProp, nameTokens, athleteNameMatches, findPlayerInRosters,
+    playerAppeared, isOwnGoalEvent, settleSoccerProp,
   },
 };
