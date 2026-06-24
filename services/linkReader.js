@@ -25,6 +25,20 @@
 // that isn't a string carrying an allow-listed http(s) URL returns null. Promo
 // domains (dubclub/whop/linktr/gamescript), social (x.com), and Discord's own
 // message links are deliberately NOT on the list and return null.
+//
+// Q1 — wrapper param-signature (shadow MEASUREMENT, additive). A capper "share"
+// link often arrives as an affiliate WRAPPER URL whose outer host is NOT on the
+// book/shortlink allow-list, but which embeds the real slip image + book share
+// URL as query params (…?slip_image=https://…&slip_url=https://…). detectShareLink
+// matches these HOST-AGNOSTICALLY by their PARAM SIGNATURE (not a host list) and
+// returns kind:'wrapper' carrying the directly-fetchable `image` and `bookUrl`,
+// so a later Q2 step can size the wrapper population before building an
+// image-fetch. This is purely additive: it is reached only when the host is
+// neither a book nor a shortlink host, and (like all of Phase A) only annotates
+// a payload under MODE==='shadow' — the off-mode short-circuit in attachShareLink
+// is unchanged. Q1 catches only the DISCORD path: Twitter-relayed wrapper URLs
+// are mangled by the Surface scraper (injected spaces + ellipsis truncation), so
+// they will not match — see docs/BACKLOG.md "Twitter-side caveat".
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Strict compare — Phase C's 'cutover' is intentionally NOT live yet.
@@ -60,10 +74,15 @@ function hostMatches(host, list) {
  * Detect the first allow-listed sportsbook book/shortlink URL in `text`.
  *
  * @param {*} text  message body (anything; non-strings → null)
- * @returns {null | { url: string, domain: string, kind: 'book'|'shortlink' }}
+ * @returns {null
+ *           | { url: string, domain: string, kind: 'book'|'shortlink' }
+ *           | { url: string, domain: string, kind: 'wrapper', image: string|null, bookUrl: string|null }}
  *          url is the matched URL truncated to ≤200 chars; domain is the actual
- *          lower-cased hostname; kind is 'book' for a sportsbook host, or
- *          'shortlink' for bit.ly / tinyurl.com. Never throws.
+ *          lower-cased hostname; kind is 'book' for a sportsbook host,
+ *          'shortlink' for bit.ly / tinyurl.com, or 'wrapper' for a host-agnostic
+ *          affiliate URL whose query params carry the slip image (`image`) and/or
+ *          the book share URL (`bookUrl`) — each an http(s) string ≤300 chars or
+ *          null. Never throws.
  */
 function detectShareLink(text) {
   if (typeof text !== 'string' || text.length === 0) return null;
@@ -92,6 +111,19 @@ function detectShareLink(text) {
     }
     if (hostMatches(host, SHORTLINK_HOSTS)) {
       return { url: raw.slice(0, 200), domain: host, kind: 'shortlink' };
+    }
+    // Wrapper: an affiliate/redirect URL that embeds the slip image (and book
+    // share URL) as query params - host-agnostic, keyed on the param signature.
+    // Captures the directly-fetchable image so a later Q2 step can skip a browser.
+    let sp;
+    try { sp = new URL(raw).searchParams; } catch (_) { sp = null; }
+    if (sp) {
+      const httpOnly = (v) => (typeof v === 'string' && /^https?:\/\//i.test(v)) ? v.slice(0, 300) : null;
+      const image = httpOnly(sp.get('slip_image'));
+      const bookUrl = httpOnly(sp.get('slip_url'));
+      if (image || bookUrl) {
+        return { url: raw.slice(0, 200), domain: host, kind: 'wrapper', image, bookUrl };
+      }
     }
   }
   return null;
