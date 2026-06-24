@@ -69,14 +69,25 @@ const TEAM_ALIASES = {
   'mammoth': 'Mammoth',
 };
 
+// Escape regex metacharacters so an alias is matched literally (none currently contain one,
+// but this keeps the word-boundary test correct if the table ever grows one).
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function canonicalize(teamText) {
   if (!teamText) return null;
   const lower = teamText.toLowerCase().trim();
   if (TEAM_ALIASES[lower]) return TEAM_ALIASES[lower];
-  // Longer aliases first so "blue jackets" matches before "jackets" partials don't fire
+  // Match an alias only as a WHOLE WORD (\b-anchored), never a bare substring. Descriptions
+  // can be "Oilers Over 6.5" (alias as a word), but a player surname containing a short alias
+  // must not resolve to a team: "habs" ⊂ "Habscheid", "wild" ⊂ "Wilde", "kings" ⊂ "Kingsley"
+  // used to make looksLikePlayerProp reject clean props and could route a prop to the game-
+  // total grader (the same defect class fixed in the MLB adapter). Longest alias first so a
+  // multi-word alias ("blue jackets") wins over its shorter form ("jackets").
   const sortedAliases = Object.entries(TEAM_ALIASES).sort((a, b) => b[0].length - a[0].length);
   for (const [alias, canonical] of sortedAliases) {
-    if (lower.includes(alias)) return canonical;
+    if (new RegExp(`\\b${escapeRegex(alias)}\\b`).test(lower)) return canonical;
   }
   return null;
 }
