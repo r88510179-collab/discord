@@ -255,5 +255,120 @@ run('brand-reject payload: promo / social URLs are NOT annotated (allow-list onl
   assert.ok(!('share_link' in payload), 'non-allow-listed URLs leave a brand-reject payload unannotated');
 });
 
+console.log('linkReader.detectShareLink — Q1 wrapper param-signature (host-agnostic):');
+
+// Affiliate WRAPPER URL: the outer host (g.codybrownbonusbets.com) is NOT on the
+// book/shortlink allow-list, but the query params embed the real slip image and
+// book share URL. Detected by the PARAM SIGNATURE, not a host list. The book
+// share URL is percent-encoded in the wrapper (%3F/%3D) and decoded by
+// URLSearchParams.get on the way out.
+const CODY_WRAPPER_URL =
+  'https://g.codybrownbonusbets.com/fanduel/betslip?slip_text=...&slip_url=https://account.sportsbook.fanduel.com/sportsbook/addToBetslip%3FshareCode%3DDJcdIeP&slip_image=https://i.imgur.com/1dM4qa5.jpeg';
+
+run('Cody affiliate wrapper URL → kind:wrapper with image + bookUrl', () => {
+  const r = lr.detectShareLink(CODY_WRAPPER_URL);
+  assert.ok(r, 'matched');
+  assert.strictEqual(r.kind, 'wrapper');
+  assert.strictEqual(r.domain, 'g.codybrownbonusbets.com');
+  assert.strictEqual(r.image, 'https://i.imgur.com/1dM4qa5.jpeg');
+  assert.strictEqual(r.bookUrl, 'https://account.sportsbook.fanduel.com/sportsbook/addToBetslip?shareCode=DJcdIeP');
+  // url is the wrapper URL truncated to ≤200 chars — mirror the impl, not a
+  // fragile exact full-length match (this example is ~200 chars by construction).
+  assert.ok(r.url.startsWith('https://g.codybrownbonusbets.com/fanduel/betslip'));
+  assert.strictEqual(r.url, CODY_WRAPPER_URL.slice(0, 200));
+  assert.ok(r.url.length <= 200, `url length ${r.url.length} should be ≤200`);
+});
+
+run('wrapper: slip_url alone (no slip_image) → kind:wrapper, image null', () => {
+  const r = lr.detectShareLink('https://aff.example.com/go?slip_url=https://sportsbook.fanduel.com/addToBetslip%3FshareCode%3DXYZ');
+  assert.ok(r && r.kind === 'wrapper', 'matched as wrapper');
+  assert.strictEqual(r.domain, 'aff.example.com');
+  assert.strictEqual(r.image, null);
+  assert.strictEqual(r.bookUrl, 'https://sportsbook.fanduel.com/addToBetslip?shareCode=XYZ');
+});
+
+run('wrapper: slip_image alone (http) → kind:wrapper, bookUrl null', () => {
+  const r = lr.detectShareLink('tail 👉 https://aff.example.com/go?slip_image=https://i.imgur.com/zzz.png');
+  assert.ok(r && r.kind === 'wrapper', 'matched as wrapper');
+  assert.strictEqual(r.image, 'https://i.imgur.com/zzz.png');
+  assert.strictEqual(r.bookUrl, null);
+});
+
+console.log('linkReader.detectShareLink — Q1 wrapper truncation caps:');
+
+run('wrapper: matched url is truncated to 200 chars on the wrapper branch', () => {
+  // The Cody example is ~200 chars, so its slice is an identity op and does not
+  // prove the cap. Use a wrapper URL well over 200 chars to exercise the actual
+  // raw.slice(0, 200) on the kind:'wrapper' return.
+  const url = 'https://aff.example.com/go?slip_image=https://i.imgur.com/' + 'a'.repeat(400) + '.png';
+  assert.ok(url.length > 200, 'precondition: the wrapper URL exceeds 200 chars');
+  const r = lr.detectShareLink(url);
+  assert.ok(r && r.kind === 'wrapper', 'matched as wrapper');
+  assert.strictEqual(r.url.length, 200, 'url capped at 200');
+  assert.strictEqual(r.url, url.slice(0, 200));
+});
+
+run('wrapper: image and bookUrl are each capped at 300 chars (shadow payload size bound)', () => {
+  const longImg = 'https://i.imgur.com/' + 'a'.repeat(400) + '.png';      // 424 chars
+  const longBook = 'https://sportsbook.fanduel.com/x/' + 'b'.repeat(400); // 433 chars
+  assert.ok(longImg.length > 300 && longBook.length > 300, 'precondition: values exceed 300 chars');
+  const r = lr.detectShareLink(
+    'https://aff.example.com/go?slip_image=' + encodeURIComponent(longImg) + '&slip_url=' + encodeURIComponent(longBook),
+  );
+  assert.ok(r && r.kind === 'wrapper', 'matched as wrapper');
+  assert.strictEqual(r.image.length, 300, 'image capped at 300');
+  assert.strictEqual(r.bookUrl.length, 300, 'bookUrl capped at 300');
+  assert.strictEqual(r.image, longImg.slice(0, 300));
+  assert.strictEqual(r.bookUrl, longBook.slice(0, 300));
+});
+
+console.log('linkReader.detectShareLink — Q1 wrapper negatives:');
+
+run('non-book URL with NO slip_image/slip_url param → null', () => {
+  assert.strictEqual(lr.detectShareLink('https://example.com/x?a=1'), null);
+});
+
+run('slip_image present but a non-http value → param ignored; overall null', () => {
+  assert.strictEqual(lr.detectShareLink('https://example.com/x?slip_image=foo'), null);
+});
+
+console.log('linkReader.detectShareLink — Q1 wrapper does not regress book/shortlink:');
+
+run('regression: a plain book-host URL still returns kind:book (wrapper path is additive)', () => {
+  const r = lr.detectShareLink('Check out this bet I placed on Hard Rock Bet! https://share.hardrock.bet/abc123');
+  assert.deepStrictEqual(r, { url: 'https://share.hardrock.bet/abc123', domain: 'share.hardrock.bet', kind: 'book' });
+});
+
+run('regression: a book host wins even if it carries slip_* params (book check precedes wrapper)', () => {
+  const r = lr.detectShareLink('https://sportsbook.fanduel.com/addToBetslip?slip_image=https://i.imgur.com/x.png');
+  assert.strictEqual(r.kind, 'book');
+  assert.strictEqual(r.domain, 'sportsbook.fanduel.com');
+});
+
+console.log('linkReader.attachShareLink — Q1 wrapper off vs shadow payload behavior:');
+
+run('MODE off (env unset) + wrapper URL → no-op: payload byte-identical, no share_link', () => {
+  const off = loadFresh(undefined);
+  assert.strictEqual(off.MODE, 'off');
+  const payload = { reason: 'ai_is_bet_false', sample: 'x'.repeat(120) };
+  const before = JSON.stringify(payload);
+  const out = off.attachShareLink(payload, CODY_WRAPPER_URL);
+  assert.strictEqual(out, payload, 'returns the same object');
+  assert.ok(!('share_link' in out), 'off-mode adds no share_link for a wrapper URL');
+  assert.strictEqual(JSON.stringify(out), before, 'payload unchanged byte-for-byte');
+});
+
+run('MODE shadow + wrapper URL → additive share_link with kind:wrapper', () => {
+  const sh = loadFresh('shadow');
+  assert.strictEqual(sh.MODE, 'shadow');
+  const payload = { reason: 'ai_is_bet_false' };
+  const out = sh.attachShareLink(payload, CODY_WRAPPER_URL);
+  assert.strictEqual(out, payload, 'mutates and returns the same object');
+  assert.strictEqual(out.share_link.kind, 'wrapper');
+  assert.strictEqual(out.share_link.domain, 'g.codybrownbonusbets.com');
+  assert.strictEqual(out.share_link.image, 'https://i.imgur.com/1dM4qa5.jpeg');
+  assert.strictEqual(out.reason, 'ai_is_bet_false', 'existing fields untouched');
+});
+
 console.log(`\nlink-reader: ${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
