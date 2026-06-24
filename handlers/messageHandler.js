@@ -9,6 +9,7 @@ const { gradeFromCelebration, finalizeBetGrading, calcProfit, canFinalizeBet, sc
 const { recordStage, recordDrop, recordError, makeIngestId } = require('../services/pipeline-events');
 const ocrFirstWiring = require('../services/ocrFirstWiring');
 const linkReader = require('../services/linkReader');
+const { preFilterDecision } = require('../services/preFilter');
 
 // Sends the admin-log embed for MANUAL_REVIEW_HOLD with Release/Dismiss/View Original buttons.
 // Replaces the old plain-text notification so the admin can act on the hold from Discord.
@@ -1250,6 +1251,35 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
             sample: cleanText.slice(0, 400),
           };
           linkReader.attachShareLink(holdPayload, cleanText);
+          // PRE_FILTER (shadow/enforce gate)
+          const mode = process.env.PRE_FILTER_MODE || 'off';
+          const enf = (process.env.PRE_FILTER_ENFORCE_BUCKETS || '').split(',').map(s => s.trim()).filter(Boolean);
+          const preDecision = preFilterDecision(cleanText, mode, enf);
+          if (preDecision.action === 'drop') {
+            // enforce: drop instead of hold — mirrors the PRE_FILTER_NO_BET_CONTENT
+            // drop's per-constituent id-handling (dropAll), then skip stageAll +
+            // sendHoldReviewEmbed exactly like the existing non-bet drop returns.
+            dropAll('DROPPED', preDecision.reason, { where: 'preFilter', bucket: preDecision.bucket, sample: cleanText.slice(0, 80) });
+            return;
+          }
+          if (preDecision.action === 'shadow') {
+            // measure-only: one would-drop marker on the PRIMARY ingest_id, then
+            // fall through to the existing hold (no behavior change).
+            recordStage({
+              ingestId,
+              sourceType: 'discord',
+              sourceRef: ingestId.replace(/^disc_/, ''),
+              stage: 'PRE_FILTER_WOULD_DROP',
+              eventType: 'STAGE_ENTER',
+              payload: {
+                bucket: preDecision.bucket,
+                reason: preDecision.reason,
+                sample: cleanText.slice(0, 80),
+                messageUrl: message.url,
+                capper: capperInfo?.name || message.author?.username || 'unknown',
+              },
+            });
+          }
           stageAll('MANUAL_REVIEW_HOLD', holdPayload);
           try {
             await sendHoldReviewEmbed(message.client, {
@@ -1320,6 +1350,35 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
             sample: cleanText.slice(0, 400),
           };
           linkReader.attachShareLink(holdPayload, cleanText);
+          // PRE_FILTER (shadow/enforce gate)
+          const mode = process.env.PRE_FILTER_MODE || 'off';
+          const enf = (process.env.PRE_FILTER_ENFORCE_BUCKETS || '').split(',').map(s => s.trim()).filter(Boolean);
+          const preDecision = preFilterDecision(cleanText, mode, enf);
+          if (preDecision.action === 'drop') {
+            // enforce: drop instead of hold — mirrors the PRE_FILTER_NO_BET_CONTENT
+            // drop's per-constituent id-handling (dropAll), then skip stageAll +
+            // sendHoldReviewEmbed exactly like the existing non-bet drop returns.
+            dropAll('DROPPED', preDecision.reason, { where: 'preFilter', bucket: preDecision.bucket, sample: cleanText.slice(0, 80) });
+            return;
+          }
+          if (preDecision.action === 'shadow') {
+            // measure-only: one would-drop marker on the PRIMARY ingest_id, then
+            // fall through to the existing hold (no behavior change).
+            recordStage({
+              ingestId,
+              sourceType: 'discord',
+              sourceRef: ingestId.replace(/^disc_/, ''),
+              stage: 'PRE_FILTER_WOULD_DROP',
+              eventType: 'STAGE_ENTER',
+              payload: {
+                bucket: preDecision.bucket,
+                reason: preDecision.reason,
+                sample: cleanText.slice(0, 80),
+                messageUrl: message.url,
+                capper: capperInfo?.name || message.author?.username || 'unknown',
+              },
+            });
+          }
           stageAll('MANUAL_REVIEW_HOLD', holdPayload);
           try {
             await sendHoldReviewEmbed(message.client, {
