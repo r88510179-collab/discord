@@ -56,14 +56,28 @@ const TEAM_ALIASES = {
   'd-backs': 'Arizona Diamondbacks',
 };
 
+// Escape regex metacharacters so an alias is matched literally (none of the 37 aliases
+// currently contain one, but "a's"/"d-backs" are punctuation-adjacent and this keeps the
+// word-boundary test correct if the alias table ever grows a metachar).
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function canonicalize(teamText) {
   if (!teamText) return null;
   const lower = teamText.toLowerCase().trim();
   // Exact alias hit
   if (TEAM_ALIASES[lower]) return TEAM_ALIASES[lower];
-  // Match any alias as substring (descriptions can be "Atlanta Braves ML")
+  // Match an alias only as a WHOLE WORD, never a bare substring. Descriptions can be
+  // "Atlanta Braves ML" (the alias is a *word* there), but a short alias must not be
+  // matched inside a longer surname: "as" ⊂ "Ya-s-trzemski" / "Ma-s-yn" used to resolve
+  // valid player names to "Athletics", which (a) made looksLikePlayerProp reject clean
+  // props and (b) was the route by which "Masyn Winn" mis-fed the game-total grader (the
+  // #130 false-WIN). \b anchors each alias to token boundaries; multi-word aliases
+  // ("red sox", "blue jays", "white sox") and punctuation-adjacent ones ("a's", "d-backs")
+  // boundary-match correctly.
   for (const [alias, canonical] of Object.entries(TEAM_ALIASES)) {
-    if (lower.includes(alias)) return canonical;
+    if (new RegExp(`\\b${escapeRegex(alias)}\\b`).test(lower)) return canonical;
   }
   return null;
 }
@@ -355,11 +369,12 @@ const COMPOUND_STATS = {
   'h+r+rbis': ['hits', 'runs', 'rbi'],
 };
 
-// Find a player's stats line across both teams.
-// Returns: { player, team, batting, pitching } or null.
-function findPlayerInBoxscore(boxscore, playerLastName, playerFirstName = null) {
-  const lastLower = playerLastName.toLowerCase();
-  const firstLower = (playerFirstName || '').toLowerCase();
+// Collect every player whose SURNAME matches across both sides, applying first-name
+// disambiguation when a first name is given. Shared by findPlayerInBoxscore (the public
+// lookup) and findPlayerGame (which counts matches to distinguish a same-surname COLLISION
+// from a true absence). lastLower/firstLower are pre-lowercased.
+function collectSurnameMatches(boxscore, lastLower, firstLower) {
+  const matches = [];
   for (const side of ['home', 'away']) {
     const team = boxscore?.teams?.[side];
     if (!team?.players) continue;
@@ -369,16 +384,34 @@ function findPlayerInBoxscore(boxscore, playerLastName, playerFirstName = null) 
       const fullWords = full.split(/\s+/);
       const lastNameMatches = fullWords[fullWords.length - 1] === lastLower || boxName === lastLower;
       if (!lastNameMatches) continue;
+      // A first name disambiguates a surname collision — keep the existing filter so
+      // multi-token legs ("Will Smith") stay safe and pick exactly their player.
       if (firstLower && fullWords[0] !== firstLower) continue;
-      return {
+      matches.push({
         player: pdata.person.fullName,
         team: team.team?.name,
         batting: pdata.stats?.batting || {},
         pitching: pdata.stats?.pitching || {},
-      };
+      });
     }
   }
-  return null;
+  return matches;
+}
+
+// Find a player's stats line across both teams.
+// Returns: { player, team, batting, pitching } or null.
+function findPlayerInBoxscore(boxscore, playerLastName, playerFirstName = null) {
+  const firstLower = (playerFirstName || '').toLowerCase();
+  const matches = collectSurnameMatches(boxscore, playerLastName.toLowerCase(), firstLower);
+  if (matches.length === 0) return null;
+  // Single-token leg (no first name) that matches 2+ different same-surname players on
+  // the slate is unresolvable from a box score alone — refuse (return null) rather than
+  // grade the wrong player with no signal. The caller (findPlayerGame) re-checks the
+  // match count on a miss and flags the absence as AMBIGUOUS (not a provable DNP), so a
+  // collision falls through to search instead of fabricating a "did not play" VOID. With
+  // a first name present the filter above already narrowed it (multi-token legs are safe).
+  if (!firstLower && matches.length > 1) return null;
+  return matches[0];
 }
 
 // Parse a player-prop description. Returns { player, stat, direction, threshold } or null.
@@ -474,8 +507,11 @@ function resolveStat(statText) {
 async function findPlayerGame(playerLastName, dateYMD, playerFirstName = null) {
   const data = await fetchJSON(`${BASE}/schedule?sportId=1&date=${dateYMD}`);
   const games = data?.dates?.[0]?.games || [];
+  const lastLower = playerLastName.toLowerCase();
+  const firstLower = (playerFirstName || '').toLowerCase();
   let allFinal = true;
   let anyFetchError = false;
+  let anyAmbiguous = false;
   for (const g of games) {
     const gameFinal = g.status?.abstractGameState === 'Final';
     if (!gameFinal) allFinal = false;
@@ -491,9 +527,15 @@ async function findPlayerGame(playerLastName, dateYMD, playerFirstName = null) {
           ...found,
         };
       }
+      // A surname COLLISION (no first name + 2+ same-surname players in this game) makes
+      // findPlayerInBoxscore return null just like a true absence — but the player may well
+      // BE one of them. Flag it so the caller treats the miss as INDETERMINATE, never a
+      // provable DNP: voiding here would fabricate a "did not play" settle for a player who
+      // played. (With a first name the collection is already disambiguated, so no flag.)
+      if (!firstLower && collectSurnameMatches(bs, lastLower, '').length > 1) anyAmbiguous = true;
     } catch (_) { anyFetchError = true; /* skip game, try next */ }
   }
-  return { notFound: true, gamesOnDate: games.length, allFinal, anyFetchError };
+  return { notFound: true, gamesOnDate: games.length, allFinal, anyFetchError, anyAmbiguous };
 }
 
 // Grade a single player prop.
@@ -518,7 +560,11 @@ async function gradeMlbPlayerProp(description, dateYMD, opts = {}) {
     // indeterminate (no games / a live game / a skipped fetch / a misparsed name
     // could all hide a real result) → fall through to search. See terminalState.js.
     // opts.absenceVoidAllowed===false suppresses the VOID when the date is ambiguous.
-    if (opts.absenceVoidAllowed !== false && isProvableAbsence(result)) {
+    // result.anyAmbiguous (a same-surname collision on a surname-only leg) is ALSO
+    // indeterminate — the player is likely one of the collided names — so it must fall
+    // through, never VOID (a DNP void there would be a fabricated settle for a player
+    // who actually played).
+    if (!result.anyAmbiguous && opts.absenceVoidAllowed !== false && isProvableAbsence(result)) {
       return voidPlayerDidNotPlay(parsed.player, dateYMD, result.gamesOnDate, 'MLB', 'mlb_statsapi');
     }
     return { resolved: false, reason: 'player_not_found_in_games_on_date' };
@@ -573,6 +619,7 @@ module.exports = {
   gradeMlbPlayerProp,
   getGameForTeam,
   findPlayerGame,
+  findPlayerInBoxscore,
   parsePlayerProp,
   looksLikePlayerProp,
   looksLikeMisroutedPlayerProp,
