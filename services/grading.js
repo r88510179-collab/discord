@@ -1140,6 +1140,26 @@ function evidenceLooksLikeNoData(evidence) {
  * so the query covers both.
  */
 function shouldAutoVoidNoData(bet) {
+  // Build 1d — adapter-covered sports are EXEMPT from the no-data auto-void.
+  // "No searchable data" is precisely the case the deterministic adapters
+  // (mlb/nba/nhl/soccer + the always-on ESPN grader) exist to settle, so this
+  // terminal void must NEVER fire for a sport one of them covers — it was
+  // wrongly voiding live bets (Soccer/NBA/MLB/NHL/WC). The bet stays pending and
+  // rides normal backoff; if an adapter genuinely can't grade it, the untouched
+  // 7-day sweeper remains the backstop. hasDeterministicAdapter is the single
+  // source of truth, derived from the adapter layer. Inline require mirrors the
+  // tryStructured / tryGradeViaESPN call sites in gradePropWithAI (sportsdata is a
+  // leaf-ward dep — no load-time cycle); try/catch keeps this guard from ever
+  // throwing in the grade loop (an unavailable adapter layer falls through to the
+  // pre-1d void logic, the conservative-toward-existing-behavior failure mode).
+  try {
+    if (require('./sportsdata').hasDeterministicAdapter(bet?.sport)) return null;
+  } catch (e) {
+    // Adapter layer unavailable → fall through to the pre-1d no-data void check
+    // (conservative). Breadcrumb so a silent revert-to-void can't go unnoticed.
+    console.warn(`[AutoGrade] hasDeterministicAdapter unavailable, no-data exemption skipped: ${e.message}`);
+  }
+
   const MIN_AGE_MS = 12 * 60 * 60 * 1000;
   const MIN_ATTEMPTS = 5;
   if (!bet?.created_at) return null;

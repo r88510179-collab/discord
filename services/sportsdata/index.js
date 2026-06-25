@@ -10,6 +10,7 @@ const mlb = require('./mlb');
 const nhl = require('./nhl');
 const nba = require('./nba');
 const soccer = require('./soccer');
+const espn = require('../espn');
 const { etParts } = require('../eventDate');
 
 // Normalized sport → adapter, for prop-vs-team routing. SOCCER is registered for
@@ -96,6 +97,55 @@ function soccerEffectiveModes(masterRaw, propsRaw) {
 function isSoccerSport(sport) {
   const s = String(sport || '').toUpperCase();
   return s.includes('SOCCER') || s.includes('WORLD CUP') || s.includes('FIFA');
+}
+
+// ESPN deterministic-grader sport allowlist, DERIVED from espn.js's own endpoint
+// table (its single source of truth) rather than re-hardcoded here — so if espn.js
+// registers a new scoreboard endpoint, hasDeterministicAdapter auto-extends. Keys are
+// the exact UPPERCASE sport tokens tryGradeViaESPN gates on (MLB/NBA/NHL/NFL today).
+const ESPN_SPORTS = new Set(Object.keys(espn.ESPN_ENDPOINTS || {}));
+
+// Does a deterministic (non-LLM) grader cover this sport? SINGLE SOURCE OF TRUTH for the
+// no-data auto-void exemption (shouldAutoVoidNoData in services/grading.js). "Search data
+// unavailable" is EXACTLY the case the deterministic adapters exist to settle, so a bet in
+// an adapter-covered sport must NEVER be auto-voided for no-data — it stays pending and
+// rides normal backoff until an adapter grades it (and the untouched 7-day sweeper remains
+// the final backstop for anything that genuinely never resolves).
+//
+// UNION of every deterministic path, each matched the SAME way its real call site matches,
+// so this is true iff at least one deterministic grader would engage:
+//   • structured adapters — every sport in the ADAPTERS map, looked up exactly as the
+//     router looks them up: ADAPTERS[normalizeSport(sport)] (MLB/NBA/NHL). Derived from the
+//     adapter map + canonical normalizer — a future structured adapter is covered the moment
+//     normalizeSport maps it (e.g. KBO/UFC when those land).
+//   • soccer — the match-level + props adapter, via isSoccerSport (Soccer / World Cup /
+//     FIFA), because normalizeSport DELIBERATELY does not map soccer (see its note). Covered
+//     by sport, NOT by SOCCER_GRADER_MODE: the adapter exists, so the no-data void is wrong
+//     regardless of the current shadow/enforce mode (Build 2 re-grades the back catalog).
+//   • ESPN grader — services/espn.js ESPN_ENDPOINTS keys (exact uppercase: MLB/NBA/NHL/NFL).
+//     MLB/NBA/NHL are already caught above; this is what adds NFL.
+//
+// Pure, synchronous, never throws; unknown / empty / null / garbage sport → false (those
+// sourceless sports — Boxing, NCAAW, tennis-until-adapter, UFC-until-built — still auto-void
+// exactly as before). Casing-insensitive (every branch upper-cases internally).
+//
+// ACCEPTED IMPRECISION (deliberate, low-volume — favours not-corrupting over precision):
+//   • normalizeSport / isSoccerSport match by SUBSTRING, so a few sourceless "cousins"
+//     over-match → exempt: 'WNBA'→NBA, 'NCAA Baseball'→MLB, 'Beach Soccer'/'eSoccer'/'FIFA
+//     eWorld Cup'→soccer. No adapter actually grades these, so they skip the 12h no-data
+//     void — but the untouched 7-day sweeper still backstops non-prop bets (a prop in one
+//     of these rare sports rides backoff). We tolerate this: deferring a void is far less
+//     harmful than the sport-wide corruption this exemption stops. Tightening the substrings
+//     touches normalizeSport (a shared coverage proxy) — out of scope here.
+//   • isSoccerSport tracks the adapter's fifa.world-only scope, so non-WC leagues
+//     (EPL/UCL/MLS/…) return false (correct today — no adapter grades them). WIDENING the
+//     soccer adapter to a club slug REQUIRES widening isSoccerSport in lockstep, else those
+//     newly-gradeable leagues would keep auto-voiding.
+function hasDeterministicAdapter(sport) {
+  if (!sport) return false;
+  if (ADAPTERS[normalizeSport(sport)]) return true;     // MLB / NBA / NHL structured adapters
+  if (isSoccerSport(sport)) return true;                // soccer match-level + props adapter
+  return ESPN_SPORTS.has(String(sport).toUpperCase());  // ESPN grader (adds NFL)
 }
 
 // Whether grading.js should route this bet into tryStructured for the soccer
@@ -447,4 +497,6 @@ module.exports = {
   soccerEffectiveModes,
   isSoccerSport,
   soccerStructuredEligible,
+  // no-data auto-void exemption — single source of truth (see grading.js shouldAutoVoidNoData)
+  hasDeterministicAdapter,
 };
