@@ -10,6 +10,11 @@
 // (return ok:false) — those still need the AI grading path.
 // ═══════════════════════════════════════════════════════════
 
+// teamTotal.js is a pure leaf module (no requires) — safe to pull in at
+// top level; espn.js itself is only require()'d lazily from grading.js, so
+// this does not create a cycle.
+const { isTeamTotalBet } = require('./sportsdata/teamTotal');
+
 // ── ESPN scoreboard endpoints per sport ──
 const ESPN_ENDPOINTS = {
   MLB: 'https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard',
@@ -43,6 +48,75 @@ function recordStat(sport, type) {
 
 // ── Prop / exotic detection — these fall through to AI ──
 const PROP_KEYWORDS = /\b(pts|points|reb|rebounds|ast|assists|stl|steals|blk|blocks|yds|yards|tds|touchdowns|strikeouts|hits|runs|rbis?|sacks|receptions|goals|shots|saves|aces|kills|completions|pass.?yds|rush.?yds|rec.?yds|home.?runs?|sog|fantasy|player|anytime|first|last|scorer|td|nrfi|yrfi|sgp)\b/i;
+
+// ── Team-total scoring units per sport ──
+// A team total ("Mariners under 4.5 runs") resolves to ONE team's SCORE, which
+// is exactly competitor.score in the sport's scoring unit. We only grade the
+// units that map to the score: runs (MLB), goals (NHL), points (NBA/NFL).
+// Stats NOT on the scoreboard (hits, strikeouts, total bases, corners) are
+// deliberately excluded — we can't settle them, so they fall through to AI.
+const TEAM_TOTAL_UNITS = {
+  MLB: /\bruns?\b/i,
+  NHL: /\bgoals?\b/i,
+  NBA: /\b(points?|pts)\b/i,
+  NFL: /\b(points?|pts)\b/i,
+};
+
+// Plausible UPPER bound for a single team's full-game score per sport. A line
+// above this is game-total magnitude ("Mariners over 8.5 runs" is the GAME
+// total, not Seattle's team total) → refuse and fall through to AI rather than
+// risk a wrong confident grade. Biased LOW so the overlap band with low game
+// totals (MLB ~6.5, NHL ~5) is excluded; legit high team totals just fall
+// through to AI (a missing grade is acceptable; a wrong grade is not).
+const TEAM_TOTAL_MAX_LINE = { MLB: 5.5, NHL: 4.5, NBA: 150, NFL: 34 };
+
+// Period / segment markets are NOT full-game team totals — refuse them so we
+// never grade a segment line off the final score.
+const SEGMENT_RX = /\b(1st|first|2nd|second|3rd|third|4th|fourth|5th|6th|7th|8th|9th|inning|innings|inn|frame|f5|1h|2h|first\s+half|second\s+half|halftime|half|quarter|qtr|1q|2q|3q|4q|period|1p|2p|3p|thru|through|top|bottom)\b/i;
+
+// Words allowed to remain in a "bare" team-total description after the team
+// name, over/under, line, and score unit are removed. Deliberately TIGHT — only
+// explicit team-total vocabulary, NOT broad English words. A broad blacklist
+// would silently absorb a player surname (e.g. "Reg", "Game") and let a player
+// prop through; an allow-list refuses anything it doesn't recognize.
+const TEAM_TOTAL_ALLOWED = new Set([
+  'team', 'total', 'totals', 'tt', 'itt', 'alt', 'alternate', 'altline', 'line',
+]);
+
+// Word-tokens left over after removing the team name, the over/under N, and the
+// score unit. ANY leftover token outside TEAM_TOTAL_ALLOWED means a player name
+// or extra market is present ("Chiefs Mahomes over 1.5 points" → ["mahomes"];
+// "Mariners over 0.5 runs Reg" → ["reg"]) → disqualify the team total.
+function teamTotalLeftoverTokens(descLower, teamLc) {
+  let s = ' ' + descLower + ' ';
+  for (const tok of String(teamLc || '').split(/\s+/)) {
+    if (tok.length >= 2) s = s.replace(new RegExp(`\\b${escapeRegex(tok)}\\b`, 'g'), ' ');
+  }
+  s = s
+    .replace(/\b(over|under|o|u)\b/g, ' ')
+    .replace(/[+-]?\d+(?:\.\d+)?/g, ' ')
+    .replace(/\b(runs?|goals?|points?|pts)\b/g, ' ')
+    .replace(/[^a-z]+/g, ' ');
+  return s.split(/\s+/).filter(t => t.length >= 2 && !TEAM_TOTAL_ALLOWED.has(t));
+}
+
+function escapeRegex(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Normalize a team string for comparison: lowercase, drop periods/apostrophes
+// ("st. louis" → "st louis", "d'angelo" → "dangelo"), collapse whitespace.
+function normName(s) {
+  return String(s || '').toLowerCase().replace(/[.'’]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+// Does `haystack` end with `needle` on a whole-word boundary?
+// "boston red sox" endsWithWord "red sox" → true; "chicago white sox" → false.
+function endsWithWord(haystack, needle) {
+  if (!needle || !haystack.endsWith(needle)) return false;
+  const i = haystack.length - needle.length;
+  return i === 0 || haystack[i - 1] === ' ';
+}
 
 // ── Fetch ESPN scoreboard ──
 async function fetchScoreboard(sport, dateStr) {
@@ -85,16 +159,33 @@ function buildTeamInfo(competitor) {
 }
 
 // ── Match bet team string against an ESPN team ──
+// The old form derived a single last-word nickname (`bt.split(' ').pop()`) and
+// did `displayName.endsWith(nickname)`, so "boston red sox" → nickname "sox"
+// matched BOTH "boston red sox" AND "chicago white sox". On a slate with both
+// Sox games that produced 2 matches → ambiguity refusal → no grade (Build 2
+// canary). We now match on the FULL strings, anchored on whole nicknames:
+//   (1) exact against any normalized ESPN name field;
+//   (2) bet string ends with ESPN's whole nickname — covers ESPN dropping or
+//       abbreviating the city ("oakland athletics" ⊃ ESPN "athletics",
+//       "los angeles clippers" ⊃ ESPN short "clippers") while still keeping
+//       "boston red sox" ⊅ "white sox";
+//   (3) ESPN display ends with the whole bet string — covers the bet dropping
+//       the city ("red sox" ⊂ "boston red sox", but ⊄ "chicago white sox").
+// Punctuation is normalized so "st louis" matches ESPN "St. Louis". A genuinely
+// bare ambiguous token ("sox") still matches both Sox and is correctly refused
+// downstream by the matches.length!==1 ambiguity guard.
 function teamMatches(betTeam, espnTeam) {
-  const bt = betTeam.toLowerCase();
-  const nickname = bt.split(' ').pop();
-  return (
-    espnTeam.displayName === bt ||
-    espnTeam.displayName.endsWith(nickname) ||
-    espnTeam.shortName === nickname ||
-    espnTeam.abbrev === bt ||
-    espnTeam.abbrev === nickname
-  );
+  const bt = normName(betTeam);
+  if (!bt) return false;
+  const displayName = normName(espnTeam.displayName);
+  const shortName = normName(espnTeam.shortName);
+  const abbrev = normName(espnTeam.abbrev);
+
+  if (displayName === bt || shortName === bt || abbrev === bt) return true;
+  if (shortName && endsWithWord(bt, shortName)) return true;
+  if (displayName && endsWithWord(displayName, bt)) return true;
+
+  return false;
 }
 
 // ── Find the ESPN game matching any of the bet's teams ──
@@ -123,9 +214,48 @@ function matchTeamsToEvent(events, betTeams) {
 }
 
 // ── Parse bet.description into type + line + direction ──
-function parseBetDescription(description, betTeams) {
+function parseBetDescription(description, betTeams, sport) {
   const desc = (description || '').trim();
   const descLower = desc.toLowerCase();
+
+  // ── Team total (ONE team's score) — must run BEFORE the prop bail and the
+  // game-total branch. "Mariners under 4.5 runs" is the named team's runs, not
+  // a player prop (PROP_KEYWORDS hits "runs") and not the game total (sum of
+  // both teams). It only grades when ALL guards hold, otherwise it falls
+  // through to AI (a missing grade is safe; a wrong grade is not):
+  //   • exactly ONE team subject, whose name appears in the description;
+  //   • the explicit "team total"/"TT" keyword OR a sport-matching SCORE unit
+  //     word (runs/goals/points) — only the unit that maps to competitor.score;
+  //   • no player name / extra market left over (residual-token guard) — keeps
+  //     "Chiefs Mahomes over 2.5 points" out;
+  //   • not an inning/period segment;
+  //   • the line is within the sport's plausible TEAM-total range — a game-total
+  //     magnitude line ("Mariners over 8.5 runs") falls through, not mis-graded.
+  const ouTeamTotal = descLower.match(/\b(over|under|o|u)\s*(\d+\.?\d*)\b/);
+  const ttMaxLine = TEAM_TOTAL_MAX_LINE[(sport || '').toUpperCase()];
+  if (
+    ouTeamTotal && ttMaxLine &&
+    Array.isArray(betTeams) && betTeams.length === 1 &&
+    !SEGMENT_RX.test(descLower)
+  ) {
+    const explicitTT = isTeamTotalBet(description);
+    const unitRx = TEAM_TOTAL_UNITS[(sport || '').toUpperCase()];
+    const hasScoreUnit = unitRx ? unitRx.test(descLower) : false;
+    if (explicitTT || hasScoreUnit) {
+      const teamLc = normName(betTeams[0]);
+      const nick = teamLc.split(/\s+/).pop();
+      const descNorm = normName(desc);
+      const subjectInDesc =
+        descNorm.includes(teamLc) ||
+        (nick && nick.length >= 3 && new RegExp(`\\b${escapeRegex(nick)}\\b`).test(descNorm));
+      const bareTeamTotal = teamTotalLeftoverTokens(descNorm, teamLc).length === 0;
+      const line = parseFloat(ouTeamTotal[2]);
+      if (subjectInDesc && bareTeamTotal && Number.isFinite(line) && line >= 0.5 && line <= ttMaxLine) {
+        const direction = (ouTeamTotal[1] === 'over' || ouTeamTotal[1] === 'o') ? 'over' : 'under';
+        return { type: 'team_total', line, direction, team: betTeams[0] };
+      }
+    }
+  }
 
   // Player prop / exotic → bail early
   if (PROP_KEYWORDS.test(descLower)) {
@@ -208,6 +338,25 @@ function gradeFromScore(parsed, match, betTeams) {
     }
   }
 
+  // ── Team total — the NAMED team's score only (not the game total) ──
+  if (parsed.type === 'team_total') {
+    const wanted = parsed.team || (betTeams && betTeams[0]);
+    let picked = null;
+    if (wanted) {
+      for (const c of competitors) {
+        if (teamMatches(wanted, c)) { picked = c; break; }
+      }
+    }
+    if (!picked || !Number.isFinite(picked.score)) return null;
+    if (picked.score === parsed.line) {
+      return { result: 'PUSH', evidence: `${picked.displayName} team total ${picked.score} = ${parsed.line}. ${scoreLine}` };
+    }
+    const won = parsed.direction === 'over'
+      ? picked.score > parsed.line
+      : picked.score < parsed.line;
+    return { result: won ? 'WIN' : 'LOSS', evidence: `${picked.displayName} team total ${picked.score} vs ${parsed.line} (${parsed.direction}). ${scoreLine}` };
+  }
+
   // ── ML / Spread — need to identify which team the bettor picked ──
   let picked = null;
   let opponent = null;
@@ -259,7 +408,7 @@ async function tryGradeViaESPN(bet, betTeamList) {
   }
 
   // Parse the description
-  const parsed = parseBetDescription(bet.description, betTeamList);
+  const parsed = parseBetDescription(bet.description, betTeamList, sport);
   if (!parsed.type) {
     console.log(`[ESPN] Skip: ${parsed.reason || 'unparseable'} | "${(bet.description || '').slice(0, 60)}"`);
     return { ok: false, reason: parsed.reason || 'unparseable' };
@@ -341,6 +490,7 @@ module.exports = {
   getScore: fetchScoreboard,
   tryGradeViaESPN,
   matchTeamsToEvent,
+  teamMatches,
   parseBetDescription,
   gradeFromScore,
   espnStats,
