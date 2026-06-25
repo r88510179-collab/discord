@@ -365,8 +365,12 @@ function createBet(betData) {
       betData.odds || null, betData.units || 1,
       // Write-time gate: event_date is NULL or a parseable ISO datetime —
       // time-only strings ("9:10PM ET") resolve against now (= created_at
-      // at insert), junk stores NULL. See services/eventDate.js.
-      normalizeEventDateForStorage(betData.event_date), betData.source || 'manual',
+      // at insert), junk stores NULL. A sanity guard also NULLs datetimes
+      // implausibly far from created_at (cross-year / >+60d / <-2d) so the
+      // vision model's stale-year dates can't poison the grader. The id is
+      // passed for the guard's warn log. See services/eventDate.js.
+      normalizeEventDateForStorage(betData.event_date, new Date(), { betId: id }),
+      betData.source || 'manual',
       betData.source_url || null, betData.source_channel_id || null,
       betData.source_message_id || null, fingerprint, betData.raw_text || null,
       betData.review_status || 'confirmed',

@@ -18,9 +18,18 @@
 // anchor to created_at's year. Anything else stores NULL — the grader
 // already falls back to created_at when event_date is NULL.
 //
+// A second backstop runs on every PARSED datetime before it is stored: a
+// sanity guard that NULLs values implausibly far from created_at (see
+// applyEventDateSanityGuard below). It stops the vision extractor's
+// real-but-stale dates (e.g. a 2023 World-Cup fixture on a 2026 bet) from
+// being trusted event_date-first by the grader. NULL — never throw — so the
+// bet still saves and falls back to created_at.
+//
 // recoverHold's backdate path (services/holdReview.js) writes event_date
-// directly from the Discord snowflake — already a valid datetime — and
-// intentionally does not pass through here.
+// directly from the Discord snowflake — already a valid datetime, and
+// derived from the SAME timestamp it stamps into created_at (same calendar
+// day → can never trip the sanity guard) — and intentionally does not pass
+// through here.
 // ═══════════════════════════════════════════════════════════
 
 const ET_ZONE = 'America/New_York';
@@ -67,22 +76,76 @@ function to24h(hourStr, ampm) {
   return h;
 }
 
+// Write-time sanity bounds on a PARSED event_date, relative to created_at.
+// Derived from the live distribution: every legitimate bet has a created→event
+// gap of -1..+8 days within the SAME calendar year (max forward +8 = a real
+// golf futures; the only negative, -1, is a timezone slice artifact). Every
+// corrupt value is cross-year (2023/2022/2024/2001 on 2026 bets) and 354..9131
+// days off. The cliff between legit (+8d) and garbage (-354d) is ~346 days, so
+// the bounds below are deliberately wide — ~7x the real +8 max — to never clip
+// a legitimate multi-week future while still catching within-year staleness the
+// year-rule misses. -2 (not -1) keeps the timezone artifact safe.
+const EVENT_DATE_GUARD_MIN_GAP_DAYS = -2;
+const EVENT_DATE_GUARD_MAX_GAP_DAYS = 60;
+
+// Backstop a parsed event_date before storage. Returns the ISO string when the
+// value is plausible, or NULL (never throws) when it is implausibly far from
+// created_at — so the bet still saves and the grader falls back to created_at.
+//
+// Two independent rules; NULL if EITHER fires:
+//   (a) event_date's year != created_at's year — any cross-year date.
+//   (b) (event_date - created_at) < -2 days OR > +60 days.
+//
+// Known, accepted false-positive: a New-Year's-boundary bet (created late Dec,
+// game early Jan — bowls / NFL Wk18 / NBA) is a legitimate cross-year value
+// that rule (a) NULLs. That is intended: the bet still saves, falls back to
+// created_at (<=1 day off), and behaves like the 96.9% null-event_date majority.
+// The warn log records gapDays so such rare cases are greppable (rule=cross-year
+// with a tiny gap) if the live distribution ever shifts.
+//
+// When no usable created_at anchor is available the value cannot be compared, so
+// it is preserved unchanged (matches the pre-guard behavior of the dated
+// branches, which returned the parsed value regardless of the anchor).
+function applyEventDateSanityGuard(date, anchor, raw, opts) {
+  if (!(date instanceof Date) || isNaN(date.getTime())) return null;
+  if (!(anchor instanceof Date) || isNaN(anchor.getTime())) return date.toISOString();
+
+  const crossYear = date.getUTCFullYear() !== anchor.getUTCFullYear();
+  const gapDays = (date.getTime() - anchor.getTime()) / 86400000;
+  const outOfBounds = gapDays < EVENT_DATE_GUARD_MIN_GAP_DAYS || gapDays > EVENT_DATE_GUARD_MAX_GAP_DAYS;
+
+  if (crossYear || outOfBounds) {
+    const rule = crossYear ? (outOfBounds ? 'cross-year+out-of-bounds' : 'cross-year') : 'out-of-bounds';
+    const idTag = opts && opts.betId ? ` bet=${opts.betId}` : '';
+    console.warn(
+      `[eventDateStorage] implausible event_date NULLed${idTag}: value=${date.toISOString()} ` +
+      `created=${anchor.toISOString()} gapDays=${gapDays.toFixed(1)} rule=${rule} ` +
+      `raw="${String(raw).slice(0, 80)}"`,
+    );
+    return null;
+  }
+  return date.toISOString();
+}
+
 /**
  * Normalize a raw event_date for storage in bets.event_date.
  *
  * @param {*} raw - extractor output (string, Date, or anything)
  * @param {Date|string|number} [createdAt] - the bet's creation moment;
  *   defaults to now, which is what created_at gets at insert time.
- * @returns {string|null} ISO-8601 UTC datetime, or null when unparseable.
+ * @param {{betId?:string}} [opts] - context for the sanity-guard warn log.
+ * @returns {string|null} ISO-8601 UTC datetime, or null when unparseable or
+ *   nulled by the sanity guard.
  */
-function normalizeEventDateForStorage(raw, createdAt = new Date()) {
+function normalizeEventDateForStorage(raw, createdAt = new Date(), opts = {}) {
   if (raw === null || raw === undefined) return null;
-  if (raw instanceof Date) return isNaN(raw.getTime()) ? null : raw.toISOString();
-  const s = String(raw).trim();
-  if (!s) return null;
 
   const anchor = createdAt instanceof Date ? createdAt : new Date(createdAt);
   const anchorOk = !isNaN(anchor.getTime());
+
+  if (raw instanceof Date) return applyEventDateSanityGuard(raw, anchor, raw, opts);
+  const s = String(raw).trim();
+  if (!s) return null;
 
   // Time-only: "9:10PM ET" / "3:00 PM ET" — the age-gate poison. Resolve
   // against created_at's ET calendar date. A leading weekday ("THU 6:29AM ET")
@@ -92,7 +155,9 @@ function normalizeEventDateForStorage(raw, createdAt = new Date()) {
   if (timeOnly) {
     if (!anchorOk) return null;
     const d = etParts(anchor);
-    return etWallClockToUtc(d.year, d.month, d.day, to24h(timeOnly[1], timeOnly[3]), parseInt(timeOnly[2], 10)).toISOString();
+    return applyEventDateSanityGuard(
+      etWallClockToUtc(d.year, d.month, d.day, to24h(timeOnly[1], timeOnly[3]), parseInt(timeOnly[2], 10)),
+      anchor, raw, opts);
   }
 
   // "Thu Apr 2 @ 10:30pm" / "Mon Apr 2 10:30pm" — month+day but no year.
@@ -106,7 +171,7 @@ function normalizeEventDateForStorage(raw, createdAt = new Date()) {
     if (attempt.getTime() < anchor.getTime() - 7 * 24 * 3600000) {
       attempt = etWallClockToUtc(year + 1, MONTHS[m[1].toLowerCase()], parseInt(m[2], 10), to24h(m[3], m[5]), parseInt(m[4] || '0', 10));
     }
-    return attempt.toISOString();
+    return applyEventDateSanityGuard(attempt, anchor, raw, opts);
   }
 
   // "4/12/26 5:00 PM" — explicit date, time read as ET wall clock.
@@ -114,16 +179,25 @@ function normalizeEventDateForStorage(raw, createdAt = new Date()) {
   if (m) {
     let year = parseInt(m[3], 10);
     if (year < 100) year += 2000;
-    return etWallClockToUtc(year, parseInt(m[1], 10), parseInt(m[2], 10), to24h(m[4], m[6]), parseInt(m[5], 10)).toISOString();
+    return applyEventDateSanityGuard(
+      etWallClockToUtc(year, parseInt(m[1], 10), parseInt(m[2], 10), to24h(m[4], m[6]), parseInt(m[5], 10)),
+      anchor, raw, opts);
   }
 
   // Already a real datetime (ISO, "YYYY-MM-DD HH:MM:SS", etc.). The length
   // guard rejects bare numbers like "2026" that Date would happily parse.
   const generic = new Date(s);
-  if (!isNaN(generic.getTime()) && s.length > 8) return generic.toISOString();
+  if (!isNaN(generic.getTime()) && s.length > 8) return applyEventDateSanityGuard(generic, anchor, raw, opts);
 
   console.warn(`[eventDateStorage] unparseable event_date dropped, storing NULL: "${s.slice(0, 80)}"`);
   return null;
 }
 
-module.exports = { normalizeEventDateForStorage, etWallClockToUtc, etParts };
+module.exports = {
+  normalizeEventDateForStorage,
+  applyEventDateSanityGuard,
+  etWallClockToUtc,
+  etParts,
+  EVENT_DATE_GUARD_MIN_GAP_DAYS,
+  EVENT_DATE_GUARD_MAX_GAP_DAYS,
+};
