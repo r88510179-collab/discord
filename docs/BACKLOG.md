@@ -1536,3 +1536,16 @@ Discovery ran (prompts/relay-hold-link-recovery-discovery.md). Findings:
 ## Hold-queue hygiene (2026-06-12)
 - Dedupe holds per source message: relay edit/update path creates a second hold with a new ingest_id for the same messageUrl (observed: 2 Dan messages → 4 holds). Hold staging should upsert on source message id.
 - GET /holds: expose recoverAttempts + lastRecoverStatus so the dashboard dismiss modal shows real history (flagged in zonetracker-dashboard#6).
+
+## DubClub email-drop → silent GNP pick loss
+**Logged:** 2026-06-25 · **Severity:** low (single occurrence, not a pattern) · **Fix lives in:** zonetracker-dubclub
+
+**Problem:** The bridge is email-triggered — IMAP IDLE watches for DubClub's "New plays from X!" notification. On 2026-06-24 GNP's picks were posted on the DubClub platform but DubClub never sent the notification email, so the sweep had nothing to catch and the picks never ingested. No alert fired; gap caught only by manual inspection.
+
+**Root weakness:** Detection is 100% dependent on DubClub firing the notification email. A silent email drop = silent pick loss with zero signal.
+
+**Harden (pick when/if drops recur):**
+1. Cheap watchdog: alert if no GNP post seen in N hrs during an active window. Surfaces the gap; does NOT recover the pick.
+2. Robust (preferred): flip the bridge from email-triggered to timer-polling GNP's DubClub plays page directly via the Playwright session it already keeps authenticated. Removes the email dependency entirely. Build = new poll loop + per-play-id dedup + plays-page parse.
+
+**Recommendation:** don't build on one drop. If DubClub email drops recur, implement (2) over a watchdog.
