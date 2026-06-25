@@ -880,6 +880,7 @@ Rules:
 - For player props, populate "props" with {player_name, stat_category (snake_case), line (number), direction ("over"/"under"), odds}.
 - description for parlays = bullet list, one line per leg.
 - Sport: use specific league (MLB, NBA, NHL, NFL, UCL, EPL, etc).
+- If a PICK line shows a game date/time, copy it verbatim into "event_date"; otherwise null. Never fabricate a date.
 - NEVER fabricate. If the PICK lines do not support a field, use null.`;
 
   const raw = await callLLM(gemmaRaw, sys, null, null);
@@ -1031,7 +1032,7 @@ PARLAY example (multiple legs):
 {"type":"bet","is_bet":true,"ticket_status":"new","bets":[{"sport":"NCAAB","league":"March Madness","bet_type":"parlay","description":"• Gonzaga -6.5\\n• Houston ML","odds":180,"units":2.0,"wager":50,"payout":90.06,"event_date":null,"legs":[{"description":"Gonzaga -6.5","odds":-110,"team":"Gonzaga","line":"-6.5","type":"spread"},{"description":"Houston ML","odds":-150,"team":"Houston","line":"ML","type":"moneyline"}],"props":[]}]}
 
 STRAIGHT example (single bet — still use legs array with 1 entry):
-{"type":"bet","is_bet":true,"ticket_status":"new","bets":[{"sport":"NBA","league":"NBA","bet_type":"straight","description":"Lakers -3.5","odds":-110,"units":1.0,"wager":null,"payout":null,"event_date":null,"legs":[{"description":"Lakers -3.5","odds":-110,"team":"Lakers","line":"-3.5","type":"spread"}],"props":[]}]}
+{"type":"bet","is_bet":true,"ticket_status":"new","bets":[{"sport":"NBA","league":"NBA","bet_type":"straight","description":"Lakers -3.5","odds":-110,"units":1.0,"wager":null,"payout":null,"event_date":"Today 7:10 PM ET","legs":[{"description":"Lakers -3.5","odds":-110,"team":"Lakers","line":"-3.5","type":"spread"}],"props":[]}]}
 
 TICKET STATUS DETECTION (CRITICAL for images):
 Every response MUST include "ticket_status": "new" | "winner" | "loser".
@@ -1076,6 +1077,7 @@ STRICT RULES:
 - If the capper mentions a parlay or multiple legs but does NOT list the actual teams/players in the text or OCR data (e.g., they just say "Tap link to load", "Link in bio", or the picks are hidden behind a URL), you MUST set the description to: "MISSING LEGS: Capper hid the picks in a link or missing image." Do NOT fabricate leg details.
 - NO HALLUCINATIONS: If it is a DFS slip (PrizePicks, Underdog, Sleeper) or the specific moneyline/spread odds are missing from the text/OCR, do NOT invent -110 or any default odds. Set odds to null. If units/wager are not visible, set units to 1 but do NOT fabricate a wager amount. For DFS slips, set the sport to the primary league of the players involved.
 - If wager amount or payout/to-pay is visible, include "wager" (number) and "payout" (number) on the bet.
+- EVENT DATE/TIME: If the slip/text shows a game date or start time (e.g. "Today 7:10 PM ET", "Mon 1:05 PM ET", "Apr 12 5:00 PM"), copy it VERBATIM into "event_date". If no date/time is visible, set "event_date": null. NEVER invent, infer, or compute a date — copy only what is shown.
 - Sport: Use specific league — UCL not Soccer, EPL not Soccer, March Madness not NCAAB. If units not specified default 1.
 - Parse ALL bets. For player props, include a "props" array: player_name, stat_category (snake_case), line (number), direction ("over"/"under"), odds (integer or null).
 - Raw OCR text may contain typos and garbage chars. Do your best (e.g., "0ver"="over", "und3r"="under", "Lebr0n"="LeBron").

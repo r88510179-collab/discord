@@ -101,6 +101,84 @@ check(
 check('null stays null', normalizeEventDateForStorage(null) === null);
 check('empty string stores NULL', normalizeEventDateForStorage('   ') === null);
 
+// ── 1b. Relative tokens (today/tonight/tomorrow + time) ─────
+// HRB renders these constantly. Anchors are picked mid-day, away from
+// midnight/DST, so the expected ISO is unambiguous: created_at noon UTC in
+// June = 8:00AM ET (EDT, UTC-4).
+console.log('relative tokens:');
+
+check(
+  '"Today 7:10 PM ET" resolves on created_at ET day',
+  normalizeEventDateForStorage('Today 7:10 PM ET', new Date('2026-06-15T12:00:00Z')) === '2026-06-15T23:10:00.000Z',
+  `got ${normalizeEventDateForStorage('Today 7:10 PM ET', new Date('2026-06-15T12:00:00Z'))}`,
+);
+check(
+  '"Tonight 7:10PM" (no space, no ET) resolves on created_at ET day',
+  normalizeEventDateForStorage('Tonight 7:10PM', new Date('2026-06-15T12:00:00Z')) === '2026-06-15T23:10:00.000Z',
+  `got ${normalizeEventDateForStorage('Tonight 7:10PM', new Date('2026-06-15T12:00:00Z'))}`,
+);
+check(
+  '"Tomorrow, 1:05 PM ET" resolves on the NEXT ET day',
+  normalizeEventDateForStorage('Tomorrow, 1:05 PM ET', new Date('2026-06-15T12:00:00Z')) === '2026-06-16T17:05:00.000Z',
+  `got ${normalizeEventDateForStorage('Tomorrow, 1:05 PM ET', new Date('2026-06-15T12:00:00Z'))}`,
+);
+// tomorrow = anchor's ET CALENDAR day + 1, resolved via etWallClockToUtc — it
+// normalizes month/year overflow (Jun 30 + 1 → Jul 1) AND applies the TARGET
+// day's DST offset. A fixed +24h ms add would land a day off when the anchor
+// sits in the short window adjacent to a DST transition; these cases lock both.
+check(
+  '"Tomorrow 6:00 PM" across a month boundary lands on the 1st',
+  normalizeEventDateForStorage('Tomorrow 6:00 PM', new Date('2026-06-30T12:00:00Z')) === '2026-07-01T22:00:00.000Z',
+  `got ${normalizeEventDateForStorage('Tomorrow 6:00 PM', new Date('2026-06-30T12:00:00Z'))}`,
+);
+check(
+  '"Tomorrow 9:00 PM ET" mid-day anchor into a spring-forward (EDT) target day',
+  normalizeEventDateForStorage('Tomorrow 9:00 PM ET', new Date('2026-03-07T18:00:00Z')) === '2026-03-09T01:00:00.000Z',
+  `got ${normalizeEventDateForStorage('Tomorrow 9:00 PM ET', new Date('2026-03-07T18:00:00Z'))}`,
+);
+// Late-night anchor = 11:30 PM ET Mar 7 (night before the 23h spring-forward
+// day). Calendar tomorrow is Mar 8; a +24h ms add would skip to Mar 9.
+check(
+  '"Tomorrow" from a late-night anchor next to spring-forward → next CALENDAR day (Mar 8, not 9)',
+  normalizeEventDateForStorage('Tomorrow 9:00 PM ET', new Date('2026-03-08T04:30:00Z')) === '2026-03-09T01:00:00.000Z',
+  `got ${normalizeEventDateForStorage('Tomorrow 9:00 PM ET', new Date('2026-03-08T04:30:00Z'))}`,
+);
+// Late-night anchor = 00:30 ET Nov 1 (the 25h fall-back day). Calendar tomorrow
+// is Nov 2; a +24h ms add would stick on Nov 1.
+check(
+  '"Tomorrow" from a late-night anchor next to fall-back → next CALENDAR day (Nov 2, not 1)',
+  normalizeEventDateForStorage('Tomorrow 9:00 PM ET', new Date('2026-11-01T04:30:00Z')) === '2026-11-03T02:00:00.000Z',
+  `got ${normalizeEventDateForStorage('Tomorrow 9:00 PM ET', new Date('2026-11-01T04:30:00Z'))}`,
+);
+check(
+  'bare "Today" with no time stays NULL (does not guess a start time)',
+  normalizeEventDateForStorage('Today', new Date('2026-06-15T12:00:00Z')) === null,
+);
+
+// ── 1c. Sanity guard (gap-only: -2d..+60d; NO cross-year rule) ──
+console.log('sanity guard (gap-only):');
+
+check(
+  'parseable date >2d before the anchor → NULL (past bound)',
+  normalizeEventDateForStorage('2026-06-10T12:00:00.000Z', new Date('2026-06-20T12:00:00Z')) === null,
+);
+check(
+  'year-typo "4/12/99 5:00 PM" → NULL (decades out of bounds)',
+  normalizeEventDateForStorage('4/12/99 5:00 PM', new Date('2026-04-01T12:00:00Z')) === null,
+);
+check(
+  'normal same-day time-only is in-bounds (NOT nulled)',
+  normalizeEventDateForStorage('7:10 PM ET', new Date('2026-06-15T12:00:00Z')) === '2026-06-15T23:10:00.000Z',
+  `got ${normalizeEventDateForStorage('7:10 PM ET', new Date('2026-06-15T12:00:00Z'))}`,
+);
+// Anti-regression — locks out any re-introduction of a calendar-year rule.
+// Anchor Dec 31, game Jan 1 (~+5h gap): cross-year but within bounds → PRESERVED.
+check(
+  'cross-year Dec→Jan +5h gap PRESERVED (gap-only, no year rule)',
+  normalizeEventDateForStorage('2027-01-01T01:00:00.000Z', new Date('2026-12-31T20:00:00Z')) === '2027-01-01T01:00:00.000Z',
+  `got ${normalizeEventDateForStorage('2027-01-01T01:00:00.000Z', new Date('2026-12-31T20:00:00Z'))}`,
+);
+
 // ── 2. createBet write path ─────────────────────────────────
 console.log('createBet write gate:');
 
@@ -136,6 +214,20 @@ check(
   iso.event_date === ISO_EVENT && iso.parsed === ISO_EVENT_PARSED,
   `stored="${iso.event_date}" parsed=${iso.parsed}`,
 );
+
+// Relative-token string through the write gate (created_at = now): resolves to
+// a SQLite-parseable datetime, never stored as the raw "Today ..." string.
+const relRow = storedEventDate('Nuggets ML -110 evd-rel', 'Today 7:10 PM ET');
+check(
+  'relative-token input stores a parseable datetime, not the raw string',
+  relRow.event_date !== 'Today 7:10 PM ET' && relRow.parsed !== null,
+  `stored="${relRow.event_date}" parsed=${relRow.parsed}`,
+);
+
+// Regression: no event_date read → stored NULL (hot-path default preserved;
+// mirrors tests/hold-recover.test.js hot-path createBetWithLegs assertion).
+const noDate = storedEventDate('Heat ML -110 evd-nodate', null);
+check('no event_date read → stored NULL (hot-path default)', noDate.event_date === null, `stored="${noDate.event_date}"`);
 
 // ── 3. Migration 029 nulls pre-existing unparseable rows ────
 console.log('migration 029:');

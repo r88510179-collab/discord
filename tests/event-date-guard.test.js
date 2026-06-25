@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════
-// event_date write-time SANITY GUARD (Phase 1).
+// event_date write-time SANITY GUARD — GAP-ONLY.
 //
 // normalizeEventDateForStorage parses the extractor's event_date, but the
 // vision model occasionally emits a real-but-stale datetime (a prior-year
@@ -9,11 +9,17 @@
 //
 // The guard NULLs (never throws) a parsed datetime that is implausibly far
 // from created_at, so the bet still saves and falls back to created_at:
-//   (a) event year != created_at year   — any cross-year date, OR
-//   (b) gap < -2 days OR > +60 days      — within-year staleness backstop.
+//   gap < -2 days OR > +60 days.
 //
-// Bounds are derived from the live distribution: every legit bet is -1..+8d
-// within the same year; every corrupt value is cross-year and 354..9131d off.
+// ONE rule, by gap ONLY — there is deliberately NO cross-year / calendar-year
+// rule. The gap bounds already null every wrong-year fixture (all are hundreds
+// of days off), and a year rule would ALSO null legitimate same-week Dec→Jan
+// bets days apart (bowls / NFL Wk18 / NBA) — which MUST be preserved. The
+// "Dec→Jan PRESERVED" case (§4 below) locks that in; it was NULLed by #153's
+// since-removed cross-year rule.
+//
+// Bounds are derived from the live distribution: every legit bet is -1..+8d;
+// every corrupt value is 354..9131d off.
 //
 // RED-proof: `git stash push -- services/eventDate.js` (reverts to the
 // pre-guard normalizer) then `node tests/event-date-guard.test.js` — every
@@ -63,8 +69,8 @@ function expectPreserve(label, raw, created, expectedIso) {
 // pre-guard, would be stored verbatim and trusted by the grader.
 console.log('garbage values store NULL:');
 
-// -354d, cross-year (event ~a year before created).
-expectNull('cross-year -354d NULLed', '2025-07-06T12:00:00.000Z', '2026-06-25T12:00:00Z');
+// -354d (event ~a year before created) — caught by the gap bound, no year rule.
+expectNull('-354d prior-year fixture NULLed by gap bound', '2025-07-06T12:00:00.000Z', '2026-06-25T12:00:00Z');
 // -942d, "Japan vs Sweden" 2023 World-Cup fixture on a 2026 bet (real: e2feed30).
 expectNull('"Japan vs Sweden" 2023 (-942d) NULLed', '2023-11-26T19:00:00.000Z', '2026-06-25T12:00:00Z');
 // -9131d, 2001 NCAAM (real: 5a56c9bf "Michigan vs Arizona Over 157.5").
@@ -93,12 +99,19 @@ expectNull('-2.04d NULLed (just past lower bound)', '2026-06-18T11:00:00.000Z', 
 expectPreserve('exactly +60d preserved (boundary inclusive)', '2026-03-02T12:00:00.000Z', '2026-01-01T12:00:00Z', '2026-03-02T12:00:00.000Z');
 expectNull('+60.04d NULLed (just past upper bound)', '2026-03-02T13:00:00.000Z', '2026-01-01T12:00:00Z');
 
-// ── 4. Documented, accepted false-positive ──────────────────
-// A New-Year's-boundary bet (created late Dec, game early Jan) is a legit
-// cross-year value that rule (a) NULLs. Intended: the bet still saves and
-// falls back to created_at (<=1 day off). This LOCKS the documented behavior.
-console.log('documented New-Year cross-year false-positive:');
-expectNull('Dec-31 bet on Jan-1 game NULLed by rule (a)', '2027-01-01T20:00:00.000Z', '2026-12-31T18:00:00Z');
+// ── 4. Cross-year PRESERVED (anti-regression) ───────────────
+// A New-Year's-boundary bet (created late Dec, game early Jan — bowls / NFL
+// Wk18 / NBA) is cross-year but only ~1 day apart, so the gap bound keeps it.
+// Gap-only by design: this LOCKS OUT any re-introduction of a year rule (which
+// would wrongly NULL this legit value). #153's cross-year rule NULLed it; the
+// gap-only guard PRESERVES it.
+console.log('cross-year Dec→Jan PRESERVED (anti-regression):');
+expectPreserve('Dec-31 bet on Jan-1 game PRESERVED (+1.1d, gap-only)', '2027-01-01T20:00:00.000Z', '2026-12-31T18:00:00Z', '2027-01-01T20:00:00.000Z');
+// Backward cross-year too: a Jan-1 bet on a Dec-31 PRIOR-year game (-1d, a
+// next-morning recap/timezone-slice post) was NULLed by the year rule, now
+// preserved — same -2d window the guard already allows within-year. Locks the
+// other edge of the behavior-change set so a forward-only year exemption fails.
+expectPreserve('Jan-1 bet on Dec-31 prior-year game PRESERVED (-1d, gap-only)', '2025-12-31T20:00:00.000Z', '2026-01-01T18:00:00Z', '2025-12-31T20:00:00.000Z');
 
 // ── 5. No usable anchor → preserve (the guard needs both dates) ──
 console.log('no-anchor preservation:');
@@ -138,7 +151,7 @@ console.log('warn log:');
     /implausible event_date NULLed bet=TESTBET123/.test(captured)
       && /value=2023-11-26T19:00:00\.000Z/.test(captured)
       && /gapDays=/.test(captured)
-      && /rule=cross-year/.test(captured),
+      && /rule=out-of-bounds/.test(captured),
     `captured: ${captured.replace(/\n/g, ' ').slice(0, 200)}`,
   );
 }
@@ -155,9 +168,9 @@ function storedEventDate(desc, eventDate) {
   return db.prepare('SELECT event_date FROM bets WHERE id = ?').get(bet.id);
 }
 
-// created_at defaults to now (~2026); a 2001 event is cross-year → guard NULLs.
+// created_at defaults to now (~2026); a 2001 event is decades out of bounds → guard NULLs.
 const garbageRow = storedEventDate('Lakers ML -110 evg-garbage', '2001-04-04T12:00:00.000Z');
-check('cross-year event_date stored as NULL through createBet', garbageRow.event_date === null, `stored="${garbageRow.event_date}"`);
+check('out-of-bounds event_date stored as NULL through createBet', garbageRow.event_date === null, `stored="${garbageRow.event_date}"`);
 
 // A near-now event (same year, +1d) survives the guard end-to-end.
 const nearIso = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
