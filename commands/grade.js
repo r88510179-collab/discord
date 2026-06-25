@@ -5,6 +5,7 @@ const { gradeBetAI } = require('../services/ai');
 const { gradedEmbed, COLORS, fmtUnits } = require('../utils/embeds');
 const { postBetGraded } = require('../services/dashboard');
 const { calcProfit, canFinalizeBet } = require('../services/grading');
+const { applyGradeOverride } = require('../services/gradeOverride');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -46,12 +47,88 @@ module.exports = {
               { name: '❌ Loss', value: 'loss' },
               { name: '➖ Push', value: 'push' },
               { name: '🚫 Void', value: 'void' },
-            ))),
+            )))
+    .addSubcommand(sub =>
+      sub.setName('override')
+        .setDescription('Correct an already-graded bet by id (owner only)')
+        .addStringOption(opt =>
+          opt.setName('bet_id')
+            .setDescription('Full bet id (32-char hex) to override')
+            .setRequired(true))
+        .addStringOption(opt =>
+          opt.setName('result')
+            .setDescription('Corrected result')
+            .setRequired(true)
+            .addChoices(
+              { name: '✅ Win', value: 'win' },
+              { name: '❌ Loss', value: 'loss' },
+              { name: '➖ Push', value: 'push' },
+              { name: '🚫 Void', value: 'void' },
+            ))
+        .addStringOption(opt =>
+          opt.setName('reason')
+            .setDescription('Why (stored in history + bets.grade_reason)')
+            .setRequired(false))),
 
   async execute(interaction) {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     const subcommand = interaction.options.getSubcommand();
+
+    if (subcommand === 'override') {
+      // Reuse the EXACT owner gate the sibling admin subcommands use
+      // (commands/grade.js test/try-stuck/retry-all; mirrors commands/admin.js:190/353).
+      if (process.env.OWNER_ID && interaction.user.id !== process.env.OWNER_ID) {
+        return interaction.editReply('🚫 Owner only.');
+      }
+
+      const betId = interaction.options.getString('bet_id');
+      const result = interaction.options.getString('result');
+      const reason = interaction.options.getString('reason');
+
+      let outcome;
+      try {
+        outcome = applyGradeOverride(
+          { db, getBankroll, updateBankroll, saveDailySnapshot, calcProfit },
+          { betId, result, reason, invokerId: interaction.user.id },
+        );
+      } catch (err) {
+        console.error('[Grade] override error:', err);
+        return interaction.editReply(`❌ Override failed: ${err.message}`);
+      }
+
+      if (!outcome.ok) {
+        const msg = {
+          not_found: `❌ No bet found with id \`${betId}\`.`,
+          pending: '❌ That bet is still **pending** — use normal grading (`/grade manual` or the auto-grader), not override.',
+          invalid_result: '❌ Invalid result.',
+          missing_invoker: '❌ Could not resolve your Discord user id.',
+        }[outcome.error] || `❌ Override failed (\`${outcome.error}\`).`;
+        return interaction.editReply(msg);
+      }
+
+      // Reflect the corrected result via the existing graded-post path. No
+      // grade-post message id is persisted (postGradedResult posts fresh and
+      // only tracks the slip PICK message, which it deletes on grading), so
+      // this RE-POSTS a correction embed rather than editing one in place.
+      try {
+        await postBetGraded(interaction.client, outcome.bet, outcome.newResult, outcome.newProfit, { reason: outcome.gradeReason });
+      } catch (err) {
+        console.error('[Grade] override post error:', err.message);
+      }
+
+      const lines = [
+        `✅ **Override applied** to \`${outcome.bet.id}\``,
+        `**Result:** ${outcome.oldResult} → ${outcome.newResult}`,
+        `**Profit:** ${outcome.oldProfit.toFixed(2)}u → ${outcome.newProfit.toFixed(2)}u`,
+      ];
+      if (outcome.isParlay) lines.push(`**Parlay legs set to win:** ${outcome.legsTouched}`);
+      lines.push(outcome.bankrollApplied
+        ? `**Bankroll delta:** ${outcome.bankrollDelta >= 0 ? '+' : ''}${outcome.bankrollDelta.toFixed(2)}`
+        : '**Bankroll:** no bankroll on file (skipped)');
+      if (outcome.idempotent) lines.push('_Idempotent: result already matched — reason updated, bankroll/legs skipped._');
+      return interaction.editReply(lines.join('\n'));
+    }
 
     if (subcommand === 'test') {
       if (process.env.OWNER_ID && interaction.user.id !== process.env.OWNER_ID) {
