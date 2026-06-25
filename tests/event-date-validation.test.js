@@ -124,10 +124,16 @@ check(
 const junk = storedEventDate('Celtics ML -110 evd-junk', 'sometime tonight??');
 check('garbage input stores NULL', junk.event_date === null, `stored="${junk.event_date}"`);
 
-const iso = storedEventDate('Knicks ML -110 evd-iso', '2026-04-12T17:00:00.000Z');
+// createBet anchors the write-time sanity guard on created_at = now, so the
+// fixture event_date must sit within the guard's plausible window (a fixed
+// far-past date would be NULLed once `now` drifts >60d past it). Use a
+// near-now instant; assert exact round-trip + SQLite-parseability.
+const ISO_EVENT = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+const ISO_EVENT_PARSED = `${ISO_EVENT.slice(0, 10)} ${ISO_EVENT.slice(11, 19)}`;
+const iso = storedEventDate('Knicks ML -110 evd-iso', ISO_EVENT);
 check(
   'valid datetime input stays a parseable datetime at the same instant',
-  iso.parsed === '2026-04-12 17:00:00',
+  iso.event_date === ISO_EVENT && iso.parsed === ISO_EVENT_PARSED,
   `stored="${iso.event_date}" parsed=${iso.parsed}`,
 );
 
@@ -140,7 +146,7 @@ db.exec(fs.readFileSync(path.join(__dirname, '..', 'migrations', '029_null_unpar
 const afterMig = db.prepare("SELECT event_date FROM bets WHERE description LIKE '%evd-poison%'").get();
 const isoAfterMig = db.prepare("SELECT event_date FROM bets WHERE description LIKE '%evd-iso%'").get();
 check('time-only legacy row nulled', afterMig.event_date === null, `got "${afterMig.event_date}"`);
-check('valid ISO row untouched', isoAfterMig.event_date === '2026-04-12T17:00:00.000Z', `got "${isoAfterMig.event_date}"`);
+check('valid ISO row untouched', isoAfterMig.event_date === ISO_EVENT, `got "${isoAfterMig.event_date}"`);
 
 // ── 4. Grader read-side skew fallback ───────────────────────
 console.log('grader skew fallback:');
