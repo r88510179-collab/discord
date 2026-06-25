@@ -1391,25 +1391,6 @@ for (const row of TEAM_ALIAS_ROWS) {
   }
 }
 
-// Bare aliases that double as ordinary bet-slip vocabulary. On their own these
-// tokens false-match — "Draw No Bet" / "BTTS No" → 'no'→Saints, "... win as
-// favorites" → 'as'→Athletics, "Wild Card" → 'wild'→Wild, "sac fly"/"sac bunt"
-// → 'sac'→Kings — injecting a phantom team that the bettor never named. The
-// phantom then (a) poisons the soccer search query and trips GUARD 7 into a
-// false-PENDING, and (b) can flip an NFL/MLB ML/spread grade when the phantom
-// happens to be the bettor's head-to-head opponent (the ESPN pre-check returns
-// before GUARD 7 can catch it). Worse, the filterTeamsBySport fallback lets a
-// single-team alias survive even a mismatched sport context (NHL "wild" leaks
-// into an NFL slate), so sport-scoping alone does not contain it.
-//
-// findMentionedTeams skips these as BARE matches. Every affected team keeps a
-// non-stopword path — its full canonical name ("minnesota wild") and, except
-// for the Wild, a distinct nickname ("saints"/"athletics"/"kings") — so a real
-// mention still resolves on its own loop iteration. Only the bare-token form
-// ("NO -3", "Wild ML") is dropped, and that safely falls through to search/AI
-// rather than risking a confident wrong grade.
-const STOPWORD_ALIASES = new Set(['as', 'no', 'sac', 'wild']);
-
 function normalizeForMatch(text) {
   return String(text || '')
     .toLowerCase()
@@ -1452,10 +1433,6 @@ function findMentionedTeams(description, sportContext = null) {
 
   for (const [alias, teams] of Object.entries(ALIAS_TO_TEAMS)) {
     if (!containsPhrase(normalized, alias)) continue;
-    // A bare common-word alias is not a reliable team signal — skip it. The
-    // team's canonical name / distinct nickname still resolves it elsewhere in
-    // this loop when it is genuinely mentioned. (See STOPWORD_ALIASES above.)
-    if (STOPWORD_ALIASES.has(alias)) continue;
 
     const scopedTeams = filterTeamsBySport([...teams], sportContext);
 
