@@ -283,7 +283,9 @@ function applyGate4(parsed, records, { mode, betId, anchorISO, sport, betTeamLis
       .filter(r => ev.quoteIdxs.includes(r.idx))
       .map(r => r.snippet || '')
       .join(' ');
-    const { matchedTeams } = findMentionedTeams(quoteText, sportContext || null);
+    // quoteText is evidence-record text — keep scoreboard abbreviations so a
+    // participant named only by abbreviation in the quote still matches.
+    const { matchedTeams } = findMentionedTeams(quoteText, sportContext || null, { isEvidence: true });
     const evTeams = [...matchedTeams];
     participants = teamList.some(t => evTeams.includes(t)) ? 'hit' : 'miss';
   }
@@ -843,6 +845,49 @@ function evaluatePlayerPropEvidence(description, evidence) {
   };
 }
 
+// Leagues whose teams live in ALIAS_TO_TEAMS (the ESPN/GUARD-7 fast-path set).
+// Mirrors the ESPN pre-check gate in gradeSingleBet so the two stay in lockstep.
+const ALIAS_MODELED_TEAM_LEAGUES = new Set(['MLB', 'NBA', 'NHL', 'NFL']);
+
+// Empty-betTeamList game-bet invariant (pure; exported for tests). True when a
+// GAME-LEVEL bet in one of the four alias-modeled team leagues resolves to NO
+// team. Such a bet cannot be verified: the ESPN fast-path can't match it
+// (matchTeamsToEvent returns null on empty teams) and GUARD 7's team-in-evidence
+// check is skipped (it is gated on betTeamList.length >= 1), so a WIN/LOSS the AI
+// returned against a WRONG same-sport game would be written with no backstop.
+// This is the residual the contextual stop-list opens: a bet named ONLY by a
+// stop-listed bare alias ("Wild ML", "NO ML") now extracts no team. Caller forces
+// PENDING so a human reviews it instead of risking a wrong grade.
+//
+// Deliberately scoped OUT (these legitimately carry no team and must keep
+// grading): player props of any sport (isPlayerPropDescription — covers NFL
+// stats + anytime/to-score phrasings, broader than looksLikePlayerProp);
+// individual sports (TENNIS/GOLF/MMA — not alias-modeled leagues, GUARD 8 owns
+// them); and soccer (teams absent from ALIAS_TO_TEAMS, graded by its own
+// adapter). NCAAF is excluded too — bet.sport stays 'NCAAF', not in the set —
+// so college bets are untouched even though normalizeSportContext folds them to
+// 'NFL'.
+function isUnresolvableTeamGameBet(bet, betTeamList) {
+  if (!bet) return false;
+  const teamCount = Array.isArray(betTeamList) ? betTeamList.length : 0;
+  if (teamCount > 0) return false; // a team resolved → ESPN / GUARD 7 verify it
+  if (!ALIAS_MODELED_TEAM_LEAGUES.has(String(bet.sport || '').toUpperCase())) return false;
+  // Player props legitimately carry no team — they MUST keep grading. Two
+  // exemptions, because isPlayerPropDescription's stat list is structurally
+  // narrow (it misses many live NFL phrasings — singular "TD", "Sacks",
+  // "Tackles", "Interceptions", "Alt … Yards N+", composite/segment lines):
+  //   1. recognized prop SHAPE (isPlayerPropDescription), and
+  //   2. any bet that NAMES a real multi-token player ("Micah Parsons",
+  //      "Bijan Robinson") — extractPlayerNameFromDescription returns the
+  //      longest capitalized non-vocab run, so a player prop yields a 2+-token
+  //      name while a bare-alias team bet ("Wild ML"/"Sac ML"/"AS ML"/"NO ML")
+  //      yields at most ONE token (or none), so the alias residual stays held.
+  if (isPlayerPropDescription(bet.description)) return false;
+  const playerName = extractPlayerNameFromDescription(bet.description);
+  if (playerName && playerName.trim().split(/\s+/).length >= 2) return false;
+  return true;
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // P0 grading state machine — gateway + claim + backoff helpers.
 // ═══════════════════════════════════════════════════════════════════
@@ -1391,6 +1436,28 @@ for (const row of TEAM_ALIAS_ROWS) {
   }
 }
 
+// Bare aliases that double as ordinary bet-slip vocabulary. On their own these
+// tokens false-match in BET-TEXT — "Draw No Bet" / "BTTS No" → 'no'→Saints,
+// "... win as favorites" → 'as'→Athletics, "Wild Card" → 'wild'→Wild, "sac
+// fly"/"sac bunt" → 'sac'→Kings — injecting a phantom team the bettor never
+// named. The phantom then (a) poisons the soccer search query and trips GUARD 7
+// into a false-PENDING, and (b) can flip an NFL/MLB ML/spread grade when the
+// phantom is the bettor's head-to-head opponent (the ESPN pre-check returns
+// before GUARD 7 can catch it). filterTeamsBySport's fallback keeps a
+// single-team alias even under a mismatched sport, so sport-scoping alone does
+// not contain it.
+//
+// The skip is CONTEXTUAL (findMentionedTeams opts.isEvidence): ACTIVE on
+// bet-text extraction, INACTIVE on evidence/scoreboard matching. On the evidence
+// side these same tokens are legitimate scoreboard abbreviations ("NO 24, NYJ
+// 17"); dropping them there makes GUARD 7 fail to find the bet team in its own
+// evidence → false-PENDING. (An unconditional stop-list was shipped, then
+// reverted, for exactly that regression — this is the synthesis that fixes both
+// the phantom injection and the evidence-matching regression.) So bet-text DROPS
+// the bare token — every affected team still resolves via its full canonical
+// name and, except the Wild, a distinct nickname — while evidence KEEPS it.
+const STOPWORD_ALIASES = new Set(['as', 'no', 'sac', 'wild']);
+
 function normalizeForMatch(text) {
   return String(text || '')
     .toLowerCase()
@@ -1426,13 +1493,23 @@ function filterTeamsBySport(candidates, sportContext) {
   return filtered.length > 0 ? filtered : candidates;
 }
 
-function findMentionedTeams(description, sportContext = null) {
+// opts.isEvidence (default false) selects the matching context:
+//   false → bet-text / bet-description extraction — STOPWORD_ALIASES skipped.
+//   true  → evidence / scoreboard text — STOPWORD_ALIASES kept (bare "NO",
+//           "AS" etc. are legitimate scoreboard abbreviations there).
+function findMentionedTeams(description, sportContext = null, opts = {}) {
   const normalized = normalizeForMatch(description);
   const matchedTeams = new Set();
   const ambiguousAliases = new Set();
 
   for (const [alias, teams] of Object.entries(ALIAS_TO_TEAMS)) {
     if (!containsPhrase(normalized, alias)) continue;
+    // A bare common-word alias is not a reliable team signal in bet-text — skip
+    // it there. On the evidence side (opts.isEvidence) it is a real scoreboard
+    // abbreviation and must be kept. A genuine bet-text mention still resolves
+    // via the team's canonical name / distinct nickname on its own loop
+    // iteration. (See STOPWORD_ALIASES above.)
+    if (!opts.isEvidence && STOPWORD_ALIASES.has(alias)) continue;
 
     const scopedTeams = filterTeamsBySport([...teams], sportContext);
 
@@ -3422,7 +3499,9 @@ CRITICAL RULES:
     // ── GUARD 7: Team-name verification (team sports) ──
     if (betTeamList.length >= 1) {
       const combinedEvidence = `${parsed.evidence || ''} ${searchSnippets}`;
-      const { matchedTeams: evidenceTeams } = findMentionedTeams(combinedEvidence, sportContext);
+      // Evidence/scoreboard text: keep bare scoreboard abbreviations ("NO 24")
+      // so the bet's own team can be found in its evidence (isEvidence:true).
+      const { matchedTeams: evidenceTeams } = findMentionedTeams(combinedEvidence, sportContext, { isEvidence: true });
       const evidenceTeamList = [...evidenceTeams];
       const missingTeams = betTeamList.filter(bt => !evidenceTeamList.includes(bt));
       if (missingTeams.length > 0) {
@@ -3431,6 +3510,29 @@ CRITICAL RULES:
         return earlyReturn({ status: 'PENDING', evidence: `Team mismatch: [${missingTeams.map(t => t.split(' ').pop()).join(', ')}] not in evidence` });
       }
       guardsLog.push('G7:teams_ok');
+    }
+
+    // ── GUARD 7b: Unresolved-team game bet — force PENDING ──
+    // Complement to GUARD 7 (which only fires when a team resolved): a game-level
+    // bet in an alias-modeled team league (MLB/NBA/NHL/NFL) that resolved NO team
+    // cannot be verified — ESPN's fast-path can't match it and GUARD 7 is skipped,
+    // so a WIN/LOSS against a wrong same-sport game would slip through unchecked.
+    // This closes the residual the bet-text stop-list opens for a bet named only
+    // by a bare alias ("Wild ML"/"NO ML"). Player props, individual sports, and
+    // soccer are scoped out (see isUnresolvableTeamGameBet).
+    if (isUnresolvableTeamGameBet(bet, betTeamList)) {
+      console.warn(`[AI Grader] GUARD7b FAIL: ${bet.id?.slice(0, 8)} | ${bet.sport} game bet with no resolvable team — cannot verify matchup`);
+      audit.guards_failed.push('G7:no_resolvable_team');
+      return earlyReturn(
+        {
+          status: 'PENDING',
+          evidence: `No resolvable team in "${(bet.description || '').slice(0, 60)}" — cannot verify the AI matched the right game (team-sport game bet)`,
+        },
+        // Post-AI guard rejection like G7/G8/G9 — bucket its drops with theirs so
+        // the new guard's over-PENDING blast radius is queryable, not lost in the
+        // GRADE_PENDING_UNCLASSIFIED catch-all.
+        { dropReason: 'GRADE_POST_GUARD_REJECTED' },
+      );
     }
 
     // ── GUARD 8: Player-name verification (individual sports) ──
@@ -3461,7 +3563,9 @@ CRITICAL RULES:
     // ── GUARD 9: Cross-sport contamination ──
     // If bet sport is Tennis but evidence mentions NBA/MLB teams, wrong match
     if (bet.sport && betTeamList.length === 0) {
-      const { matchedTeams: evidenceTeams } = findMentionedTeams(parsed.evidence || '', null);
+      // Evidence text (cross-sport contamination check): keep scoreboard
+      // abbreviations so a contaminating team is still detected (isEvidence:true).
+      const { matchedTeams: evidenceTeams } = findMentionedTeams(parsed.evidence || '', null, { isEvidence: true });
       const evidenceTeamList = [...evidenceTeams];
       if (evidenceTeamList.length > 0) {
         // Evidence has team names but bet has no teams — likely cross-sport contamination
@@ -3661,6 +3765,7 @@ module.exports = {
   // gradePropWithAI internally; importers MUST NOT mutate.
   evaluatePlayerPropEvidence,
   isPlayerPropDescription,
+  isUnresolvableTeamGameBet,
   extractPlayerNameFromDescription,
   buildGraderSearchQuery,
   shouldAutoVoidNoData,
