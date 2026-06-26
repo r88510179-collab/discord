@@ -78,13 +78,21 @@ function to24h(hourStr, ampm) {
 
 // Write-time sanity bounds on a PARSED event_date, relative to created_at.
 // Derived from the live distribution: every legitimate bet has a created→event
-// gap of -1..+8 days within the SAME calendar year (max forward +8 = a real
-// golf futures; the only negative, -1, is a timezone slice artifact). Every
-// corrupt value is cross-year (2023/2022/2024/2001 on 2026 bets) and 354..9131
-// days off. The cliff between legit (+8d) and garbage (-354d) is ~346 days, so
-// the bounds below are deliberately wide — ~7x the real +8 max — to never clip
-// a legitimate multi-week future while still catching within-year staleness the
-// year-rule misses. -2 (not -1) keeps the timezone artifact safe.
+// gap of -1..+8 days (max forward +8 = a real golf futures; the only negative,
+// -1, is a timezone slice artifact). Every corrupt value is hundreds of days
+// off (prior-year 2023/2022/2024 fixtures and a 2001 NCAAM on 2026 bets —
+// 354..9131 days). The cliff between legit (+8d) and garbage (-354d) is ~346
+// days, so the bounds below are deliberately wide — ~7x the real +8 max — to
+// never clip a legitimate multi-week future while still catching the staleness
+// the extractor occasionally emits. -2 (not -1) keeps the timezone artifact
+// safe; +60 leaves room for real multi-week futures.
+//
+// GAP-ONLY by design: the guard compares instants by their millisecond gap and
+// NOTHING else. There is deliberately no calendar-year / cross-year rule — the
+// gap bounds already null every wrong-year date, and a year rule would ALSO null
+// legitimate same-week Dec→Jan bets days apart (bowls, NFL Wk18, NBA), which
+// must be preserved. (A prior cross-year rule was removed for exactly that
+// false-positive.)
 const EVENT_DATE_GUARD_MIN_GAP_DAYS = -2;
 const EVENT_DATE_GUARD_MAX_GAP_DAYS = 60;
 
@@ -92,16 +100,12 @@ const EVENT_DATE_GUARD_MAX_GAP_DAYS = 60;
 // value is plausible, or NULL (never throws) when it is implausibly far from
 // created_at — so the bet still saves and the grader falls back to created_at.
 //
-// Two independent rules; NULL if EITHER fires:
-//   (a) event_date's year != created_at's year — any cross-year date.
-//   (b) (event_date - created_at) < -2 days OR > +60 days.
-//
-// Known, accepted false-positive: a New-Year's-boundary bet (created late Dec,
-// game early Jan — bowls / NFL Wk18 / NBA) is a legitimate cross-year value
-// that rule (a) NULLs. That is intended: the bet still saves, falls back to
-// created_at (<=1 day off), and behaves like the 96.9% null-event_date majority.
-// The warn log records gapDays so such rare cases are greppable (rule=cross-year
-// with a tiny gap) if the live distribution ever shifts.
+// ONE rule (gap-only): NULL when (event_date - created_at) < -2 days OR
+// > +60 days. There is NO cross-year / calendar-year rule — see the bounds
+// comment above. A New-Year's-boundary bet (created late Dec, game early Jan —
+// bowls / NFL Wk18 / NBA) is cross-year but only days apart, so it stays within
+// bounds and is PRESERVED. Only the hundreds-of-days-off garbage is nulled. The
+// warn log records gapDays so the thresholds can be tuned from real logs.
 //
 // When no usable created_at anchor is available the value cannot be compared, so
 // it is preserved unchanged (matches the pre-guard behavior of the dated
@@ -110,16 +114,14 @@ function applyEventDateSanityGuard(date, anchor, raw, opts) {
   if (!(date instanceof Date) || isNaN(date.getTime())) return null;
   if (!(anchor instanceof Date) || isNaN(anchor.getTime())) return date.toISOString();
 
-  const crossYear = date.getUTCFullYear() !== anchor.getUTCFullYear();
   const gapDays = (date.getTime() - anchor.getTime()) / 86400000;
   const outOfBounds = gapDays < EVENT_DATE_GUARD_MIN_GAP_DAYS || gapDays > EVENT_DATE_GUARD_MAX_GAP_DAYS;
 
-  if (crossYear || outOfBounds) {
-    const rule = crossYear ? (outOfBounds ? 'cross-year+out-of-bounds' : 'cross-year') : 'out-of-bounds';
+  if (outOfBounds) {
     const idTag = opts && opts.betId ? ` bet=${opts.betId}` : '';
     console.warn(
       `[eventDateStorage] implausible event_date NULLed${idTag}: value=${date.toISOString()} ` +
-      `created=${anchor.toISOString()} gapDays=${gapDays.toFixed(1)} rule=${rule} ` +
+      `created=${anchor.toISOString()} gapDays=${gapDays.toFixed(1)} rule=out-of-bounds ` +
       `raw="${String(raw).slice(0, 80)}"`,
     );
     return null;
@@ -181,6 +183,27 @@ function normalizeEventDateForStorage(raw, createdAt = new Date(), opts = {}) {
     if (year < 100) year += 2000;
     return applyEventDateSanityGuard(
       etWallClockToUtc(year, parseInt(m[1], 10), parseInt(m[2], 10), to24h(m[4], m[6]), parseInt(m[5], 10)),
+      anchor, raw, opts);
+  }
+
+  // "Today 7:10 PM ET" / "Tonight 7:10PM" / "Tomorrow, 1:05 PM ET" — relative
+  // to created_at, the format HRB renders constantly (the time-only regex is
+  // ^\d-anchored, so a leading word never matches it). Resolve the time on
+  // created_at's ET CALENDAR day (today/tonight) or that day + 1 (tomorrow).
+  // The day is fed straight to etWallClockToUtc, which normalizes day/month/year
+  // overflow (Dec 31 + 1 → Jan 1) AND applies the TARGET day's DST offset — so
+  // "tomorrow" is correct even across a month boundary or a DST transition. (A
+  // fixed +24h ms add is NOT used: it lands a day off when the anchor sits in
+  // the short window adjacent to a spring-forward/fall-back transition.) A bare
+  // "Today" with no time does NOT match — it falls through to NULL rather than
+  // guess a start time.
+  const rel = s.match(/^(today|tonight|tomorrow)\b,?\s*(\d{1,2}):(\d{2})\s*(am|pm)\b/i);
+  if (rel) {
+    if (!anchorOk) return null;
+    const d = etParts(anchor);
+    const day = /tomorrow/i.test(rel[1]) ? d.day + 1 : d.day;
+    return applyEventDateSanityGuard(
+      etWallClockToUtc(d.year, d.month, day, to24h(rel[2], rel[4]), parseInt(rel[3], 10)),
       anchor, raw, opts);
   }
 
