@@ -10,6 +10,7 @@ canonical detail.
 
 ## Shipped (newest first)
 
+- **#156** — Spec §9 grader `event_date` write-back: when a deterministic adapter resolves a bet to a real game during grading, `writeBackResolvedEventDate` fills a still-NULL `bets.event_date` from the matched game's own authoritative date (mlb `gameDate` / nba+espn `event.date` / nhl `startTimeUTC` / soccer). NULL-only (`AND event_date IS NULL`), through the ingest `normalizeEventDateForStorage` guard, never alters the grade. Self-heals the NULL backlog incrementally; parlays are a deliberate no-op (synthetic leg id, bet-level scope §4).
 - **#130** — Guard `mlb.gradeMlbBet` to refuse mis-routed MLB player props (a non-run player stat in the description) before fetch — they fall to manual review instead of a false game-total WIN.
 - **#127** — Docs-only: bring CODEMAP + BACKLOG current for the already-merged #124 event-aware grading recheck (flag, planner, wiring sites, consts); no code change.
 - **#126** — Enforce-gated event-aware sweep guard: `evaluateSweep` skips (`event_pending`) a just-deferred future-event bet so the 7d sweeper can't finalize it to a false loss.

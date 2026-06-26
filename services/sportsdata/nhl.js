@@ -121,6 +121,7 @@ async function getGameForTeam(teamName, dateYMD) {
       found: true,
       finished,
       gameId: g.id,
+      startTimeUTC: g.startTimeUTC,   // NHL api-web ISO-UTC puck-drop — authoritative event_date (§9)
       away: awayName,
       home: homeName,
       awayScore,
@@ -158,7 +159,7 @@ async function gradeNhlBet(description, dateYMD) {
   const game = await getGameForTeam(teamHits[0].canonical, dateYMD);
   if (!game) return { resolved: false, reason: 'no_game_on_date' };
   if (!game.finished) {
-    return { resolved: true, status: 'PENDING', evidence: `Game scheduled but not final (${game.gameState})`, source: 'nhl_api' };
+    return { resolved: true, status: 'PENDING', evidence: `Game scheduled but not final (${game.gameState})`, source: 'nhl_api', eventDate: game.startTimeUTC };
   }
 
   const betTeam = teamHits[0].canonical;
@@ -176,6 +177,7 @@ async function gradeNhlBet(description, dateYMD) {
       status: won ? 'WIN' : 'LOSS',
       evidence: `${game.away} ${game.awayScore} @ ${game.home} ${game.homeScore} (Final). ${betTeam} ${won ? 'won' : 'lost'}.`,
       source: 'nhl_api',
+      eventDate: game.startTimeUTC,
     };
   }
 
@@ -189,6 +191,7 @@ async function gradeNhlBet(description, dateYMD) {
       status: won ? 'WIN' : 'LOSS',
       evidence: `${game.away} ${game.awayScore} @ ${game.home} ${game.homeScore} (Final). ${betTeam} margin ${margin > 0 ? '+' : ''}${margin}, line ${line}.`,
       source: 'nhl_api',
+      eventDate: game.startTimeUTC,
     };
   }
 
@@ -206,6 +209,7 @@ async function gradeNhlBet(description, dateYMD) {
       status,
       evidence: `${game.away} ${game.awayScore} @ ${game.home} ${game.homeScore} (Final). Total ${totalGoals}, ${direction} ${line}.`,
       source: 'nhl_api',
+      eventDate: game.startTimeUTC,
     };
   }
 
@@ -309,6 +313,7 @@ async function findPlayerGame(lastName, dateYMD, firstName = null) {
       if (found) {
         return {
           gameId: g.id,
+          startTimeUTC: g.startTimeUTC,   // NHL api-web ISO-UTC puck-drop — authoritative event_date (§9)
           finished: gameFinal,
           gameState: g.gameState,
           ...found,
@@ -405,7 +410,7 @@ async function gradeNhlPlayerProp(description, dateYMD, opts = {}) {
     return { resolved: false, reason: 'player_not_found_in_games_on_date' };
   }
   if (!result.finished) {
-    return { resolved: true, status: 'PENDING', evidence: `${result.player}'s game not yet final (${result.gameState})`, source: 'nhl_api' };
+    return { resolved: true, status: 'PENDING', evidence: `${result.player}'s game not yet final (${result.gameState})`, source: 'nhl_api', eventDate: result.startTimeUTC };
   }
   // NHL DNP note (PR #128 follow-up): NHL has no in-box-score did-not-play flag —
   // a healthy scratch is simply ABSENT from playerByGameStats, so a true DNP is
@@ -427,6 +432,7 @@ async function gradeNhlPlayerProp(description, dateYMD, opts = {}) {
     status,
     evidence: `${result.player} had ${value} ${parsed.stat} (line: ${parsed.direction} ${parsed.threshold}).`,
     source: 'nhl_api',
+    eventDate: result.startTimeUTC,
   };
 }
 

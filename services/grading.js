@@ -4,6 +4,7 @@ const { gradeBetAI } = require('./ai');
 const { canonicalizeSport } = require('./sportNormalize');
 const bets = require('./bets');
 const { buildEvidenceRecords, evaluateOffDate } = require('./evidenceRecords');
+const { normalizeEventDateForStorage } = require('./eventDate');
 const delay = ms => new Promise(res => setTimeout(res, ms));
 
 // Write-time grader-eligibility gate — the DUAL of getPendingBets' selection guard.
@@ -2634,6 +2635,74 @@ async function searchWeb(query) {
   return results;
 }
 
+// ── §9 grader event_date write-back ──────────────────────────────────────────
+// When a deterministic adapter (services/sportsdata or services/espn) RESOLVES a
+// bet to a REAL matched game, that game carries its AUTHORITATIVE start date. If the
+// bet's event_date is still NULL, fill it from that resolved date — making the grader
+// a self-healing event_date source that closes the NULL-event_date backlog over time,
+// with no OCR/hallucination risk (spec docs/specs/event-date-ingest.md §9). Strictly a
+// SIDE-EFFECT of a resolution that already happened: it NEVER changes the grade outcome
+// (callers run it after the grade is decided and before earlyReturn; it touches only
+// the event_date column).
+//
+// Invariants — all enforced here:
+//   • fires ONLY on a deterministic resolution that produced a real game date. The two
+//     call sites pass it only from structured.resolved / espnResult.ok paths; the
+//     AI-fallback PENDING path (no game found → no real date) is downstream and never
+//     reaches this — so an AI PENDING writes nothing.
+//   • fills ONLY a NULL event_date — never overwrites a user-extracted or
+//     already-written value. The `AND event_date IS NULL` SQL clause is the
+//     authoritative idempotency / no-clobber gate, race-safe against a stale in-memory
+//     bet.event_date.
+//   • routes through the SAME Phase-1 storage guard as ingest
+//     (normalizeEventDateForStorage): a resolved date implausibly far from created_at
+//     is NULLed (not written raw), and the stored value is the full ISO instant the
+//     eventEtYMD slate / read-side consumers expect — never date-only (date-only breaks
+//     eventEtYMD under EVENT_DATE_SLATE enforce).
+//   • never throws — healing/observability must not break grading.
+//
+// PARLAYS (deliberate no-op): gradeParlay grades each leg through gradeSingleBet with
+// a SYNTHETIC legBet id (`<parentId>-legN`) that has NO row in `bets`, so a leg's
+// resolution runs this with that id and the NULL-only UPDATE matches 0 rows → nothing
+// is written. That is the CORRECT bet-level scope (spec §4 "bet-level now; leg-level
+// deferred"): writing one leg's game date onto a multi-day parlay's single event_date
+// would be wrong. So this only ever heals SINGLE bets (real ids) — exactly the case
+// whose misgrade motivated the spec.
+//
+// Returns the stored ISO string when it wrote, else null (no date / already set /
+// guard-nulled / no matching NULL-event_date row, incl. parlay legs).
+function writeBackResolvedEventDate(bet, resolvedDate, source) {
+  try {
+    if (!bet || !bet.id) return null;
+    if (resolvedDate == null || resolvedDate === '') return null;
+    // Fast path: only fill a NULL. The SQL below is the authoritative gate; this
+    // skip avoids the storage guard's warn-log firing for already-dated bets.
+    if (bet.event_date != null && String(bet.event_date).trim() !== '') return null;
+
+    const guarded = normalizeEventDateForStorage(resolvedDate, bet.created_at, { betId: bet.id });
+    if (!guarded) {
+      // Guard NULLed an implausible resolved date (or it was unparseable) — correct;
+      // do NOT write garbage. A NULL stays safe and falls back to created_at.
+      console.log(`[eventDateWriteback] bet=${bet.id?.slice(0, 8)} resolved date not stored (guard NULLed / unparseable) raw="${String(resolvedDate).slice(0, 40)}" created=${bet.created_at}`);
+      return null;
+    }
+
+    const info = db.prepare('UPDATE bets SET event_date = ? WHERE id = ? AND event_date IS NULL').run(guarded, bet.id);
+    if (info.changes > 0) {
+      // Pure DB side-effect — deliberately does NOT mutate the in-memory `bet`, so the
+      // parse-time snapshot runAutoGrade hands to evaluateSweep stays unchanged
+      // mid-cycle (preserving that function's "event_date never mutated mid-cycle"
+      // assumption). The healed value is picked up on the NEXT cycle's getPendingBets.
+      console.log(`[eventDateWriteback] bet=${bet.id?.slice(0, 8)} event_date=${guarded} source=${source || 'adapter'} (§9 self-heal)`);
+      return guarded;
+    }
+    return null;
+  } catch (err) {
+    console.error(`[eventDateWriteback] non-fatal error for bet=${bet?.id?.slice(0, 8)}: ${err.message}`);
+    return null;
+  }
+}
+
 // ── Parlay dispatcher — routes to leg-by-leg or single-bet grading ──
 async function gradePropWithAI(bet) {
   // Reclassify sport FIRST (before any search or team extraction)
@@ -3201,6 +3270,9 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
         audit.search_backend = structured.source;
         audit.provider_used = structured.source;
         audit.search_hits = 1;
+        // §9: heal a NULL event_date from the resolved game's authoritative date.
+        // Side-effect only — never alters the grade decided above (NULL-only + guarded).
+        writeBackResolvedEventDate(bet, structured.eventDate, structured.source);
         return earlyReturn({
           status: structured.status,
           evidence: structured.evidence,
@@ -3223,6 +3295,8 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
         audit.search_backend = 'espn';
         audit.search_hits = 1;
         audit.provider_used = 'espn';
+        // §9: heal a NULL event_date from the resolved game's authoritative date.
+        writeBackResolvedEventDate(bet, espnResult.eventDate, 'espn');
         return earlyReturn({ status: espnResult.result, evidence: espnResult.evidence });
       }
       // ESPN couldn't grade — fall through to searchWeb + AI
@@ -3724,6 +3798,7 @@ module.exports = {
   gradeFromCelebration,
   finalizeBetGrading,
   gradePropWithAI,
+  writeBackResolvedEventDate,   // §9 grader event_date write-back (NULL-only, guarded)
   gradeBet: finalizeBetGrading,
   canFinalizeBet,
   claimBetForGrading,

@@ -483,7 +483,10 @@ async function tryGradeViaESPN(bet, betTeamList) {
   recordStat(sport, 'grades');
   console.log(`[ESPN] Grade: ${(bet.description || '').slice(0, 50)} = ${grade.result} | ${grade.evidence.slice(0, 80)}`);
 
-  return { ok: true, result: grade.result, evidence: grade.evidence };
+  // §9 event_date write-back: the matched ESPN scoreboard event carries its own
+  // authoritative start instant (event.date, ISO-UTC) — distinct from usedDate (the
+  // queried slate day). Surfaced for the grader to heal a NULL event_date; null-safe.
+  return { ok: true, result: grade.result, evidence: grade.evidence, eventDate: match.event?.date || null };
 }
 
 module.exports = {
