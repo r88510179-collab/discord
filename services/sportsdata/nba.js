@@ -107,6 +107,7 @@ function extractGameInfo(event) {
   const away = (comp.competitors || []).find(c => c.homeAway === 'away');
   return {
     eventId: event.id,
+    date: event.date,   // ESPN scoreboard event.date (ISO-UTC) — authoritative event_date (§9)
     finished,
     status,
     home: home?.team?.displayName,
@@ -149,7 +150,7 @@ async function gradeNbaBet(description, dateYMD) {
   const game = await getGameForTeam(teamHits[0].canonical, dateYMD);
   if (!game) return { resolved: false, reason: 'no_game_on_date' };
   if (!game.finished) {
-    return { resolved: true, status: 'PENDING', evidence: `Game not yet final (${game.status})`, source: 'espn_nba' };
+    return { resolved: true, status: 'PENDING', evidence: `Game not yet final (${game.status})`, source: 'espn_nba', eventDate: game.date };
   }
 
   const betTeam = teamHits[0].canonical;
@@ -167,6 +168,7 @@ async function gradeNbaBet(description, dateYMD) {
       status: won ? 'WIN' : 'LOSS',
       evidence: `${game.away} ${game.awayScore} @ ${game.home} ${game.homeScore} (Final). ${betTeam} ${won ? 'won' : 'lost'}.`,
       source: 'espn_nba',
+      eventDate: game.date,
     };
   }
 
@@ -184,6 +186,7 @@ async function gradeNbaBet(description, dateYMD) {
       status: push ? 'PUSH' : (covers ? 'WIN' : 'LOSS'),
       evidence: `${game.away} ${game.awayScore} @ ${game.home} ${game.homeScore} (Final). ${betTeam} margin ${margin > 0 ? '+' : ''}${margin}, line ${line > 0 ? '+' : ''}${line}.`,
       source: 'espn_nba',
+      eventDate: game.date,
     };
   }
 
@@ -201,6 +204,7 @@ async function gradeNbaBet(description, dateYMD) {
       status,
       evidence: `${game.away} ${game.awayScore} @ ${game.home} ${game.homeScore} (Final). Total ${totalPoints}, ${direction} ${line}.`,
       source: 'espn_nba',
+      eventDate: game.date,
     };
   }
 
@@ -389,6 +393,7 @@ async function findPlayerGame(lastName, dateYMD, firstName = null) {
       if (found) {
         return {
           eventId: e.id,
+          date: e.date,   // ESPN scoreboard event.date (ISO-UTC) — authoritative event_date (§9)
           finished: gameInfo?.finished,
           status: gameInfo?.status,
           ...found,
@@ -425,7 +430,7 @@ async function gradeNbaPlayerProp(description, dateYMD, opts = {}) {
     return { resolved: false, reason: 'player_not_found_in_games_on_date' };
   }
   if (!result.finished) {
-    return { resolved: true, status: 'PENDING', evidence: `${result.player}'s game not yet final (${result.status})`, source: 'espn_nba' };
+    return { resolved: true, status: 'PENDING', evidence: `${result.player}'s game not yet final (${result.status})`, source: 'espn_nba', eventDate: result.date };
   }
   // Confirmed DNP: the player was rostered for a game that DID occur (we found
   // their box-score row) but did not take the court. The prop had NO ACTION →
@@ -466,6 +471,7 @@ async function gradeNbaPlayerProp(description, dateYMD, opts = {}) {
     status,
     evidence: `${result.player} had ${value} ${statLabel} (line: ${parsed.direction} ${parsed.threshold}).`,
     source: 'espn_nba',
+    eventDate: result.date,
   };
 }
 

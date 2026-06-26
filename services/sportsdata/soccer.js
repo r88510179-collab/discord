@@ -247,6 +247,15 @@ function no(reason, matchId) {
   return r;
 }
 
+// §9 event_date write-back: attach the matched ESPN event's OWN authoritative date
+// (event.date / found.ev.date, ISO-UTC — distinct from the queried slate day) to a
+// RESOLVED verdict so the grader can heal a NULL event_date. Additive + null-safe:
+// only decorates {resolved:true} results, never the {resolved:false} no() fall-throughs.
+function withEventDate(result, isoDate) {
+  if (result && result.resolved === true && isoDate) return { ...result, eventDate: isoDate };
+  return result;
+}
+
 // Build 1c — additive market-class tag. The mode router (index.js routeSoccer)
 // gates the MATCH-LEVEL path and the PROP path independently, so every result must
 // carry which path produced it. Default-tag the result `cls` unless it already
@@ -549,7 +558,9 @@ async function gradeSoccerProp(prop, descNorm, dateYMD, slug, cache) {
   if (foundCount > 1) return no('no_unique_player');               // same name across two events
   if (foundCount === 0) return no(summaryFetchError ? 'fetch_error' : 'player_not_found');
   if (!summaryCompleted(found.summary)) return no('match_not_final', found.ev.id);
-  return settleSoccerProp(prop, found);
+  // §9: decorate every prop verdict (graded + DNP-VOID, all real matched events) with
+  // the matched event's authoritative date at this single boundary.
+  return withEventDate(settleSoccerProp(prop, found), found.ev && found.ev.date);
 }
 
 function settleSoccerProp(prop, found) {
@@ -697,7 +708,7 @@ async function gradeSoccerBetImpl(description, dateYMD, opts = {}) {
     const bothScored = homeScore >= 1 && awayScore >= 1;
     const betNo = /\bno\b/.test(descLower);
     const won = betNo ? !bothScored : bothScored;
-    return ok(won ? 'WIN' : 'LOSS', `${ftLine}. BTTS ${betNo ? 'No' : 'Yes'} → both scored=${bothScored}.`, matchId);
+    return withEventDate(ok(won ? 'WIN' : 'LOSS', `${ftLine}. BTTS ${betNo ? 'No' : 'Yes'} → both scored=${bothScored}.`, matchId), event.date);
   }
 
   // ── 2) Draw No Bet — explicitly OUT of this pass's scope → fall through ──
@@ -725,12 +736,12 @@ async function gradeSoccerBetImpl(description, dateYMD, opts = {}) {
     if (!covered) return no('ambiguous_double_chance', matchId);
     const actual = isDrawn ? 'draw' : (winner.homeAway === 'home' ? 'home' : 'away');
     const won = covered.includes(actual);
-    return ok(won ? 'WIN' : 'LOSS', `${ftLine}. Double chance ${covered.join('/')} → ${actual}.`, matchId);
+    return withEventDate(ok(won ? 'WIN' : 'LOSS', `${ftLine}. Double chance ${covered.join('/')} → ${actual}.`, matchId), event.date);
   }
 
   // ── 4) Draw (1X2 draw pick) ──
   if (/\bdraw\b|\btie\b/.test(descLower)) {
-    return ok(isDrawn ? 'WIN' : 'LOSS', `${ftLine}. Result: ${isDrawn ? 'draw' : nameOf(winner) + ' win'}.`, matchId);
+    return withEventDate(ok(isDrawn ? 'WIN' : 'LOSS', `${ftLine}. Result: ${isDrawn ? 'draw' : nameOf(winner) + ' win'}.`, matchId), event.date);
   }
 
   // ── 5) Half totals (1H/2H) — needs linescores ──
@@ -741,14 +752,14 @@ async function gradeSoccerBetImpl(description, dateYMD, opts = {}) {
     if (!total) return no('unparseable_line', matchId);
     const hv = halfTotal(comp, halfMatch);
     if (hv == null) return no('no_linescores', matchId);
-    return settleOverUnder(hv, total.direction, total.line, `${halfMatch === 0 ? '1H' : '2H'} goals`, matchId);
+    return withEventDate(settleOverUnder(hv, total.direction, total.line, `${halfMatch === 0 ? '1H' : '2H'} goals`, matchId), event.date);
   }
 
   // ── 6) Team total (explicit phrasing) ──
   const total = parseTotalLine(descLower);
   if (total && /team\s*total|team\s*goals/.test(descLower)) {
     if (!subject) return no('no_subject_team', matchId);
-    return settleOverUnder(subjectScore, total.direction, total.line, `${nameOf(subject)} team goals`, matchId);
+    return withEventDate(settleOverUnder(subjectScore, total.direction, total.line, `${nameOf(subject)} team goals`, matchId), event.date);
   }
 
   // ── 7) Game total (over/under) — only when the match is unambiguous ──
@@ -757,7 +768,7 @@ async function gradeSoccerBetImpl(description, dateYMD, opts = {}) {
   // → fall through.
   if (total) {
     if (matched.length === 2 || matchupToken) {
-      return settleOverUnder(totalGoals, total.direction, total.line, 'Match goals', matchId);
+      return withEventDate(settleOverUnder(totalGoals, total.direction, total.line, 'Match goals', matchId), event.date);
     }
     return no('ambiguous_total', matchId);
   }
@@ -772,13 +783,13 @@ async function gradeSoccerBetImpl(description, dateYMD, opts = {}) {
     if (Math.abs(line * 2 - Math.round(line * 2)) > 1e-9) return no('unsupported_line', matchId);
     const adj = (subjectScore - oppScore) + line;
     const status = Math.abs(adj) < 1e-9 ? 'PUSH' : (adj > 0 ? 'WIN' : 'LOSS');
-    return ok(status, `${ftLine}. ${nameOf(subject)} ${subjectScore}-${oppScore}, line ${line > 0 ? '+' : ''}${line}.`, matchId);
+    return withEventDate(ok(status, `${ftLine}. ${nameOf(subject)} ${subjectScore}-${oppScore}, line ${line > 0 ? '+' : ''}${line}.`, matchId), event.date);
   }
 
   // ── 9) Moneyline / to win (bare ML = 3-way win; draw loses) ──
   if (/\bml\b|money\s*line|\bto win\b/.test(descLower)) {
     if (!subject) return no('no_subject_team', matchId);
-    return ok(subjectWon ? 'WIN' : 'LOSS', `${ftLine}. ${nameOf(subject)} ${subjectWon ? 'won' : (isDrawn ? 'drew' : 'lost')}.`, matchId);
+    return withEventDate(ok(subjectWon ? 'WIN' : 'LOSS', `${ftLine}. ${nameOf(subject)} ${subjectWon ? 'won' : (isDrawn ? 'drew' : 'lost')}.`, matchId), event.date);
   }
 
   return no('unsupported_market_soccer', matchId);

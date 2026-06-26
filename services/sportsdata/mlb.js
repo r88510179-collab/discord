@@ -101,6 +101,7 @@ async function getGameForTeam(teamName, dateYMD) {
       found: true,
       finished,
       gameId: g.gamePk,
+      gameDate: g.gameDate,   // statsapi ISO-UTC game start — authoritative event_date (§9 write-back)
       away,
       home,
       awayScore: g.teams?.away?.score,
@@ -264,7 +265,7 @@ async function gradeMlbBet(description, dateYMD) {
   const game = await getGameForTeam(teamHits[0].canonical, dateYMD);
   if (!game) return { resolved: false, reason: 'no_game_on_date' };
   if (!game.finished) {
-    return { resolved: true, status: 'PENDING', evidence: `Game scheduled but not final (${game.detailedState})`, source: 'mlb_statsapi' };
+    return { resolved: true, status: 'PENDING', evidence: `Game scheduled but not final (${game.detailedState})`, source: 'mlb_statsapi', eventDate: game.gameDate };
   }
 
   const betTeam = teamHits[0].canonical;
@@ -283,6 +284,7 @@ async function gradeMlbBet(description, dateYMD) {
       status: won ? 'WIN' : 'LOSS',
       evidence: `${game.away} ${game.awayScore} @ ${game.home} ${game.homeScore} (Final). ${betTeam} ${won ? 'won' : 'lost'}.`,
       source: 'mlb_statsapi',
+      eventDate: game.gameDate,
     };
   }
 
@@ -298,6 +300,7 @@ async function gradeMlbBet(description, dateYMD) {
       status: won ? 'WIN' : 'LOSS',
       evidence: `${game.away} ${game.awayScore} @ ${game.home} ${game.homeScore} (Final). ${betTeam} margin ${margin > 0 ? '+' : ''}${margin}, line ${line}.`,
       source: 'mlb_statsapi',
+      eventDate: game.gameDate,
     };
   }
 
@@ -315,6 +318,7 @@ async function gradeMlbBet(description, dateYMD) {
       status,
       evidence: `${game.away} ${game.awayScore} @ ${game.home} ${game.homeScore} (Final). Total ${totalRuns}, ${direction} ${line}.`,
       source: 'mlb_statsapi',
+      eventDate: game.gameDate,
     };
   }
 
@@ -522,6 +526,7 @@ async function findPlayerGame(playerLastName, dateYMD, playerFirstName = null) {
       if (found) {
         return {
           gamePk: g.gamePk,
+          gameDate: g.gameDate,   // statsapi ISO-UTC game start — authoritative event_date (§9)
           finished: gameFinal,
           detailedState: g.status?.detailedState,
           ...found,
@@ -570,7 +575,7 @@ async function gradeMlbPlayerProp(description, dateYMD, opts = {}) {
     return { resolved: false, reason: 'player_not_found_in_games_on_date' };
   }
   if (!result.finished) {
-    return { resolved: true, status: 'PENDING', evidence: `${result.player}'s game not yet final (${result.detailedState})`, source: 'mlb_statsapi' };
+    return { resolved: true, status: 'PENDING', evidence: `${result.player}'s game not yet final (${result.detailedState})`, source: 'mlb_statsapi', eventDate: result.gameDate };
   }
 
   // Compute the stat value
@@ -611,6 +616,7 @@ async function gradeMlbPlayerProp(description, dateYMD, opts = {}) {
     status,
     evidence: `${result.player} had ${value} ${statLabel} (line: ${parsed.direction} ${parsed.threshold}).`,
     source: 'mlb_statsapi',
+    eventDate: result.gameDate,
   };
 }
 

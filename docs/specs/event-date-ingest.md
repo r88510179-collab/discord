@@ -188,10 +188,25 @@ Proof, both zero-code:
   the model emits that the normalizer still drops -> that is the next widening list and the bound-
   threshold tuning input.
 
-## 9. Roadmap (NOT this PR): grader write-back
+## 9. Grader write-back — IMPLEMENTED (event-date-writeback PR)
 
-The robust long-term fix: when a structured adapter resolves a leg's game during grading, write that
-game's authoritative date back to `event_date`. Deterministic, no OCR/hallucination risk — and the
-better mechanism for the (B) backfill (adapter-resolve the 151 matchups -> dates, vs parsing
-descriptions). More scope; touches grading writes, so idempotency/`grader_version` care required.
-Keep (A) the minimal extraction fix; revisit this after (A) ships.
+**Status:** SHIPPED as a dedicated PR (supersedes the original "NOT this PR" deferral). When a
+deterministic adapter resolves a bet to a real game during grading, the grader writes that game's
+authoritative date back to a still-NULL `event_date`. Deterministic, no OCR/hallucination risk — and
+the self-healing mechanism for the (B) backfill (the NULL+pending cohort fills incrementally as those
+bets are re-graded and an adapter resolves them, vs a one-shot description-parse backfill).
+
+Implementation: `writeBackResolvedEventDate(bet, resolvedDate, source)` (`services/grading.js`),
+called at the two deterministic-resolution consumption points in `gradeSingleBet` (after
+`structured.resolved` and `espnResult.ok`, before `earlyReturn`) — so the AI-fallback PENDING path
+(no game found → no real date) never reaches it. The write fills ONLY a NULL `event_date`
+(`UPDATE … WHERE id=? AND event_date IS NULL`, race-safe / never clobbers an extracted or
+already-written value), routes through the SAME `normalizeEventDateForStorage` guard as ingest
+(§5.3 bounds — an implausible resolved date is NULLed, not written raw; the stored value is the full
+ISO instant the eventEtYMD slate expects, never date-only), and is a pure side-effect that never
+alters the grade. Each adapter surfaces the matched game's OWN authoritative date as an additive
+`eventDate` field (statsapi `gameDate` / ESPN `event.date` / NHL `startTimeUTC` / soccer
+`event.date`), distinct from the queried slate day. Tests: `tests/event-date-writeback.test.js`.
+
+Scope boundary: it heals INCREMENTALLY as bets flow through grading — it does NOT bulk-backfill
+existing rows in one shot.
