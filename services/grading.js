@@ -2654,6 +2654,12 @@ async function searchWeb(query) {
 //     already-written value. The `AND event_date IS NULL` SQL clause is the
 //     authoritative idempotency / no-clobber gate, race-safe against a stale in-memory
 //     bet.event_date.
+//   • lands ONLY while the bet is still grader-eligible — carries the SAME
+//     GRADER_ELIGIBLE_WHERE gate as the terminal grade write (finalizeBetGrading →
+//     requireGraderEligible). If an operator reverts the bet to needs_review
+//     mid-attempt, the grade write is refused as a 0-change race-loss and this date
+//     side-write must fail with it; otherwise a review-parked bet would carry the
+//     refused attempt's resolved date (Codex #156 P2).
 //   • routes through the SAME Phase-1 storage guard as ingest
 //     (normalizeEventDateForStorage): a resolved date implausibly far from created_at
 //     is NULLed (not written raw), and the stored value is the full ISO instant the
@@ -2687,7 +2693,21 @@ function writeBackResolvedEventDate(bet, resolvedDate, source) {
       return null;
     }
 
-    const info = db.prepare('UPDATE bets SET event_date = ? WHERE id = ? AND event_date IS NULL').run(guarded, bet.id);
+    // `AND ${GRADER_ELIGIBLE_WHERE}` — the SAME grader-eligibility gate the terminal
+    // grade write carries (finalizeBetGrading → gradeBet requireGraderEligible). #156
+    // shipped this side-write gated ONLY on id + NULL, so in the grader-vs-revert race
+    // (an operator reverts the bet to needs_review mid-attempt) the grade write is
+    // correctly refused as a 0-change no-op but this event_date write STILL landed —
+    // leaving a review-parked bet carrying the refused attempt's resolved date, which
+    // event-date-first grading would later trust even though that attempt's grade was
+    // rejected (Codex #156 P2). Carrying the gate here makes the date side-write and
+    // the grade write succeed-or-fail on the same predicate: an ineligible bet's date
+    // write is now a 0-change no-op, consistent with the grade refusal. NULL-only and
+    // the parlay synthetic-id no-op are untouched (an ineligible bet just adds a third
+    // way the UPDATE matches 0 rows).
+    const info = db.prepare(
+      `UPDATE bets SET event_date = ? WHERE id = ? AND event_date IS NULL AND ${GRADER_ELIGIBLE_WHERE}`,
+    ).run(guarded, bet.id);
     if (info.changes > 0) {
       // Pure DB side-effect — deliberately does NOT mutate the in-memory `bet`, so the
       // parse-time snapshot runAutoGrade hands to evaluateSweep stays unchanged
