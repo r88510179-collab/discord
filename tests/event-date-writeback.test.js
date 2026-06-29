@@ -16,12 +16,17 @@
 //      - implausible resolved date → NULLed by the storage guard (not written raw)
 //      - no resolved date (null/''/undefined) → no write
 //      - stored value is the full ISO instant, never date-only
+//      - grader-INELIGIBLE bet (reverted to needs_review / manual_review_unmodeled_sport
+//        mid-attempt) → NO write, mirroring the terminal grade write's eligibility gate
+//        (Codex #156 P2); still-eligible (confirmed / NULL review_status) → still heals
 //   B. Integration through gradePropWithAI (real §9 wiring + RED proof):
 //      - a NULL-event_date MLB prop, resolved by the structured adapter, gets
 //        event_date populated with the resolved game's guarded date  (RED: without
 //        the write-back call, this stays NULL post-resolution)
 //      - an EXISTING event_date is not overwritten by a resolution
 //      - an AI-fallback PENDING (adapter did NOT resolve) writes nothing
+//      - a needs_review bet still resolves but its event_date is NOT healed (the §9 P2
+//        gate carried through the real structured call site)
 // ═══════════════════════════════════════════════════════════
 
 const fs = require('fs');
@@ -56,11 +61,14 @@ const FULL_ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 db.prepare('INSERT OR REPLACE INTO cappers (id, display_name) VALUES (?, ?)').run('capper-wb', 'Writeback Capper');
 
-function insertBet(id, eventDate, createdAt, { sport = 'MLB', bet_type = 'straight', description = 'Lakers ML -110' } = {}) {
+function insertBet(id, eventDate, createdAt, { sport = 'MLB', bet_type = 'straight', description = 'Lakers ML -110', review_status = 'confirmed' } = {}) {
+  // review_status defaults to 'confirmed' (= the bets-table column default, grader-eligible),
+  // so every existing call is byte-unchanged. Pass 'needs_review' /
+  // 'manual_review_unmodeled_sport' / null to exercise the eligibility gate (§9 P2).
   db.prepare(
-    `INSERT OR REPLACE INTO bets (id, capper_id, sport, bet_type, description, event_date, created_at, result)
-     VALUES (?, 'capper-wb', ?, ?, ?, ?, ?, 'pending')`,
-  ).run(id, sport, bet_type, description, eventDate, createdAt);
+    `INSERT OR REPLACE INTO bets (id, capper_id, sport, bet_type, description, event_date, created_at, result, review_status)
+     VALUES (?, 'capper-wb', ?, ?, ?, ?, ?, 'pending', ?)`,
+  ).run(id, sport, bet_type, description, eventDate, createdAt, review_status);
 }
 function storedEventDate(id) {
   return db.prepare('SELECT event_date FROM bets WHERE id = ?').get(id).event_date;
@@ -130,6 +138,55 @@ function storedEventDate(id) {
   check('synthetic parlay-leg id (no bets row) → no write',
     legNoop === null && db.prepare("SELECT COUNT(*) AS c FROM bets WHERE id = 'parlay-abc-leg1'").get().c === 0,
     `ret=${legNoop}`);
+
+  // ── A6–A9. Grader-eligibility gate on the write-back (Codex #156 P2) ──────────
+  // The terminal GRADE write carries GRADER_ELIGIBLE_WHERE (finalizeBetGrading →
+  // gradeBet requireGraderEligible): a bet an operator reverts to needs_review
+  // mid-attempt has its grade refused as a 0-change race-loss and stays parked. The §9
+  // date side-write must carry the SAME gate — else a review-parked bet is left holding
+  // the refused attempt's resolved date, which event-date-first grading later trusts
+  // even though that attempt's grade was rejected. RED proof: without the
+  // `AND ${GRADER_ELIGIBLE_WHERE}` clause on the UPDATE, A6/A7 write the date anyway.
+
+  // A6 — reverted-to-needs_review bet, NULL event_date, PLAUSIBLE resolved date →
+  // event_date must NOT be written (mirrors the grade refusal). This is the bug.
+  insertBet('wb-needs-review', null, '2026-06-20 18:00:00', { review_status: 'needs_review' });
+  const ineligNR = writeBackResolvedEventDate(
+    { id: 'wb-needs-review', event_date: null, created_at: '2026-06-20 18:00:00' },
+    '2026-06-20T23:10:00Z', 'mlb_statsapi');
+  check('grader-INELIGIBLE (needs_review) → event_date NOT written (stays NULL)',
+    storedEventDate('wb-needs-review') === null && ineligNR === null,
+    `stored="${storedEventDate('wb-needs-review')}" ret=${ineligNR}`);
+
+  // A7 — the OTHER hidden status (manual_review_unmodeled_sport) is equally ineligible.
+  insertBet('wb-manual-review', null, '2026-06-20 18:00:00', { review_status: 'manual_review_unmodeled_sport' });
+  const ineligMR = writeBackResolvedEventDate(
+    { id: 'wb-manual-review', event_date: null, created_at: '2026-06-20 18:00:00' },
+    '2026-06-20T23:10:00Z', 'mlb_statsapi');
+  check('grader-INELIGIBLE (manual_review_unmodeled_sport) → event_date NOT written',
+    storedEventDate('wb-manual-review') === null && ineligMR === null,
+    `stored="${storedEventDate('wb-manual-review')}" ret=${ineligMR}`);
+
+  // A8 — control: an explicitly grader-ELIGIBLE (confirmed) bet STILL heals. The fix
+  // narrows ONLY the ineligible case; the normal still-eligible resolution is unchanged.
+  insertBet('wb-confirmed', null, '2026-06-20 18:00:00', { review_status: 'confirmed' });
+  const eligC = writeBackResolvedEventDate(
+    { id: 'wb-confirmed', event_date: null, created_at: '2026-06-20 18:00:00' },
+    '2026-06-20T23:10:00Z', 'mlb_statsapi');
+  check('control: grader-ELIGIBLE (confirmed) bet still heals event_date',
+    storedEventDate('wb-confirmed') === '2026-06-20T23:10:00.000Z' && eligC === '2026-06-20T23:10:00.000Z',
+    `stored="${storedEventDate('wb-confirmed')}" ret=${eligC}`);
+
+  // A9 — control: a NULL review_status (the gate's NULL-tolerant arm) is grader-ELIGIBLE
+  // and STILL heals — a naive `review_status != 'needs_review'` form would wrongly skip
+  // it under SQLite three-valued logic.
+  insertBet('wb-null-review', null, '2026-06-20 18:00:00', { review_status: null });
+  const eligNull = writeBackResolvedEventDate(
+    { id: 'wb-null-review', event_date: null, created_at: '2026-06-20 18:00:00' },
+    '2026-06-20T23:10:00Z', 'mlb_statsapi');
+  check('control: NULL review_status (NULL-tolerant arm) still heals event_date',
+    storedEventDate('wb-null-review') === '2026-06-20T23:10:00.000Z' && eligNull === '2026-06-20T23:10:00.000Z',
+    `stored="${storedEventDate('wb-null-review')}" ret=${eligNull}`);
 
   // ── B. Integration through gradePropWithAI (real §9 wiring + RED proof) ──
   console.log('gradePropWithAI integration (§9 wiring):');
@@ -229,6 +286,21 @@ function storedEventDate(id) {
   check('integration (ESPN path): team ML resolved to WIN', r4 && r4.status === 'WIN', `result=${JSON.stringify(r4)}`);
   check('integration (ESPN path): NULL event_date healed via espnResult.eventDate',
     storedEventDate('wb-int-espn') === '2026-06-20T23:10:00.000Z', `stored="${storedEventDate('wb-int-espn')}"`);
+
+  // B5 — the §9 P2 gate end-to-end through the REAL structured call site
+  // (grading.js writeBackResolvedEventDate). A bet reverted to needs_review mid-attempt
+  // still RESOLVES to a WIN (the grade is decided — eligibility gating is a write-time
+  // concern, not a routing one), but the event_date side-write is refused, mirroring
+  // finalizeBetGrading's grade refusal for the same race. RED proof: without the
+  // GRADER_ELIGIBLE_WHERE clause on the write-back UPDATE, this event_date would be
+  // written despite the bet being parked in the human review queue.
+  installFetch({ slateGames: [mlbGame(501, GAME_DATE)] });
+  insertBet('wb-int-ineligible', null, '2026-06-20 18:00:00', { ...MLB_PROP, review_status: 'needs_review' });
+  const r5 = await gradePropWithAI(db.prepare("SELECT * FROM bets WHERE id = 'wb-int-ineligible'").get());
+  check('integration: needs_review bet still resolves to WIN (grade decided, not persisted here)',
+    r5 && r5.status === 'WIN', `result=${JSON.stringify(r5)}`);
+  check('integration: needs_review bet event_date NOT healed (gate mirrors grade refusal)',
+    storedEventDate('wb-int-ineligible') === null, `stored="${storedEventDate('wb-int-ineligible')}"`);
 
   global.fetch = realFetch;
 
