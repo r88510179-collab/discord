@@ -1554,10 +1554,12 @@ const SPORT_SEASONS = {
   'WNBA':  { start: [5, 1], end: [10, 31] },
 };
 
-function isInSeason(sport) {
+// `now` is injectable so tests can pin season state to an explicit date
+// (mirrors evaluateSweep(bet, now) in services/grading.js); production
+// callers omit it and get the wall clock.
+function isInSeason(sport, now = new Date()) {
   const season = SPORT_SEASONS[sport?.toUpperCase()];
   if (!season) return true; // Unknown/year-round sports pass
-  const now = new Date();
   const m = now.getMonth() + 1, d = now.getDate();
   const [sm, sd] = season.start, [em, ed] = season.end;
   // Handle year-wrap (e.g., NFL Sep→Feb)
@@ -1959,7 +1961,8 @@ function declaredSportIncludesKbo(parlaySport) {
 //       "Giants"/"Cardinals"/"SF Giants". The drop stands only when nothing is in
 //       season or there is no modeled team at all (e.g. an NFL player prop).
 // Returns the canonical in-season sport to ADOPT, or null to let the drop stand.
-function resolveInSeasonForOffseason(description) {
+// `now` (optional) pins the season evaluation — see isInSeason.
+function resolveInSeasonForOffseason(description, now) {
   const desc = (description || '').toLowerCase();
 
   // Scan SPORT_TEAM_MAP: record which league(s) each REAL-TEAM keyword present
@@ -1992,13 +1995,13 @@ function resolveInSeasonForOffseason(description) {
   if (forced) definite.add(forced);
 
   // (a) Any definite team out of season → genuine out-of-season pick → drop.
-  for (const sport of definite) if (!isInSeason(sport)) return null;
+  for (const sport of definite) if (!isInSeason(sport, now)) return null;
 
   // (b) No definite out-of-season team. Adopt an in-season league.
   if (forced) return SPORT_TEAM_MAP_CANONICAL[forced] || forced; // in season (checked above)
   const pool = definite.size > 0 ? definite : candidates;
   for (const sport of Object.keys(SPORT_TEAM_MAP)) {
-    if (pool.has(sport) && isInSeason(sport)) return SPORT_TEAM_MAP_CANONICAL[sport] || sport;
+    if (pool.has(sport) && isInSeason(sport, now)) return SPORT_TEAM_MAP_CANONICAL[sport] || sport;
   }
   return null; // nothing in season / no modeled team — drop stands
 }
@@ -2043,8 +2046,8 @@ function validateParsedBet(pick, sourceText, opts = {}) {
   // silently dropped. Only a genuinely out-of-season pick still drops — one that
   // is unambiguous, has no modeled team, or is a qualifier-pinned franchise whose
   // own sport is out of season (see resolveInSeasonForOffseason; events 76871).
-  if (pick.sport && !isInSeason(pick.sport)) {
-    const inSeasonSport = resolveInSeasonForOffseason(pick.description);
+  if (pick.sport && !isInSeason(pick.sport, opts.now)) {
+    const inSeasonSport = resolveInSeasonForOffseason(pick.description, opts.now);
     if (inSeasonSport) {
       pick.sport = inSeasonSport;
     } else {

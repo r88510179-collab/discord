@@ -10,6 +10,11 @@
 const assert = require('assert');
 const { validateLegShape, validateParsedBet } = require('../services/ai');
 
+// validateParsedBet's offseason check runs before the leg-shape check; pin the
+// season evaluation to a date with MLB in season so the end-to-end cases below
+// don't flip to reason 'offseason' when the wall clock leaves the MLB window.
+const TEST_NOW = new Date(2026, 4, 7); // 2026-05-07, local time
+
 let passed = 0;
 let failed = 0;
 
@@ -110,7 +115,7 @@ run('NRFI parlay misread → leg_shape_invalid', () => {
     ],
   };
   const sourceText = 'MLB SF/PHI Game 1 NRFI free play';
-  const r = validateParsedBet(pick, sourceText, { hasMedia: true });
+  const r = validateParsedBet(pick, sourceText, { hasMedia: true, now: TEST_NOW });
   assert.strictEqual(r.valid, false, `expected reject, got: ${JSON.stringify(r)}`);
   assert.strictEqual(r.reason, 'leg_shape_invalid', `expected leg_shape_invalid, got: ${r.reason}`);
 });
@@ -127,7 +132,7 @@ run('legitimate NRFI single-leg bet → pass', () => {
     ],
   };
   const sourceText = 'MLB SF/PHI Game 1 NRFI free play';
-  const r = validateParsedBet(pick, sourceText, { hasMedia: true });
+  const r = validateParsedBet(pick, sourceText, { hasMedia: true, now: TEST_NOW });
   assert.strictEqual(r.valid, true, `expected pass, got: ${JSON.stringify(r)}`);
 });
 
@@ -141,7 +146,7 @@ run('flattened pitcher-record description (no legs) → leg_shape_invalid', () =
     legs: [],
   };
   const sourceText = 'MLB SF/PHI Game 1 NRFI free play';
-  const r = validateParsedBet(pick, sourceText, { hasMedia: true });
+  const r = validateParsedBet(pick, sourceText, { hasMedia: true, now: TEST_NOW });
   assert.strictEqual(r.valid, false, `expected reject, got: ${JSON.stringify(r)}`);
   assert.strictEqual(r.reason, 'leg_shape_invalid', `expected leg_shape_invalid, got: ${r.reason}`);
 });
