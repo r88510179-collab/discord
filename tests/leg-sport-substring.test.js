@@ -22,6 +22,11 @@
 const assert = require('assert');
 const { validateLegSportConsistency, validateParsedBet } = require('../services/ai');
 
+// validateParsedBet's offseason check runs before the leg-sport check; pin the
+// season evaluation to a date with MLB in season so the end-to-end cases below
+// don't flip to reason 'offseason' when the wall clock leaves the MLB window.
+const TEST_NOW = new Date(2026, 4, 7); // 2026-05-07, local time
+
 let passed = 0;
 let failed = 0;
 
@@ -50,7 +55,7 @@ const ABRAMS_LEGS = [
 // ── 1. Regression fixed: the live-drop 4-leg parlay no longer mis-fires ──
 run('4-leg MLB hits parlay (incl. "CJ Abrams") → NOT leg_sport_mismatch (validateParsedBet, ingest disc_1510607698473914429)', () => {
   const bet = { sport: 'MLB', description: 'MLB 4-leg hits parlay', legs: ABRAMS_LEGS.map(l => ({ ...l })) };
-  const r = validateParsedBet(bet, '', {});
+  const r = validateParsedBet(bet, '', { now: TEST_NOW });
   assert.notStrictEqual(r.reason, 'leg_sport_mismatch', `parlay wrongly dropped: ${r.reason} — ${r.issues && r.issues.join('; ')}`);
   assert.strictEqual(r.valid, true, `parlay should pass clean: ${JSON.stringify(r)}`);
 });
@@ -83,7 +88,7 @@ run('parlay declared MLB with a real "Rams -3.5" leg → dropped leg_sport_misma
     { description: 'Fernando Tatis Jr. - Over 0.5 Hits' },
     { description: 'Rams -3.5' },
   ] };
-  const r = validateParsedBet(bet, '', {});
+  const r = validateParsedBet(bet, '', { now: TEST_NOW });
   assert.strictEqual(r.reason, 'leg_sport_mismatch', JSON.stringify(r));
 });
 
