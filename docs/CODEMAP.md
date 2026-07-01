@@ -227,6 +227,7 @@ Detects allow-listed sportsbook book/shortlink URLs in a message body before it 
 | `parseBetSlipImage` | 1135 |
 | `evaluateTweet` | 1335 |
 | `validateParsedBet` | 1602 |
+| `opts.now` on `validateParsedBet` — injectable date for the offseason check, threaded to `isInSeason(sport, now)` / `resolveInSeasonForOffseason(desc, now)` (mirrors `evaluateSweep(bet, now)`); production callers omit it (wall clock); tests pin it so season-state expectations are hermetic | `isInSeason` 1560; offseason check 2049 |
 | LLM waterfall start | 241 (`callLLMResult` dispatch); `PROVIDERS` L18, `getProviders` L68, `callLLM` L333 |
 | `slice(0, 250)` → bet_type-aware cap (v451) | 428 (`descCap = isParlay ? 2000 : 250`), in `normalizeBet` L421 |
 | MAG7/sheet detector emit per-sport straights (v423) | 984 (prompt-level SHEET-vs-PARLAY rule in `GEMMA_SLIP_PROMPT` — model emits per-sport straights; no separate JS detector) |
