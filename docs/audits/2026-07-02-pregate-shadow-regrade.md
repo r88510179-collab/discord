@@ -225,3 +225,13 @@ they need a price-or-void decision alongside any correction pass (backlog item a
 Triage the 24 high-confidence disagreements first (1.79u net); treat the 47 LC rows as
 leads needing a human date check (batch-scraped tweets can reference games outside the ±1-day
 window). No writes until signed off.
+
+## Corrections applied
+
+**Pending operator run.** [`scripts/apply-pregate-corrections.js`](../../scripts/apply-pregate-corrections.js)
+embeds the 24 high-confidence rows above (23 flips + the `223d9043` no-selection VOID carve-out)
+plus a retro-archive of the 3 prior manual corrections (`3e5c01a0`, `3f78b923`, `b6065d701c`).
+The **operator** uploads it to the container and runs it per
+`docs/RUNBOOKS/db-interventions.md` — dry run first (readonly), then `--apply` (one
+transaction; archives to `bet_grade_history` as `shadow-regrade-2026-07-02`; refuses tailed
+rows). Dry-run + apply output and any refused/skipped rows land here after the run.
