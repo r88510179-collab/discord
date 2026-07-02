@@ -484,6 +484,7 @@ The single write-path normalizer for `bets.event_date`. `normalizeEventDateForSt
 | backfill-hold-embeds.js | v447 hold-embed backfill (PR #29) |
 | test-team-disambiguation.js | Regression harness for `normalizeDescription` bare-city injection (Bug 1) + shared-nickname sport disambiguation (Bug 2) (PR #36). Run: `node scripts/test-team-disambiguation.js` |
 | backfill-sport-casing.js | One-shot **idempotent** sport-casing backfill for `bets.sport` + `grading_audit.sport_out`. Reuses the shared `canonicalizeSport()`. Default = **dry-run** (opens DB `{readonly:true}`); `--apply` executes per-value UPDATEs in one transaction. Safe to re-run (2nd `--apply` = 0 rows). Run post-deploy. |
+| apply-pregate-corrections.js | **OPERATOR-run in-container** correction pass for the 24 high-confidence 2026-07-02 pre-gate shadow-regrade disagreements (23 flips + `223d9043` no-selection VOID carve-out) + retro-archive of 3 manual corrections. Self-contained (requires better-sqlite3 + `services/gradeOverride.js` from `APP_ROOT`, default `/app`; `DB_PATH` default `/data/bettracker.db`). Default = **dry-run** (`{readonly:true}`); `--apply` = ONE transaction reusing `applyGradeOverride` with bankroll deps neutered (writes `bets` + `bet_grade_history` ONLY). Skips already-corrected / `grader_version`-NOT-NULL rows; **refuses** tailed (`user_bets`) rows. Table shape pinned by `tests/apply-pregate-corrections.test.js` (runs in `npm run check`, DB-free). |
 
 ## Twitter ingest — Surface scraper → /mobile-ingest → F-12 dedup
 
