@@ -1,8 +1,9 @@
 const crypto = require('crypto');
-const { getPendingBets, gradeBet, updateBankroll, saveDailySnapshot, getBankroll, db, payoutTailers } = require('./database');
+const { getPendingBets, gradeBet, updateBankroll, saveDailySnapshot, getBankroll, findPendingBetsByCapperSubject, db, payoutTailers } = require('./database');
 const { gradeBetAI } = require('./ai');
 const { canonicalizeSport } = require('./sportNormalize');
 const bets = require('./bets');
+const pipelineEvents = require('./pipeline-events');
 const { buildEvidenceRecords, evaluateOffDate } = require('./evidenceRecords');
 const { normalizeEventDateForStorage } = require('./eventDate');
 const delay = ms => new Promise(res => setTimeout(res, ms));
@@ -1685,9 +1686,11 @@ function determineResult(bet, matchData) {
 // machine (grading_state='backoff' + grading_next_attempt_at ladder).
 // ── 7-Day Smart Sweeper policy (Phase 2b-2) ─────────────────
 // SWEEP_DAYS is the long-stale threshold: a pending non-prop bet older than
-// this with no score/confirmation is auto-graded LOSS by runAutoGrade. Value
-// unchanged (7) — hoisted to module scope so the policy helper below and the
-// existing log / grade-reason strings share one definition.
+// this with no score/confirmation is auto-swept to VOID by runAutoGrade
+// (DP-01/V1: a sweep is evidence-free, so it must never debit bankroll or
+// count as a loss — see sweepExpiredBet). Value unchanged (7) — hoisted to
+// module scope so the policy helper below and the existing log /
+// grade-reason strings share one definition.
 const SWEEP_DAYS = 7;
 const SWEEP_CUTOFF_MS = SWEEP_DAYS * 24 * 60 * 60 * 1000;
 
@@ -1758,6 +1761,80 @@ function evaluateSweep(bet, now = Date.now()) {
   const graceUntil = sweepGraceUntil(bet.id);
   if (graceUntil) return { eligible: false, reason: 'grace', graceUntil };
   return { eligible: true, reason: 'eligible' };
+}
+
+// ── Terminal telemetry for AUTONOMOUS grade writers (T6-01/V6) ──
+// One emission per autonomous terminal grade write (sweeper, graphic,
+// celebration): a pipeline_events GRADING_COMPLETE row keyed to the bet
+// (makes the registered-but-never-emitted stage real) + a grading_audit row
+// (provider_used carries the writer, final_evidence the reason summary).
+// Pre-fix these writers were terminal-silent — zero pipeline_events, zero
+// grading_audit — so every grader-health surface showed healthy for the whole
+// month DP-01 was coining evidence-free grades. Fire-and-forget on both
+// halves: telemetry failure must never break a grade write.
+function emitAutonomousGradeTelemetry({ bet, source, result, reason, payload = {} }) {
+  try {
+    bets.transitionTo({
+      betId: bet.id,
+      toStage: 'GRADING_COMPLETE',
+      eventType: 'STAGE_EXIT',
+      payload: { source, result, reason: String(reason || '').slice(0, 300), ...payload },
+    });
+  } catch (e) {
+    console.error(`[AutonomousGrade] pipeline_events write error: ${e.message}`);
+  }
+  try {
+    writeGradingAudit({
+      bet_id: bet.id,
+      sport_in: bet.sport || null,
+      sport_out: bet.sport || null,
+      is_parlay: ['parlay', 'sgp'].includes((bet.bet_type || '').toLowerCase()) ? 1 : 0,
+      provider_used: source,
+      final_status: String(result || '').toUpperCase(),
+      final_evidence: reason,
+    });
+  } catch (e) {
+    console.error(`[AutonomousGrade] grading_audit write error: ${e.message}`);
+  }
+}
+
+// ── Terminal write for one sweep-eligible bet (DP-01/V1) ──
+// VOID, not LOSS: a sweep is evidence-free — the grader found no score or
+// confirmation in SWEEP_DAYS — and "ungradeable" must never debit bankroll or
+// count in the record. 'void' is the codebase's neutral grade everywhere:
+// calcProfit(..., 'void') = 0, the stats/leaderboard SETTLED_BET set
+// (database.js) is win/loss/push only, and capperGradedBets /
+// capperRecentResults / capperSportBreakdown all filter
+// result IN ('win','loss','push') — a void row contributes to none of them.
+// No bankroll or snapshot write here for the same reason.
+// The sweep marker stays the grade_reason 'Auto-swept:' prefix — the exact
+// string on the historical swept rows — so old LOSS sweeps and new VOID
+// sweeps remain queryable with the same LIKE 'Auto-swept%'.
+function sweepExpiredBet(bet) {
+  const gate = canFinalizeBet({ db, betId: bet.id, requestedResult: 'void', source: 'sweeper_7d' });
+  if (!gate.ok) {
+    if (gate.reason === 'pending_legs') scheduleRecheckAfterDenial(bet.id, 'sweeper_pending_legs', 30);
+    return { swept: false, reason: gate.reason };
+  }
+
+  const sweepReason = `Auto-swept: pending >${SWEEP_DAYS} days with no score/confirmation`;
+  // requireGraderEligible: the 7-day sweeper works off a `pending` snapshot taken
+  // at the TOP of runAutoGrade, BEFORE the long await-heavy grader loop — the
+  // WIDEST revert window. evaluateSweep re-reads grading_state and skips 'done',
+  // but a revert sets grading_state='ready', so only this write-time gate stops a
+  // mid-cycle-reverted needs_review bet from being swept out of the review queue.
+  const sweepResult = gradeBet(bet.id, 'void', 0, 'VOID', sweepReason, true, { requireGraderEligible: true });
+  if (!sweepResult.graded) return { swept: false, reason: sweepResult.reason };
+
+  emitAutonomousGradeTelemetry({
+    bet,
+    source: 'sweeper_7d',
+    result: 'void',
+    reason: `sweep_timeout: ${sweepReason}`,
+    payload: { sweep_days: SWEEP_DAYS, bankroll_changed: false },
+  });
+  console.log(`[Sweeper] Auto-swept to VOID: "${bet.description?.slice(0, 40)}" (${SWEEP_DAYS} days expired, no evidence — bankroll and record untouched)`);
+  return { swept: true };
 }
 
 async function runAutoGrade(client) {
@@ -1893,140 +1970,180 @@ async function runAutoGrade(client) {
   for (const bet of expiredBets) {
     if (gradedBets.some(g => g.bet.id === bet.id)) continue;
 
-    const gate = canFinalizeBet({ db, betId: bet.id, requestedResult: 'loss', source: 'sweeper_7d' });
-    if (!gate.ok) {
-      if (gate.reason === 'pending_legs') scheduleRecheckAfterDenial(bet.id, 'sweeper_pending_legs', 30);
-      continue;
-    }
+    const sweep = sweepExpiredBet(bet);
+    if (!sweep.swept) continue;
 
-    const profitUnits = calcProfit(bet.odds || -110, bet.units || 1, 'loss');
-    // requireGraderEligible: the 7-day sweeper works off a `pending` snapshot taken
-    // at the TOP of runAutoGrade, BEFORE the long await-heavy grader loop — the
-    // WIDEST revert window. evaluateSweep re-reads grading_state and skips 'done',
-    // but a revert sets grading_state='ready', so only this write-time gate stops a
-    // mid-cycle-reverted needs_review bet from being swept to a FALSE loss.
-    const sweepResult = gradeBet(bet.id, 'loss', profitUnits, 'F', `Auto-swept: pending >${SWEEP_DAYS} days with no score/confirmation`, true, { requireGraderEligible: true });
-    if (!sweepResult.graded) continue;
-
-    if (bet.capper_id) {
-      const bankroll = getBankroll(bet.capper_id);
-      if (bankroll) {
-        const dollarAmount = profitUnits * parseFloat(bankroll.unit_size);
-        updateBankroll(bet.capper_id, dollarAmount);
-      }
-      saveDailySnapshot(bet.capper_id);
-    }
-
-    gradedBets.push({ bet, result: 'loss', profitUnits, grade: { grade: 'F', reason: `Expired (${SWEEP_DAYS}-day sweep)` } });
+    gradedBets.push({ bet, result: 'void', profitUnits: 0, grade: { grade: 'VOID', reason: `Expired (${SWEEP_DAYS}-day sweep)` } });
     gradedCount++;
-    console.log(`[Sweeper] Auto-graded as loss: "${bet.description?.slice(0, 40)}" (${SWEEP_DAYS} days expired)`);
   }
 
   console.log(`[AutoGrade] Graded ${gradedCount} bets total (${expiredBets.length} swept).`);
   return { graded: gradedCount, bets: gradedBets };
 }
 
-// ── Contextual Victory Grading ──────────────────────────────
-// Called by the message handler when AI detects a celebration.
-// Matches celebration subject to pending bets from the same capper.
-async function gradeFromCelebration(client, capperId, outcome, subjects) {
-  if (!capperId || !subjects || subjects.length === 0) return null;
+// ── Scoped recap/graphic/celebration auto-grade (T2-01/V2) ──
+// The ONLY entry point for recap-driven autonomous grading — the graphic
+// path (vision type:'result'), the winner/loser ticket recap loop, and the
+// celebration path all route here. Policy (adjudicated in PR #164):
+//   * Scope is MANDATORY — capper (same channel→capper resolution ingest
+//     uses; the caller passes the resolved capper id) AND recency (bet
+//     created_at within AUTO_GRADE_MATCH_WINDOW_DAYS).
+//   * Exactly ONE in-scope match → auto-grade permitted.
+//   * Zero matches, multiple matches, only stale (>window) same-capper
+//     matches, or an unresolvable capper → defer to human review: candidates
+//     are parked review_status='needs_review'; NO terminal grade, NO
+//     auto-confirm, NO bankroll write.
+// Global unscoped matching is impossible by construction:
+// findPendingBetsByCapperSubject binds capper_id, and the pre-fix global
+// matcher (database.js findPendingBetBySubject) is deleted.
+// confirmed ONLY (unchanged, PR #89/#94): review-queue bets stay invisible
+// to every auto-grade path until approveBet() confirms them.
+const AUTO_GRADE_MATCH_WINDOW_DAYS = 7;
 
-  // Find oldest pending bet from this capper that matches any subject.
-  // confirmed ONLY: review-queue bets must be invisible to every auto-grade
-  // path until approveBet() confirms them (services/database.js getPendingBets
-  // contract, PR #89) — this pool was the one bypass. A needs_review bet is
-  // typically parked BECAUSE its description/sport is wrong (revert-by-id,
-  // low-confidence staging), so a fuzzy word-overlap match here graded +
-  // bankrolled + auto-confirmed exactly the bets a human still needs to fix,
-  // and the pending_legs denial path below retry-cap-voided them into the
-  // result='void' + review_status='needs_review' shape behind the 2026-06-12
-  // bet 453e0952 false-success incident.
-  const pendingBets = db.prepare(
-    "SELECT * FROM bets WHERE capper_id = ? AND result = 'pending' AND review_status = 'confirmed' ORDER BY created_at ASC",
-  ).all(capperId);
-
-  if (pendingBets.length === 0) return null;
-
-  const result = outcome === 'win' ? 'win' : outcome === 'loss' ? 'loss' : null;
-  if (!result) return null;
-
-  for (const bet of pendingBets) {
-    // Defensive: skip if somehow already graded between query and now
-    if (bet.result && bet.result !== 'pending') continue;
-    const desc = (bet.description || '').toLowerCase();
-
-    for (const subject of subjects) {
-      const term = subject.toLowerCase().trim();
-      if (!term || term.length < 3) continue;
-
-      // Fuzzy match: subject words appear in description
-      const words = term.split(/\s+/);
-      const match = words.some(w => w.length >= 3 && desc.includes(w));
-
-      if (match) {
-        const gate = canFinalizeBet({ db, betId: bet.id, requestedResult: result, source: 'celebration' });
-        if (!gate.ok) {
-          if (gate.reason === 'pending_legs') {
-            scheduleRecheckAfterDenial(bet.id, `celebration_pending_legs_${gate.pendingLegs}`, 30);
-          }
-          continue;
-        }
-        const profitUnits = calcProfit(bet.odds || -110, bet.units || 1, result);
-        const gradeResult = gradeBet(bet.id, result, profitUnits, result === 'win' ? 'B' : 'D',
-          `Auto-graded from capper celebration: ${subject}`,
-          true); // allowAutoConfirm = true (recap is trusted)
-
-        if (!gradeResult.graded) {
-          console.log(`[ContextGrade] SKIP race-lost bet ${bet.id?.slice(0, 8)} (${gradeResult.reason})`);
-          continue;
-        }
-
-        if (bet.capper_id) {
-          const bankroll = getBankroll(bet.capper_id);
-          if (bankroll) {
-            const dollarAmount = profitUnits * parseFloat(bankroll.unit_size);
-            updateBankroll(bet.capper_id, dollarAmount);
-          }
-          saveDailySnapshot(bet.capper_id);
-        }
-
-        console.log(`[ContextGrade] ${result.toUpperCase()}: "${bet.description?.slice(0, 40)}" matched "${subject}"`);
-
-        // Send War Room notification
-        try {
-          const { sendStagingEmbed } = require('./warRoom');
-          const channelId = process.env.WAR_ROOM_CHANNEL_ID;
-          if (client && channelId) {
-            const { EmbedBuilder } = require('discord.js');
-            const { COLORS } = require('../utils/embeds');
-            const channel = await client.channels.fetch(channelId).catch(() => null);
-            if (channel) {
-              const color = result === 'win' ? COLORS.success : COLORS.danger;
-              const icon = result === 'win' ? '✅' : '❌';
-              const embed = new EmbedBuilder()
-                .setTitle(`${icon} Auto-Graded ${result.toUpperCase()}`)
-                .setColor(color)
-                .setDescription(`**${bet.description}**`)
-                .addFields(
-                  { name: 'Capper', value: bet.capper_name || 'Unknown', inline: true },
-                  { name: 'P/L', value: `${profitUnits >= 0 ? '+' : ''}${profitUnits.toFixed(2)}u`, inline: true },
-                  { name: 'Source', value: `Celebration matched: "${subject}"`, inline: false },
-                )
-                .setTimestamp();
-              await channel.send({ embeds: [embed] });
-            }
-          }
-        } catch (err) {
-          console.log(`[ContextGrade] War Room notification error: ${err.message}`);
-        }
-
-        return { bet, result, profitUnits };
-      }
+// Deferral half of the policy: park the candidate bets (ambiguous in-window
+// set, or the stale same-capper matches when nothing recent matched) and
+// record the decision. The capper's recap says SOMETHING settled, so leaving
+// candidates in the autonomous pools would let a later evidence-free pass
+// (sweeper) settle them without the recap context a human can use.
+// Telemetry: one GRADE_RECAP_MATCH_DEFERRED drop per parked candidate
+// (bets.recordDrop stamps bets.drop_reason + writes the pipeline row); a
+// zero-candidate deferral writes one betId-NULL pipeline row directly
+// (transitionTo requires a betId). Match counts ride the payload either way.
+function deferRecapMatchToReview({ source, result, subjects, inWindow, stale, why }) {
+  const payload = {
+    source,
+    outcome: result,
+    why,
+    match_count: inWindow.length,
+    stale_count: stale.length,
+    subjects: (subjects || []).slice(0, 5).map(s => String(s).slice(0, 60)),
+  };
+  // Park BOTH the ambiguous in-window set AND any stale same-capper matches:
+  // a stale candidate is definitionally past SWEEP_DAYS, so leaving it in the
+  // autonomous pool means the very next sweep cycle settles it evidence-free
+  // — the exact outcome parking exists to prevent. (When inWindow is 0 or 1
+  // there is nothing ambiguous to park from it: 0 → only stale, 1 → grades.)
+  const candidates = (inWindow.length > 1 ? inWindow : []).concat(stale);
+  for (const candidate of candidates) {
+    try {
+      db.prepare("UPDATE bets SET review_status = 'needs_review' WHERE id = ? AND result = 'pending' AND review_status = 'confirmed'")
+        .run(candidate.id);
+      bets.recordDrop({ betId: candidate.id, stage: 'GRADING_DROPPED', dropReason: 'GRADE_RECAP_MATCH_DEFERRED', payload });
+    } catch (e) {
+      console.error(`[AutoGrade] defer-to-review error (bet=${String(candidate.id).slice(0, 8)}): ${e.message}`);
     }
   }
+  if (candidates.length === 0) {
+    try {
+      pipelineEvents.writeRow({
+        ingestId: null, betId: null, sourceType: 'grading', sourceRef: null,
+        stage: 'GRADING_DROPPED', eventType: 'DROP', dropReason: 'GRADE_RECAP_MATCH_DEFERRED', payload,
+      });
+    } catch (e) {
+      console.error(`[AutoGrade] defer telemetry error: ${e.message}`);
+    }
+  }
+  console.log(`[AutoGrade] Deferred to review (${source}, ${why}): in_window=${inWindow.length} stale=${stale.length} parked=${candidates.length} subjects="${(subjects || []).join(', ').slice(0, 80)}"`);
+}
 
-  return null; // No matching bet found
+// War Room notification for a successful scoped auto-grade. Fire-and-forget.
+async function notifyAutoGrade(client, bet, result, profitUnits, source, matchedTerm) {
+  try {
+    const channelId = process.env.WAR_ROOM_CHANNEL_ID;
+    if (!client || !channelId) return;
+    const { EmbedBuilder } = require('discord.js');
+    const { COLORS } = require('../utils/embeds');
+    const channel = await client.channels.fetch(channelId).catch(() => null);
+    if (!channel) return;
+    const color = result === 'win' ? COLORS.success : COLORS.danger;
+    const icon = result === 'win' ? '✅' : '❌';
+    const sourceLabel = source === 'celebration' ? 'Celebration' : 'Graphic';
+    const embed = new EmbedBuilder()
+      .setTitle(`${icon} Auto-Graded ${result.toUpperCase()}`)
+      .setColor(color)
+      .setDescription(`**${bet.description}**`)
+      .addFields(
+        { name: 'Capper', value: bet.capper_name || 'Unknown', inline: true },
+        { name: 'P/L', value: `${profitUnits >= 0 ? '+' : ''}${profitUnits.toFixed(2)}u`, inline: true },
+        { name: 'Source', value: `${sourceLabel} matched: "${matchedTerm}"`, inline: false },
+      )
+      .setTimestamp();
+    await channel.send({ embeds: [embed] });
+  } catch (err) {
+    console.log(`[AutoGrade] War Room notification error: ${err.message}`);
+  }
+}
+
+async function autoGradeFromRecap(client, { capperId, outcome, subjects, source }) {
+  const result = outcome === 'win' ? 'win' : outcome === 'loss' ? 'loss' : null;
+  if (!result || !Array.isArray(subjects) || subjects.length === 0) return null;
+
+  if (!capperId) {
+    deferRecapMatchToReview({ source, result, subjects, inWindow: [], stale: [], why: 'capper_unresolved' });
+    return null;
+  }
+
+  const { inWindow, stale } = findPendingBetsByCapperSubject(capperId, subjects, AUTO_GRADE_MATCH_WINDOW_DAYS);
+
+  if (inWindow.length !== 1) {
+    const why = inWindow.length > 1 ? 'ambiguous_matches' : (stale.length > 0 ? 'stale_match' : 'no_match');
+    deferRecapMatchToReview({ source, result, subjects, inWindow, stale, why });
+    return null;
+  }
+
+  const bet = inWindow[0];
+  const matchedTerm = bet._matched_term || subjects[0];
+
+  const gate = canFinalizeBet({ db, betId: bet.id, requestedResult: result, source });
+  if (!gate.ok) {
+    if (gate.reason === 'pending_legs') {
+      scheduleRecheckAfterDenial(bet.id, `${source}_pending_legs_${gate.pendingLegs}`, 30);
+    }
+    return null;
+  }
+
+  const profitUnits = calcProfit(bet.odds || -110, bet.units || 1, result);
+  // allowAutoConfirm=false: the matcher pool is review_status='confirmed'
+  // only, so there is nothing to auto-confirm — false makes that structural.
+  // requireGraderEligible closes the query→write race with a mid-flight
+  // operator revert (same doctrine as the AI grader + sweeper writes).
+  const gradeResult = gradeBet(bet.id, result, profitUnits, result === 'win' ? 'B' : 'D',
+    `Auto-graded from capper ${source === 'celebration' ? 'celebration' : 'graphic'}: ${matchedTerm}`,
+    false, { requireGraderEligible: true });
+
+  if (!gradeResult.graded) {
+    console.log(`[AutoGrade] SKIP race-lost bet ${bet.id?.slice(0, 8)} (${gradeResult.reason})`);
+    return null;
+  }
+
+  if (bet.capper_id) {
+    const bankroll = getBankroll(bet.capper_id);
+    if (bankroll) {
+      const dollarAmount = profitUnits * parseFloat(bankroll.unit_size);
+      updateBankroll(bet.capper_id, dollarAmount);
+    }
+    saveDailySnapshot(bet.capper_id);
+  }
+
+  emitAutonomousGradeTelemetry({
+    bet,
+    source,
+    result,
+    reason: `matched "${matchedTerm}" — exactly 1 in-scope candidate (capper + ${AUTO_GRADE_MATCH_WINDOW_DAYS}d window)`,
+    payload: { match_count: 1, matched_term: String(matchedTerm).slice(0, 120), bankroll_changed: true },
+  });
+  console.log(`[AutoGrade] ${result.toUpperCase()} via ${source}: "${bet.description?.slice(0, 40)}" matched "${matchedTerm}"`);
+
+  await notifyAutoGrade(client, bet, result, profitUnits, source, matchedTerm);
+  return { bet, result, profitUnits };
+}
+
+// Celebration-path entry point (handlers/messageHandler.js recap loop +
+// tests/celebration-skips-needs-review-validation.js). Same signature as the
+// pre-T2-01 implementation; matching, policy, and telemetry live in
+// autoGradeFromRecap.
+async function gradeFromCelebration(client, capperId, outcome, subjects) {
+  return autoGradeFromRecap(client, { capperId, outcome, subjects, source: 'celebration' });
 }
 
 // ── Extract the subject (player or team name) from a bet description ──
@@ -3816,6 +3933,7 @@ async function postResultTicker(client, bet, status, tailerCount) {
 module.exports = {
   runAutoGrade,
   gradeFromCelebration,
+  autoGradeFromRecap,           // T2-01 — scoped recap/graphic auto-grade (sole recap-grade entry point)
   finalizeBetGrading,
   gradePropWithAI,
   writeBackResolvedEventDate,   // §9 grader event_date write-back (NULL-only, guarded)
@@ -3854,6 +3972,8 @@ module.exports = {
     resolveGate4Mode, applyGate4, buildGate4WouldFireMarker, gate4ToleranceFor, GATE4_TOLERANCE_DAYS, // Gate 4 — off-date evidence reject
     buildEvidenceRecords, evaluateOffDate,             // evidence-record layer (re-exported from services/evidenceRecords.js)
     evaluateSweep, sweepGraceUntil,                    // Phase 2b-2 — 7-day sweeper grace for recovered bets
+    sweepExpiredBet,                                   // DP-01/T6-01 — terminal sweep write (VOID + telemetry), unit-tested in tests/sweeper-void.test.js
+    emitAutonomousGradeTelemetry, AUTO_GRADE_MATCH_WINDOW_DAYS, // T6-01/T2-01 — terminal telemetry + recap match window
     nextAttemptForEvent,                               // Codex #3 — event-aware recheck planner (EVENT_AWARE_RECHECK)
   },
   // Exported for tests + observability — these are called from

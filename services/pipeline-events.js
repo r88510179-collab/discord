@@ -70,7 +70,7 @@ const DROP_REASONS = [
   // genuine extraction failure (VISION_EXTRACTION_FAILED). Vision succeeded here — the
   // content was simply not a new trackable bet. Mirror of twitter-handler.js's existing
   // vision-result drop (which already used PRE_FILTER_NO_BET_CONTENT + a filter tag).
-  'VISION_RESULT_RECAP',        // parsed.type === 'result' → routed to autoGradeBet, no new bet staged
+  'VISION_RESULT_RECAP',        // parsed.type === 'result' → routed to the scoped recap auto-grade (grading.js autoGradeFromRecap), no new bet staged
   'VISION_UNTRACKED_WIN',       // parsed.type === 'untracked_win' → War Room embed only, no new bet
   'VISION_TICKET_RECAP',        // parsed.ticket_status winner/loser → recap-grade matching, no new bet
   'TEXT_EXTRACTION_FAILED',     // parseBetText AI/parse failure (services/ai.js:1154,1173) — F-05 enum-drift registration
@@ -92,6 +92,7 @@ const DROP_REASONS = [
   'GRADE_BACKOFF_EXHAUSTED',
   'GRADE_AUTOVOID_UNSCOPED',         // gradePropWithAI auto-voided a bet whose sport is null/Unknown/outside SUPPORTED_SPORTS (after reclassify + canonicalizeSportForGrading). This terminal void returns the AUTO_VOIDED sentinel that runAutoGrade's if/else ignores, so pre-#110-followup it left an EMPTY trail (zero pipeline_events) — registered + emitted so each unsupported-sport void is queryable, DISTINCT from the no-data void (review_status='auto_void_no_searchable_data') and the retry-cap void (GRADE_BACKOFF_EXHAUSTED). Audit B7 follow-up 2026-06-16.
   'GRADE_MANUAL_REVIEW_UNMODELED',   // gradePropWithAI DIVERTED a bet to manual review (review_status='manual_review_unmodeled_sport') instead of auto-voiding, because its declared sport names a REAL intentionally-unmodeled league (KBO/KHL/NPB — declaresAnyUnmodeledLeague; ANY part of a compound). Unlike GRADE_AUTOVOID_UNSCOPED, NO grade/profit is written and result stays 'pending' for a human — the bet is sweeper-safe (getPendingBets excludes it in both paths). DISTINCT from the unsupported-sport void so "unmodeled-league bet awaiting human grading" is queryable apart from null/Unknown/garbage voids. 2026-06-16.
+  'GRADE_RECAP_MATCH_DEFERRED',      // T2-01: the scoped recap/graphic/celebration auto-grade matcher (services/grading.js autoGradeFromRecap) could NOT auto-grade — zero in-scope candidates, more than one in-scope candidate, a stale (>window) same-capper candidate, or an unresolvable capper — and deferred to human review instead of writing a terminal grade. Candidate bets (if any) are parked review_status='needs_review' and each parked bet gets one of these rows (betId set); a zero-candidate deferral writes a single betId-NULL row. payload: {source: 'graphic_auto'|'celebration', outcome, match_count, stale_count, subjects preview}. NOT a grade — no result/profit/bankroll write happens on this path.
   'GRADE_POST_GUARD_REJECTED',      // post-AI guard rejected verdict (hallucination, team/player mismatch, cross-sport)
   'GRADE_AI_NO_PROVIDERS',          // all AI providers failed or none configured
   'GRADE_PENDING_UNCLASSIFIED',     // wrapper catch-all — PENDING not matching known prefixes
