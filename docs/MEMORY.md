@@ -10,6 +10,7 @@ canonical detail.
 
 ## Shipped (newest first)
 
+- **2026-07-02 (ops, no PR)** — Season bump Beta→S2 + 73-row backfill per `docs/SEASON-RESET.md` §Executed. Manual voids: `3e5c01a0` (dollar-stake-as-units — "$5,000 on Spurs ML" ingested as units=5000, was win +4545.45u) and `3f78b923` (no-selection paywall tease, hallucinated-match grade, was win at the -110 default); both had `grader_version` NULL (pre-gate grades). Follow-up items: BACKLOG §"Open items — 2026-07-02".
 - **#156** — Spec §9 grader `event_date` write-back: when a deterministic adapter resolves a bet to a real game during grading, `writeBackResolvedEventDate` fills a still-NULL `bets.event_date` from the matched game's own authoritative date (mlb `gameDate` / nba+espn `event.date` / nhl `startTimeUTC` / soccer). NULL-only (`AND event_date IS NULL`), through the ingest `normalizeEventDateForStorage` guard, never alters the grade. Self-heals the NULL backlog incrementally; parlays are a deliberate no-op (synthetic leg id, bet-level scope §4).
 - **#130** — Guard `mlb.gradeMlbBet` to refuse mis-routed MLB player props (a non-run player stat in the description) before fetch — they fall to manual review instead of a false game-total WIN.
 - **#127** — Docs-only: bring CODEMAP + BACKLOG current for the already-merged #124 event-aware grading recheck (flag, planner, wiring sites, consts); no code change.
