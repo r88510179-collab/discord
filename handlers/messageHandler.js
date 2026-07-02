@@ -1,11 +1,11 @@
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const { parseBetText, evaluateTweet, validateParsedBet } = require('../services/ai');
-const { getOrCreateCapper, createBetWithLegs, isAuditMode, findPendingBetBySubject, gradeBet: gradeBetRecord, getBankroll, updateBankroll, db } = require('../services/database');
+const { getOrCreateCapper, createBetWithLegs, isAuditMode } = require('../services/database');
 const { betEmbed } = require('../utils/embeds');
 const { postPickTracked } = require('../services/dashboard');
 const { sendStagingEmbed } = require('../services/warRoom');
 const { extractTextFromImage } = require('../services/ocr');
-const { gradeFromCelebration, finalizeBetGrading, calcProfit, canFinalizeBet, scheduleRecheckAfterDenial } = require('../services/grading');
+const { gradeFromCelebration, autoGradeFromRecap, finalizeBetGrading, calcProfit } = require('../services/grading');
 const { recordStage, recordDrop, recordError, makeIngestId } = require('../services/pipeline-events');
 const ocrFirstWiring = require('../services/ocrFirstWiring');
 const linkReader = require('../services/linkReader');
@@ -663,66 +663,12 @@ async function handleSlipFeed(message) {
 }
 
 // ── Auto-Grade Engine ─────────────────────────────────────────
-// Finds a matching pending bet and grades it based on outcome.
-async function autoGradeBet(client, outcome, subjects) {
-  if (!subjects || subjects.length === 0) return null;
-
-  const bet = findPendingBetBySubject(subjects);
-  if (!bet) {
-    console.log(`[AutoGrade] No pending bet found for subjects: ${subjects.join(', ')}`);
-    return null;
-  }
-
-  // Calculate profit/loss
-  const result = outcome === 'win' ? 'win' : outcome === 'loss' ? 'loss' : null;
-  if (!result) return null;
-
-  const odds = bet.odds || -110;
-  const units = bet.units || 1;
-  let profitUnits = 0;
-
-  if (result === 'win') {
-    profitUnits = odds > 0 ? units * (odds / 100) : units * (100 / Math.abs(odds));
-  } else {
-    profitUnits = -units;
-  }
-
-  // P0 gateway — log decision, short-circuit on denial, do not increment attempts
-  const gate = canFinalizeBet({ db, betId: bet.id, requestedResult: result, source: 'graphic_auto' });
-  if (!gate.ok) {
-    if (gate.reason === 'pending_legs') {
-      scheduleRecheckAfterDenial(bet.id, `graphic_auto_pending_legs_${gate.pendingLegs}`, 30);
-    }
-    return null;
-  }
-
-  // Grade the bet (capper graphic = trusted path, auto-confirm)
-  const gradeResult = gradeBetRecord(bet.id, result, profitUnits, null, `Auto-graded from capper graphic`, true);
-  if (!gradeResult.graded) return null;
-
-  // Update bankroll
-  const bankroll = getBankroll(bet.capper_id);
-  if (bankroll) {
-    const unitSize = bankroll.unit_size || 25;
-    updateBankroll(bet.capper_id, profitUnits * unitSize);
-  }
-
-  // Notify War Room
-  const warRoomId = process.env.WAR_ROOM_CHANNEL_ID;
-  if (warRoomId && client) {
-    const channel = await client.channels.fetch(warRoomId).catch(() => null);
-    if (channel) {
-      const emoji = result === 'win' ? '✅' : '❌';
-      const sign = profitUnits >= 0 ? '+' : '';
-      await channel.send(
-        `🤖 **Auto-Graded:** ${emoji} **${bet.description}** marked as **${result.toUpperCase()}** (${sign}${profitUnits.toFixed(2)}u) — ${bet.capper_name || 'Unknown'}\n> Based on capper graphic`
-      );
-    }
-  }
-
-  console.log(`[AutoGrade] Graded bet ${bet.id.slice(0, 8)} as ${result} (${profitUnits.toFixed(2)}u)`);
-  return bet;
-}
+// The local autoGradeBet (global findPendingBetBySubject matcher — audit
+// T2-01/V2: LIKE across ALL cappers' confirmed pending bets, oldest-first,
+// then terminal grade + auto-confirm + bankroll) is deleted. Both former
+// call sites now route through services/grading.js autoGradeFromRecap,
+// which requires capper scope + a recency window and defers zero/ambiguous
+// matches to needs_review instead of grading.
 
 async function handleMessage(message, { isUpdate = false } = {}) {
   const ingestId = makeIngestId('discord', message.id);
@@ -1124,7 +1070,14 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
         // DROP first (before the side-effect) so the ingest reaches a terminal pipeline_event
         // instead of vanishing after EXTRACTED/PARSED. Logging only — the auto-grade is unchanged.
         dropAll('DROPPED', 'VISION_RESULT_RECAP', { parsedType: 'result', outcome: parsed.outcome || null, subjectCount: parsed.subject?.length || 0 });
-        await autoGradeBet(message.client, parsed.outcome, parsed.subject || []);
+        // T2-01: scoped to the posting channel's capper (same resolution that
+        // stages this channel's bets) — never a global cross-capper match.
+        await autoGradeFromRecap(message.client, {
+          capperId: capper.id,
+          outcome: parsed.outcome,
+          subjects: parsed.subject || [],
+          source: 'graphic_auto',
+        });
         return;
       }
 
@@ -1205,17 +1158,14 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
 
           if (searchTerms.length === 0) continue;
 
-          // Try capper-specific match first
+          // T2-01: capper-scoped only — the pre-fix global autoGradeBet
+          // fallback is gone. Zero/ambiguous matches defer to needs_review
+          // inside autoGradeFromRecap instead of terminal-grading.
           const contextResult = await gradeFromCelebration(message.client, capper.id, outcome, searchTerms);
           if (contextResult) {
             graded++;
             console.log(`[RecapSlip] Graded ${outcome.toUpperCase()}: "${searchTerms[0]?.slice(0, 40)}"`);
-            continue;
           }
-
-          // Fallback: global search
-          const globalResult = await autoGradeBet(message.client, outcome, searchTerms);
-          if (globalResult) graded++;
         }
 
         if (graded > 0) {

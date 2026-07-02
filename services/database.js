@@ -185,7 +185,10 @@ const stmts = {
   insertBet: db.prepare(`INSERT INTO bets (id, capper_id, sport, league, bet_type, description, odds, units, event_date, source, source_url, source_channel_id, source_message_id, fingerprint, raw_text, review_status, wager, payout, season, is_ladder, ladder_step)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   insertLeg: db.prepare('INSERT INTO parlay_legs (id, bet_id, description, odds) VALUES (?, ?, ?, ?)'),
-  gradeBet:  db.prepare('UPDATE bets SET result = ?, profit_units = ?, grade = ?, grade_reason = ?, graded_at = datetime(\'now\') WHERE id = ?'),
+  // stmts.gradeBet deleted (audit T1-08/V3): an ungated `UPDATE bets ... WHERE
+  // id = ?` with none of gradeBetRecord's pending/leg/review/provenance gates.
+  // Zero call sites at removal — every grade write must go through
+  // gradeBetRecord (exported as gradeBet) instead.
   getBet:    db.prepare('SELECT * FROM bets WHERE id = ?'),
   getBetByFingerprint: db.prepare('SELECT * FROM bets WHERE fingerprint = ?'),
 
@@ -250,12 +253,20 @@ const stmts = {
   // Prop bets
   getPropsByBetId: db.prepare('SELECT * FROM bet_props WHERE bet_id = ? ORDER BY created_at'),
 
-  // Auto-grading: find oldest pending bet matching a search term
-  findPendingBySubject: db.prepare(`SELECT b.*, c.display_name AS capper_name
+  // Recap/graphic/celebration auto-grading: capper-scoped candidate pool
+  // (T2-01). capper_id is a mandatory bind — the pre-fix statement matched
+  // `LIKE '%term%'` across ALL cappers' confirmed pending bets oldest-first,
+  // so a recap image could grade + bankroll another capper's bet. `_in_window`
+  // (created_at within the caller's recency window, bind like '-7 days')
+  // splits fresh candidates from stale ones so findPendingBetsByCapperSubject
+  // can apply the exactly-one-recent-match policy. No LIMIT: the policy needs
+  // the full in-scope match count, not just the oldest row.
+  findPendingByCapperSubject: db.prepare(`SELECT b.*, c.display_name AS capper_name,
+    (b.created_at >= datetime('now', ?)) AS _in_window
     FROM bets b LEFT JOIN cappers c ON b.capper_id = c.id
-    WHERE b.result = 'pending' AND b.review_status = 'confirmed'
+    WHERE b.capper_id = ? AND b.result = 'pending' AND b.review_status = 'confirmed'
     AND LOWER(b.description) LIKE LOWER(?)
-    ORDER BY b.created_at ASC LIMIT 1`),
+    ORDER BY b.created_at ASC`),
 
   // Dashboard summary
   dashboardSummary: db.prepare(`SELECT
@@ -1033,12 +1044,45 @@ function deleteBetById(betId) {
   return bet;
 }
 
-function findPendingBetBySubject(searchTerms) {
-  for (const term of searchTerms) {
-    const match = stmts.findPendingBySubject.get(`%${term}%`);
-    if (match) return match;
+// T2-01 scoped matcher for the recap/graphic/celebration auto-grade writers.
+// Scope is mandatory: capper (no capperId → no candidates, never a global
+// scan) AND recency (windowDays, default 7). Returns every distinct match,
+// split into { inWindow, stale } (both oldest-first), so the caller can apply
+// the exactly-one-recent-match policy — zero or multiple candidates must
+// defer to human review, not grade.
+//
+// Matching is WORD-tokenized, preserving the pre-fix celebration matcher's
+// recall: each term is split on whitespace and any ≥3-char word substring-
+// matches the description (the ticket-recap caller passes full OCR phrases
+// like "Los Angeles Lakers ML -110" that would never whole-phrase-match a
+// stored "Lakers ML"). Tokens shorter than 3 chars are skipped (single
+// letters/abbreviations substring-match everything). Pre-fix this fuzziness
+// could GRADE the first false-positive; under the exactly-one policy an
+// over-match only inflates the candidate count and defers to review, so
+// recall is safe to keep. Token count is capped as a query bound.
+function findPendingBetsByCapperSubject(capperId, searchTerms, windowDays = 7) {
+  const inWindow = [];
+  const stale = [];
+  if (!capperId) return { inWindow, stale };
+
+  const MAX_TOKENS = 32;
+  const tokens = new Set();
+  for (const term of (searchTerms || [])) {
+    for (const word of String(term || '').trim().split(/\s+/)) {
+      if (word.length >= 3 && tokens.size < MAX_TOKENS) tokens.add(word);
+    }
   }
-  return null;
+
+  const seen = new Set();
+  for (const token of tokens) {
+    for (const row of stmts.findPendingByCapperSubject.all(`-${windowDays} days`, capperId, `%${token}%`)) {
+      if (seen.has(row.id)) continue;
+      seen.add(row.id);
+      row._matched_term = token; // first token that matched — recorded in grade reason/telemetry
+      (row._in_window ? inWindow : stale).push(row);
+    }
+  }
+  return { inWindow, stale };
 }
 
 function getDashboardSummary() {
@@ -1224,7 +1268,7 @@ module.exports = {
   getTotalBankroll,
   getRiskedCapital,
   deleteAllPending,
-  findPendingBetBySubject,
+  findPendingBetsByCapperSubject,
   findCapperByName,
   getCapperAnalytics,
   upsertUserBet,
