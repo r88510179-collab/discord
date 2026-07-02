@@ -23,13 +23,23 @@ Reporting reset without deleting data. Bump `ACTIVE_SEASON`: new bets tag under 
 
 Reversible: set `ACTIVE_SEASON` back to the prior label to view the old season.
 
+## Executed — 2026-07-02 (Beta → S2, worked example)
+1. `fly secrets set ACTIVE_SEASON=S2 -a bettracker-discord-bot` — machine bounced; verified in-container `printenv ACTIVE_SEASON` → `S2`.
+2. **Backfill** (the bump was decided after the season boundary, so rows ingested since ET midnight Jul 1 had already stamped `Beta`):
+   ```sql
+   UPDATE bets SET season='S2'
+   WHERE created_at >= '2026-07-01 04:00:00' AND season='Beta';
+   ```
+   ET midnight = 04:00 UTC in July (EDT). → **73 rows**.
+3. Post-check `SELECT season, COUNT(*) FROM bets GROUP BY season;` → **Beta 3150 / S2 73**.
+
 ## Bypass sites — stay ALL-TIME after a bump (do NOT honor season)
 - `bot.js:322` — the all-time `SUM(b.profit_units)` line in the `!leaderboard` text command (command guard `bot.js:314`); `WHERE b.result IN ('win','loss','push')` only, no season.
 - `bot.js:467` — the all-time `SUM(b.profit_units)` line in the `!reset_season` podium (command guard `bot.js:462`, top-3, admin-only); no season.
-- `services/database.js:267` — the all-time `SUM(profit_units)` line inside the `dashboardSummary` prepared stmt (stmt head `:261`; x-ray + Surface Pro dashboard feed); filters `WHERE review_status = 'confirmed'` only (`:268`), no season.
+- `services/database.js:267` — the all-time `SUM(profit_units)` line inside the `dashboardSummary` prepared stmt (stmt head `:261`); filters `WHERE review_status = 'confirmed'` only (`:268`), no season. Sole render surface: the `/dashboard` slash command (`commands/dashboard.js` via `getDashboardSummary`).
 - `services/database.js:1079` — the all-time `totalProfit` reduce inside `getCapperAnalytics` (fn `:1071`); feeds off the `capperGradedBets` prepared stmt (`:279`), called `.all(capperId)` at `:1072` with **no season bind**.
 
-Open decision per site: season-gate it, or keep as an intentional all-time view. NOTE: `dashboardSummary` feeds the operator UI, so the dashboard shows all-time totals until gated.
+Open decision per site: season-gate it, or keep as an intentional all-time view. NOTE (corrected 2026-07-02): `dashboardSummary` does **NOT** feed the operator UI — its only render surface is the `/dashboard` slash command (traced in PR #161); the Surface Pro dashboard consumes the season-scoped `GET /api/admin/leaderboard` (Phase A, #161) instead — so this bypass does not leak all-time totals into the operator dashboard.
 
 ## NOT a bypass
 - `bot.js:720` — the daily recap (cron registered at `bot.js:711`) is a 24h rolling window (`WHERE graded_at >= datetime('now','-1 day')` at `:723`), season-independent by design. Distinct from the season-scoped `/recap` slash command (`commands/recap.js`).
