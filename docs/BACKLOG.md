@@ -176,6 +176,11 @@ A mid-flight operator revert (`revertBetToPending` → `needs_review`) could sti
 ### #119 (`ff8def6`) — `imageUrl` on `GET /api/admin/holds`
 `routes/admin.js` now surfaces `imageUrl: imageUrlFor(r.ingest_id)` per hold (`:156`, next to `messageUrl`), joined by `ingest_id` from the separate EXTRACTED-event row via `imageUrlStmt` (`:98-104`: tightened `LIKE '%"imageUrl"%'`, `LIMIT 10`, `ORDER BY created_at DESC, id DESC`) and `imageUrlFor` (`:105-119`, `.all()` + parse-newest-first, skip-keyless — defeats the shadowing case where a later keyless hold merely mentions "imageUrl"). Value returned unfiltered (only a non-empty-string check); null when absent. Auth/dedup/resolved-filter/response shape byte-unchanged. Read-only field add — inert until a dashboard renders it.
 
+### ✅ SHIPPED 2026-07-01 — Phase A dashboard read endpoints (bot side, #161)
+> Note: this Phase A bot-side work was not previously tracked as its own BACKLOG item — entry added at ship time.
+
+Three READ-ONLY GETs on `routes/admin.js` (adminAuth, SELECT-only, clamped params) so the dashboard can render season truth + pipeline/grader health without SSH: `GET /api/admin/leaderboard` (season-scoped `getLeaderboard`, envelope carries `season: ACTIVE_SEASON`), `GET /api/admin/drops` (`recordDrop` rows by `event_type='DROP'`, per-reason counts + rows, `?hours/?reason/?limit`), `GET /api/admin/grader-health` (pending backlog + 24h `grading_audit` attempts + 24h `search_backend_calls` by backend/status — both audit tables are epoch-MILLIS windows). Migration **031** adds `idx_pipeline_events_event_type_created` so the two `/drops` queries seek instead of full-table-scanning `pipeline_events` (better-sqlite3 is synchronous — an unindexed scan blocks the bot's event loop per dashboard refresh). The dashboard proxy forwards GETs generically, so no dashboard-repo change ships with this; the UI tabs are the follow-up (dashboard repo). Detail: docs/CODEMAP.md §routes. Tests: `tests/admin-read-endpoints.test.js`.
+
 ### Dashboard-side shipped features (reference-only — in the `zonetracker-dashboard` repo, NOT this repo)
 - **Release button** = bot #116 (`9cb28aa`) + dashboard #7/#8. Bot side (`POST /api/admin/bets/:id/approve`, `handleApproveRoute` at `routes/adminCommands.js:220`, registered `:249`, full-id exact match, reuses the atomic `approveBet`; 200/409/400/500) shipped here as #116; the actual button + proxy allowlist live dashboard-side (#7/#8).
 - **Slip thumbnail** = dashboard #9, consuming the #119 `imageUrl` field above. The render lives in the dashboard repo.
@@ -1536,6 +1541,10 @@ Discovery ran (prompts/relay-hold-link-recovery-discovery.md). Findings:
 **Decision: SHELVED.** Poor ROI vs. post-P0 roadmap — requires persistence rework just to *measure*, with a ~4/day ceiling mostly paywalled. NO parser, NO expander, NO persistence change at this time.
 
 **Cheap kill-check (manual, ~10 min):** open 5 of Dan's "Load here:" messages in Discord, see where the t.co link redirects (DubClub / Whop / free page) and whether it's gated. All paywalled → item is permanently dead. Some free → revisit, and the DubClub bridge is the likely lever, not a per-message expander.
+
+## Offseason drop-rate watch (2026-07-01)
+
+Offseason gate post-Jul-1: ~6-8 drops/day, mostly mock/promo NFL slips + misclassified content (e.g. soccer "Under 2.5" tagged NBA); NBA Summer League picks will drop when SL starts (~Jul 5-10) - accepted for now; futures remain a dropped category (pre-existing since Feb). Re-probe mid-July. Root-cause lane is sport classification, not the season window.
 
 ## Hold-queue hygiene (2026-06-12)
 - Dedupe holds per source message: relay edit/update path creates a second hold with a new ingest_id for the same messageUrl (observed: 2 Dan messages → 4 holds). Hold staging should upsert on source message id.
