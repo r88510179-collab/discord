@@ -244,6 +244,27 @@ Dashboard logs show repeated `POST /api/admin/holds/:id/recover` → `TimeoutErr
 ### Matchup-prefixed props — accented surnames still refuse → manual review (residual of #135)
 PR #135 (matchup-prefix reroute) grades the **recognized** matchup-prefixed legs (`"Team vs Team Over N PLAYER [-] STAT"` → strip prefix → `"PLAYER Over/Under N STAT"` → `gradeMlbPlayerProp`). The residual: a player whose **surname carries a diacritic the slip spells in ASCII** (`"José Ramírez"` box score vs a slip's `"Jose Ramirez"`) still safely **refuses** (`{resolved:false}`) because `findPlayerInBoxscore`'s last-name match is ASCII-exact, so it lands in manual review instead of grading. (Names that merely canonicalize to a team — `"Masyn Winn"` → `'as'` → Athletics — are NOT a residual: the box-score lookup keys off the surname, so the reroute resolves them fine; that was only a problem for the old team-total misroute.) **No corruption risk** — refuse is safe (the reroute can only return a player result, a DNP VOID, or refuse, never a game total), so this is grade-coverage, not a P&L bug. **Fix:** accent-fold the parsed surname (and/or reconcile against the MLB Stats API roster) before the box-score match — a normalization layer larger than #135's scope fence.
 
+## Open items — 2026-07-02 (leaderboard-integrity probe + season bump ops)
+
+Surfaced during the 2026-07-02 leaderboard probe (the same session that executed the Beta→S2 season bump — see `docs/SEASON-RESET.md` §Executed). DB facts below were operator-verified live that day; cite as "2026-07-02 probe".
+
+### P1 — Units intake sanity guard + dollar-stake parse
+**Evidence (2026-07-02 probe):** bet `3e5c01a0` (twitter_text, bookitwithtrent) raw *"I have $5,000 on Spurs moneyline"* ingested `units=5000` with empty odds → graded win **+4545.45u** at the -110 default → single-handedly produced the **+4622u / 88.5% ROI** leaderboard top row. Sibling `02bacfc4` (*"$2500 on Avs ML"*) → `units=2500` (void, no damage). **`flagAbnormalRoi` (`services/database.js:798`) cannot catch this class:** inflated units inflate numerator and denominator together, so ROI stays plausible and the >500% monitoring line never fires. Both rows (`3e5c01a0`, `02bacfc4`) manually voided 2026-07-02. Fix lanes:
+- **(a) parser** — `"$X on <pick>"` treats X as **dollars**, not units: hold for review (`units` null) or convert via `bankrolls.unit_size` when known.
+- **(b) intake tripwire** — `units > UNITS_SANITY_MAX` (suggest 25) → `needs_review` + one #admin-log line; tri-state env `off|shadow|enforce`, shadow first (house pattern).
+
+### P1 — No-selection gradeability guard + pre-gate hallucinated-grade audit
+**Evidence (2026-07-02 probe):** bet `3f78b923` raw *"It's official. I have 50 units pending on an NBA Champion. Find out here."* (paywalled tease — **no selection stated**) graded WIN with grade_reason *"AI Grader: Final score Lakers 118 Nuggets 112 per ESPN"* — a **hallucinated match** — and `grader_version` NULL, i.e. graded before the Gate 2/3 provenance + quote-binding era. Manually voided 2026-07-02. Three items:
+- **(a) intake** — tease/no-selection patterns ("find out here", "link in bio", futures naming no side) are NOT covered by `FORBIDDEN_PLACEHOLDERS` (`services/ai.js:1570` — 'missing legs'/'tbd'/'placeholder'/'no picks found'/…); extend so these **hold** instead of saving.
+- **(b) audit** — one read-only probe counting + sampling other `grader_version`-NULL **settled** bets whose `grade_reason` cites entities absent from the description (the pre-gate hallucination class); **report before any regrade**.
+- **(c) confirm** — Gate 3 enforce blocks this class today (no selection → no bindable quote → forced PENDING); one synthetic test.
+
+### P2 — zonetracker-dubclub: login-wall alert dedupe + backoff (satellite repo, NOT this repo)
+**Evidence (2026-07-02 probe):** UIDs 11484/11485/11499 re-alerted admin on **every sweep for 26h+** (Jul 1 13:29 → Jul 2 10:02 ET) before self-recovering ~10:03 Jul 2. The wall is intermittent, so **retrying is correct** (HRB lesson: flaky-but-working, do not dismiss); the alert spam is the bug. **Fix:** alert once per UID (persisted dedupe), silent retries with backoff, optional park-after-N-walls with a daily digest. **Secondary:** perpetually-skipped unseen mail (payment receipt, trial notice, capper-not-in-config) is re-scanned every sweep — add an in-process skip cache per UID+reason. Do **NOT** mark not-in-config mail Seen in code: leaving it unseen is what lets a later config addition pick it up.
+
+### P3 — `/api/admin/leaderboard` optional `?season=` param
+Optional `?season=` on the #161 endpoint (exact match, parameterized, default `ACTIVE_SEASON`) — post-bump the Beta era is invisible in the dashboard; cheap historical view.
+
 ## ✅ SHIPPED - Weekend 1 (Apr 20)
 
 ### MLB StatsAPI Resolver — live in production
