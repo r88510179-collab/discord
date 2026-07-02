@@ -67,10 +67,10 @@ function throws(fn) { try { fn(); return false; } catch (e) { return true; } }
     CORRECTIONS.every(r => evPat.test(r.evidence_url)));
   check('4: only the void row cites the audit doc instead of a score source',
     CORRECTIONS.every(r => r.new_result === 'void' || /statsapi|espn|nhle/.test(r.evidence_url)));
-  // Audit: high-confidence subset nets 1.79u with the shadow LOSS on 223d9043;
-  // the void carve-out (0 instead of -1) shifts it by +0.91 → +2.80u.
+  // Audit: high-confidence subset nets 1.79u (unrounded 1.80) with the shadow
+  // LOSS on 223d9043; the void carve-out (0 instead of -1) shifts it +1.00 → +2.80u.
   const net = CORRECTIONS.reduce((s, r) => s + (r.new_pu - r.expect_stored_pu), 0);
-  check(`4: net pu delta vs stored is +2.80u (audit 1.79u + 0.91 void shift) — got ${round2(net)}`, near(net, 2.80));
+  check(`4: net pu delta vs stored is +2.80u (audit 1.80u + 1.00 void shift) — got ${round2(net)}`, near(net, 2.80));
 }
 
 // ── 5. Payout-math mirror is self-consistent with new_pu ────
