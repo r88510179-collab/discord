@@ -96,6 +96,21 @@ run('auth: adminAuth layer precedes the /leaderboard, /drops, /grader-health rou
   }
 });
 
+// The routes must also be registered BEFORE the catch-all 404 router.use —
+// a route appended after it is dead in prod (the catch-all answers first)
+// while handler-introspection tests stay green. The first non-route,
+// non-adminAuth layer is the catch-all; it must be the LAST layer, after
+// every route.
+run('routes: all route layers precede the catch-all 404 (which is the final layer)', () => {
+  const catchAllIdx = router.stack.findIndex(l => !l.route && l.handle !== adminAuth);
+  assert.ok(catchAllIdx >= 0, 'catch-all layer present');
+  assert.strictEqual(catchAllIdx, router.stack.length - 1, 'catch-all is the final layer');
+  for (const p of ['/leaderboard', '/drops', '/grader-health']) {
+    const routeIdx = router.stack.findIndex(l => l.route && l.route.path === p);
+    assert.ok(routeIdx < catchAllIdx, `${p} registered before the catch-all`);
+  }
+});
+
 // Behavioral: the fail-closed contract itself (503 no-secret / 401 no-header /
 // 403 mismatch / next() on match), driven directly like the write-route tests.
 run('auth: no ADMIN_API_SECRET → 503 fail-closed, handler never reached', () => {
@@ -135,13 +150,35 @@ run('auth: missing header → 401; wrong token → 403; right token → next()',
   }
 });
 
+// ═══ /grader-health on a pristine DB ═════════════════════════
+// Zero pending bets is the system's SUCCESS state — the envelope must stay
+// well-formed through the REAL handler (nulls surfaced, empty arrays, no
+// throw), not just at the SQL layer. Runs BEFORE any seeding.
+run('grader-health: empty DB → well-formed envelope through the real handler', () => {
+  const res = call(graderHealthHandler, {});
+  assert.strictEqual(res._code, 200);
+  assert.strictEqual(res._json.pending.total, 0);
+  assert.strictEqual(res._json.pending.oldestCreatedAt, null, 'MIN() over zero rows surfaces as null, untouched');
+  assert.deepStrictEqual(res._json.pending.byReviewStatus, []);
+  assert.strictEqual(res._json.grading24h.attempts, 0);
+  assert.strictEqual(res._json.grading24h.distinctBets, 0);
+  assert.deepStrictEqual(res._json.grading24h.byProvider, []);
+  assert.deepStrictEqual(res._json.grading24h.byFinalStatus, []);
+  assert.deepStrictEqual(res._json.backends24h, []);
+});
+
 // ═══ /leaderboard ════════════════════════════════════════════
-// Seed: capper A settles 2 wins of +1.0u each (more bets, less profit); capper
-// B settles 1 win of +5.0u (fewer bets, more profit). Sort order between the
-// two flips with the sort key, which pins that ?sort= actually reaches
-// getLeaderboard. 53 filler cappers (1 pending bet each — pending still counts
-// toward total_bets, and HAVING COUNT(b.id)>0 admits them) make the limit
-// clamp observable: 55 total cappers, so limit=9999 must return exactly 50.
+// Seed: capper A settles 2 wins of +1.0u each and holds 1 pending (3 bets,
+// +2.0u); capper B settles 1 win of +5.0u and holds 1 pending (2 bets,
+// +5.0u). Sort order between the two flips with the sort key, which pins
+// that ?sort= actually reaches getLeaderboard. 53 filler cappers (1 pending
+// bet each — pending still counts toward total_bets, and HAVING
+// COUNT(b.id)>0 admits them) make the limit clamp observable: 55 total
+// cappers, so limit=9999 must return exactly 50. A (3 bets) and B (2 bets)
+// strictly out-rank every 1-bet filler on total_bets, so both ALWAYS land
+// inside a clamped top-50 — SQLite's order among tied fillers is
+// unspecified, and A/B must never ride on it (a 1-bet B intermittently fell
+// out of the top 50).
 function seedBet(capperId, description, extra = {}) {
   const bet = database.createBet({
     capper_id: capperId,
@@ -165,7 +202,9 @@ const capperA = database.getOrCreateCapper('lb_capper_a', 'LB Capper A', null).i
 const capperB = database.getOrCreateCapper('lb_capper_b', 'LB Capper B', null).id;
 settle(seedBet(capperA, 'A pick one').id, 'win', 1.0);
 settle(seedBet(capperA, 'A pick two').id, 'win', 1.0);
+seedBet(capperA, 'A pick three pending'); // 3rd bet — keeps A above every 1-bet filler
 settle(seedBet(capperB, 'B pick one').id, 'win', 5.0);
+seedBet(capperB, 'B pick two pending');   // 2nd bet — keeps B above every 1-bet filler
 for (let i = 0; i < 53; i++) {
   const cid = database.getOrCreateCapper(`lb_filler_${i}`, `LB Filler ${i}`, null).id;
   seedBet(cid, `Filler pick ${i}`); // stays pending — still counts toward total_bets
@@ -194,11 +233,25 @@ run('leaderboard: sort=total_profit_units ranks B (5u) above A (2u)', () => {
   assert.ok(names.indexOf('LB Capper B') < names.indexOf('LB Capper A'), 'B before A by profit');
 });
 
-run('leaderboard: sort=total_bets ranks A (2 bets) above B (1 bet)', () => {
+run('leaderboard: sort=total_bets ranks A (3 bets) above B (2 bets)', () => {
   const res = call(leaderboardHandler, { sort: 'total_bets', limit: '55' });
   assert.strictEqual(res._json.sort, 'total_bets', 'effective sort echoed');
   const names = res._json.cappers.map(c => c.display_name);
-  assert.ok(names.indexOf('LB Capper A') < names.indexOf('LB Capper B'), 'A before B by volume');
+  assert.strictEqual(names[0], 'LB Capper A', 'A first by volume (3 bets)');
+  assert.strictEqual(names[1], 'LB Capper B', 'B second by volume (2 bets)');
+});
+
+run('leaderboard: sort=roi_pct is whitelisted and ranks B (500%) above A (100%)', () => {
+  const res = call(leaderboardHandler, { sort: 'roi_pct', limit: '55' });
+  assert.strictEqual(res._json.sort, 'roi_pct', 'roi_pct accepted by the whitelist, not fallback');
+  const names = res._json.cappers.map(c => c.display_name);
+  assert.ok(names.indexOf('LB Capper B') < names.indexOf('LB Capper A'), 'B before A by ROI');
+});
+
+run('leaderboard: sort=win_pct is whitelisted (echoed, not fallback)', () => {
+  const res = call(leaderboardHandler, { sort: 'win_pct' });
+  assert.strictEqual(res._code, 200);
+  assert.strictEqual(res._json.sort, 'win_pct', 'win_pct accepted by the whitelist, not fallback');
 });
 
 run('leaderboard: non-whitelisted sort falls back to total_profit_units (mirrors getLeaderboard)', () => {
@@ -233,6 +286,10 @@ seedDrop({ ingestId: 'dr-1', reason: 'BOUNCER_REJECTED', createdAt: NOW_SEC - 10
 seedDrop({ ingestId: 'dr-2', reason: 'BOUNCER_REJECTED', createdAt: NOW_SEC - 200 });
 seedDrop({ ingestId: 'dr-3', reason: 'BOUNCER_REJECTED', createdAt: NOW_SEC - 300 });
 seedDrop({ ingestId: 'dr-4', reason: 'GUARD5_INSUFFICIENT_SIGNALS', createdAt: NOW_SEC - 400 });
+// Production reality: grading.js records DROPs with pass-through stages like
+// GRADING_AI (services/grading.js:3185 via bets.recordDrop) — a stage-list
+// filter (stage IN ('DROPPED','GRADING_DROPPED')) would silently omit them.
+seedDrop({ ingestId: 'dr-gai', stage: 'GRADING_AI', reason: 'GRADE_AI_HALLUCINATION', createdAt: NOW_SEC - 450 });
 const gradingDropId = seedDrop({ ingestId: 'dr-grading', stage: 'GRADING_DROPPED', reason: 'GRADE_EXCEPTION', createdAt: NOW_SEC - 500 });
 seedDrop({ ingestId: 'dr-2h', reason: 'AGE_GATE', createdAt: NOW_SEC - 2 * 3600 });   // outside a 1h window
 seedDrop({ ingestId: 'dr-30h', reason: 'AGE_GATE', createdAt: NOW_SEC - 30 * 3600 }); // outside 24h, inside 168h
@@ -246,7 +303,7 @@ run('drops: 200 + envelope { since, counts, drops }; default 24h window; non-DRO
   assert.ok(Number.isInteger(res._json.since), 'since is epoch seconds');
   assert.ok(Math.abs(res._json.since - (NOW_SEC - 24 * 3600)) < 60, 'since ≈ now-24h');
   const ingests = res._json.drops.map(d => d.ingest_id);
-  assert.deepStrictEqual(ingests, ['dr-1', 'dr-2', 'dr-3', 'dr-4', 'dr-grading', 'dr-2h'], 'in-window DROPs newest first; 30h row + hold/extracted rows excluded');
+  assert.deepStrictEqual(ingests, ['dr-1', 'dr-2', 'dr-3', 'dr-4', 'dr-gai', 'dr-grading', 'dr-2h'], 'in-window DROPs newest first; 30h row + hold/extracted rows excluded');
 });
 
 run('drops: rows carry the documented columns; payload stays raw TEXT', () => {
@@ -259,18 +316,21 @@ run('drops: rows carry the documented columns; payload stays raw TEXT', () => {
   assert.strictEqual(row.created_at, NOW_SEC - 100, 'created_at verbatim epoch seconds');
 });
 
-run('drops: GRADING_DROPPED recordDrop rows are included (filter is event_type, not stage)', () => {
+run('drops: GRADING_DROPPED and GRADING_AI recordDrop rows are included (filter is event_type, not a stage list)', () => {
   const res = call(dropsHandler, {});
   const row = res._json.drops.find(d => d.ingest_id === 'dr-grading');
   assert.ok(row, 'grading-side drop present');
   assert.strictEqual(row.id, gradingDropId);
+  const gai = res._json.drops.find(d => d.ingest_id === 'dr-gai');
+  assert.ok(gai, 'pass-through-stage (GRADING_AI) drop present — a stage-list filter would omit it');
+  assert.strictEqual(gai.drop_reason, 'GRADE_AI_HALLUCINATION');
 });
 
 run('drops: counts grouped by reason, descending, window-wide', () => {
   const res = call(dropsHandler, {});
   assert.deepStrictEqual(res._json.counts[0], { drop_reason: 'BOUNCER_REJECTED', n: 3 }, 'top count first');
   const reasons = Object.fromEntries(res._json.counts.map(c => [c.drop_reason, c.n]));
-  assert.deepStrictEqual(reasons, { BOUNCER_REJECTED: 3, GUARD5_INSUFFICIENT_SIGNALS: 1, GRADE_EXCEPTION: 1, AGE_GATE: 1 });
+  assert.deepStrictEqual(reasons, { BOUNCER_REJECTED: 3, GUARD5_INSUFFICIENT_SIGNALS: 1, GRADE_AI_HALLUCINATION: 1, GRADE_EXCEPTION: 1, AGE_GATE: 1 });
 });
 
 run('drops: hours=0 clamps to 1 → the 2h-old row leaves the window', () => {
@@ -311,7 +371,12 @@ run('drops: limit caps rows but not counts', () => {
   const res = call(dropsHandler, { limit: '1' });
   assert.strictEqual(res._json.drops.length, 1, 'row cap applied');
   assert.strictEqual(res._json.drops[0].ingest_id, 'dr-1', 'newest row survives the cap');
-  assert.strictEqual(res._json.counts.reduce((s, c) => s + c.n, 0), 6, 'counts stay window-wide');
+  assert.strictEqual(res._json.counts.reduce((s, c) => s + c.n, 0), 7, 'counts stay window-wide');
+});
+
+run('drops: limit lower clamp — 0 and negatives clamp to 1 row (never LIMIT 0 / LIMIT -1=unlimited)', () => {
+  assert.strictEqual(call(dropsHandler, { limit: '0' })._json.drops.length, 1, 'limit=0 → 1');
+  assert.strictEqual(call(dropsHandler, { limit: '-5' })._json.drops.length, 1, 'negative limit → 1');
 });
 
 run('drops: limit=9999 clamps to 200', () => {
@@ -336,8 +401,12 @@ seedBet(ghCapper, 'GH recent pending');
 seedBet(ghCapper, 'GH needs review pending', { review_status: 'needs_review' });
 settle(seedBet(ghCapper, 'GH settled win').id, 'win', 1.0);
 
-// grading_audit.timestamp is epoch MILLIS: 3 in-window attempts across 2 bets
-// + 1 out-of-window attempt 25h old.
+// grading_audit.timestamp is epoch MILLIS: 4 in-window attempts across 3 bets
+// + 1 out-of-window attempt 25h old. The fixtures pin BOTH properties of the
+// window: unit direction (a seconds cutoff on the millis column admits the
+// 25h row; a TEXT datetime comparand admits nothing) AND window LENGTH (the
+// 23h row must be IN — a `Date.now() - 86400` cutoff, the classic forgotten
+// *1000, is an 86-second window and would exclude it).
 const NOW_MS = Date.now();
 const insertAudit = db.prepare(`
   INSERT INTO grading_audit (id, bet_id, attempt_num, timestamp, provider_used, final_status)
@@ -346,10 +415,11 @@ const insertAudit = db.prepare(`
 insertAudit.run('ga-1', 'bet-aaa', 1, NOW_MS - 1000, 'cerebras', 'WIN');
 insertAudit.run('ga-2', 'bet-aaa', 2, NOW_MS - 2000, 'cerebras', 'PENDING');
 insertAudit.run('ga-3', 'bet-bbb', 1, NOW_MS - 3000, 'gemini', 'WIN');
+insertAudit.run('ga-23h', 'bet-ccc', 1, NOW_MS - 23 * 3600 * 1000, 'cerebras', 'WIN');
 insertAudit.run('ga-old', 'bet-old', 1, NOW_MS - 25 * 3600 * 1000, 'stale_provider', 'LOSS');
 
 // search_backend_calls.ts is also epoch MILLIS (Date.now() in
-// recordBackendCall): 4 in-window calls + 1 out-of-window.
+// recordBackendCall): 5 in-window calls (one 23h old) + 1 out-of-window.
 const insertCall = db.prepare(`
   INSERT INTO search_backend_calls (ts, backend, status, http_code, bet_id, latency_ms, hits)
   VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -358,6 +428,7 @@ insertCall.run(NOW_MS - 1000, 'brave', 'ok', 200, 'bet-aaa', 120, 5);
 insertCall.run(NOW_MS - 2000, 'brave', 'ok', 200, 'bet-bbb', 130, 3);
 insertCall.run(NOW_MS - 3000, 'brave', 'parse_empty', 200, 'bet-aaa', 90, 0);
 insertCall.run(NOW_MS - 4000, 'ddg', 'circuit_open', null, null, null, null);
+insertCall.run(NOW_MS - 23 * 3600 * 1000, 'brave', 'ok', 200, 'bet-ccc', 110, 2);
 insertCall.run(NOW_MS - 25 * 3600 * 1000, 'brave', 'ok', 200, 'bet-old', 100, 4);
 
 run('grader-health: 200 + envelope { pending, grading24h, backends24h }', () => {
@@ -368,43 +439,33 @@ run('grader-health: 200 + envelope { pending, grading24h, backends24h }', () => 
 
 run('grader-health: pending totals, oldest created_at, by review_status; settled bets excluded', () => {
   const { pending } = call(graderHealthHandler, {})._json;
-  // 53 pending filler bets + 3 GH pending bets = 56 pending; A/B/GH-settled excluded.
-  assert.strictEqual(pending.total, 56, 'pending total counts result=pending only');
+  // 53 filler + A-pending + B-pending + 3 GH pending = 58; A/B/GH-settled excluded.
+  assert.strictEqual(pending.total, 58, 'pending total counts result=pending only');
   assert.strictEqual(pending.oldestCreatedAt, '2020-01-01T00:00:00.000Z', 'oldest pending created_at');
   const byStatus = Object.fromEntries(pending.byReviewStatus.map(r => [r.review_status, r.n]));
   assert.strictEqual(byStatus.needs_review, 1, 'needs_review bucket');
-  assert.strictEqual(byStatus.confirmed, 55, 'confirmed bucket');
+  assert.strictEqual(byStatus.confirmed, 57, 'confirmed bucket');
 });
 
-run('grader-health: grading24h uses the MILLIS window — 25h-old attempt excluded', () => {
+run('grader-health: grading24h window is 24 HOURS of MILLIS — 23h row in, 25h row out', () => {
   const { grading24h } = call(graderHealthHandler, {})._json;
-  assert.strictEqual(grading24h.attempts, 3, '3 in-window attempts (a seconds-unit cutoff would admit 4)');
-  assert.strictEqual(grading24h.distinctBets, 2, 'bet-aaa + bet-bbb');
+  assert.strictEqual(grading24h.attempts, 4, '4 in-window attempts incl. the 23h row (seconds cutoff admits 5; 86-second window admits 3)');
+  assert.strictEqual(grading24h.distinctBets, 3, 'bet-aaa + bet-bbb + bet-ccc');
   const byProvider = Object.fromEntries(grading24h.byProvider.map(r => [r.provider_used, r.n]));
-  assert.deepStrictEqual(byProvider, { cerebras: 2, gemini: 1 }, 'stale_provider excluded');
+  assert.deepStrictEqual(byProvider, { cerebras: 3, gemini: 1 }, 'stale_provider excluded');
   const byStatus = Object.fromEntries(grading24h.byFinalStatus.map(r => [r.final_status, r.n]));
-  assert.deepStrictEqual(byStatus, { WIN: 2, PENDING: 1 }, 'LOSS rode only the out-of-window row');
+  assert.deepStrictEqual(byStatus, { WIN: 3, PENDING: 1 }, 'LOSS rode only the out-of-window row');
 });
 
-run('grader-health: backends24h groups backend+status over the MILLIS ts window', () => {
+run('grader-health: backends24h groups backend+status over the same 24h MILLIS window', () => {
   const { backends24h } = call(graderHealthHandler, {})._json;
   const key = r => `${r.backend}/${r.status}`;
   const grouped = Object.fromEntries(backends24h.map(r => [key(r), r.n]));
   assert.deepStrictEqual(grouped, {
-    'brave/ok': 2,            // 3rd brave/ok is 25h old — excluded
+    'brave/ok': 3,            // incl. the 23h row; the 25h brave/ok is excluded
     'brave/parse_empty': 1,
     'ddg/circuit_open': 1,
   });
-});
-
-run('grader-health: empty-DB shape stays well-formed (fresh tables, no rows)', () => {
-  // Run against a throwaway connection? Not needed — assert the null contract
-  // directly: MIN() over zero rows is NULL, COUNT is 0. Simulate by querying
-  // with an impossible filter through the real handler is not possible, so pin
-  // the SQL contract the handler relies on instead.
-  const row = db.prepare("SELECT COUNT(*) AS total, MIN(created_at) AS oldest FROM bets WHERE result = 'no_such_result'").get();
-  assert.strictEqual(row.total, 0);
-  assert.strictEqual(row.oldest, null);
 });
 
 // ═══ 500 path: db unavailable → clean Internal error ═════════

@@ -416,11 +416,17 @@ router.get('/leaderboard', (req, res) => {
 });
 
 // ── GET /drops ────────────────────────────────────────────────
-// Recent pipeline drops — the recordDrop() rows (event_type='DROP'; stage
-// 'DROPPED' or 'GRADING_DROPPED'), newest first, plus a per-reason count
-// breakdown over the same window. event_type='DROP' (not stage) is the filter
-// so grading-side drops are included while MANUAL_REVIEW_HOLD rows (which can
-// also carry a drop_reason) are not.
+// Recent pipeline drops — the recordDrop() rows (event_type='DROP'), newest
+// first, plus a per-reason count breakdown over the same window.
+// event_type='DROP' (not stage) is the filter because drop rows ride MANY
+// stages: 'DROPPED' (ingest), 'GRADING_DROPPED' (bets.js recordDrop default),
+// and pass-through stages like 'GRADING_AI' (services/grading.js) — a
+// stage-list filter would silently omit those. Non-drop rows are excluded by
+// construction: e.g. MANUAL_REVIEW_HOLD rows are event_type='STAGE_ENTER' and
+// their hold reason rides the payload JSON (their drop_reason COLUMN is
+// always NULL — recordStage hardcodes it). Both queries are served by
+// idx_pipeline_events_event_type_created (migration 031); without it they
+// are full-table scans, synchronous on the bot's event loop.
 //
 // pipeline_events.created_at is INTEGER epoch SECONDS (migration 018) — the
 // cutoff is computed in JS and bound as a param so the comparison stays
