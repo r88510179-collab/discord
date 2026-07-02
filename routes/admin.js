@@ -1,8 +1,9 @@
 // ═══════════════════════════════════════════════════════════
 // Admin Read-API — token-guarded, READ-ONLY endpoints under /api/admin/*
 // Mounted at /api/admin in bot.js (Phase 2a-1). Feeds a private Surface
-// dashboard with the hold queue, recent bets, scraper handles, and the
-// admin-log channel tail.
+// dashboard with the hold queue, recent bets, scraper handles, the
+// admin-log channel tail, and (Phase A of the dashboard buildout) the
+// season leaderboard, recent pipeline drops, and a grader-health snapshot.
 //
 // HARD CONSTRAINT — strictly read-only:
 //   - No POST / PATCH / DELETE routes are defined here.
@@ -380,6 +381,167 @@ router.get('/logs', async (req, res) => {
     return res.status(200).json({ count: messages.length, channelId, messages });
   } catch (err) {
     console.error('[AdminAPI] /logs fetch error:', err.message);
+    return res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+// ── GET /leaderboard ──────────────────────────────────────────
+// Season-scoped capper leaderboard — the SAME getLeaderboard() the Discord
+// /leaderboard surface uses (services/database.js), so the dashboard reads the
+// exact truth surface the bot shows. Rows are scoped to ACTIVE_SEASON inside
+// getLeaderboard; `season` is included in the envelope DELIBERATELY so the
+// dashboard can label which season it is looking at.
+//   ?sort=   whitelisted to getLeaderboard's own allowed set
+//            (total_profit_units|roi_pct|win_pct|total_bets); anything else
+//            falls back to total_profit_units — mirrors the function's own
+//            silent-fallback behavior. The envelope echoes the EFFECTIVE sort.
+//   ?limit=  clamps to [1,50], default 10 (getLeaderboard's own default).
+router.get('/leaderboard', (req, res) => {
+  try {
+    const { getLeaderboard, ACTIVE_SEASON } = require('../services/database');
+
+    const SORTS = ['total_profit_units', 'roi_pct', 'win_pct', 'total_bets'];
+    const sort = SORTS.includes(req.query.sort) ? req.query.sort : 'total_profit_units';
+
+    let limit = parseInt(req.query.limit, 10);
+    if (!Number.isFinite(limit)) limit = 10;
+    limit = Math.max(1, Math.min(50, limit));
+
+    const cappers = getLeaderboard(sort, limit);
+    return res.status(200).json({ season: ACTIVE_SEASON, sort, cappers });
+  } catch (err) {
+    console.error('[AdminAPI] /leaderboard query error:', err.message);
+    return res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+// ── GET /drops ────────────────────────────────────────────────
+// Recent pipeline drops — the recordDrop() rows (event_type='DROP'), newest
+// first, plus a per-reason count breakdown over the same window.
+// event_type='DROP' (not stage) is the filter because drop rows ride MANY
+// stages: 'DROPPED' (ingest), 'GRADING_DROPPED' (bets.js recordDrop default),
+// and pass-through stages like 'GRADING_AI' (services/grading.js) — a
+// stage-list filter would silently omit those. Non-drop rows are excluded by
+// construction: e.g. MANUAL_REVIEW_HOLD rows are event_type='STAGE_ENTER' and
+// their hold reason rides the payload JSON (their drop_reason COLUMN is
+// always NULL — recordStage hardcodes it). Both queries are served by
+// idx_pipeline_events_event_type_created (migration 031); without it they
+// are full-table scans, synchronous on the bot's event loop.
+//
+// pipeline_events.created_at is INTEGER epoch SECONDS (migration 018) — the
+// cutoff is computed in JS and bound as a param so the comparison stays
+// INTEGER-vs-INTEGER (a datetime('now',…) TEXT comparand silently matches
+// zero rows; see docs/CODEMAP.md DB quirks).
+//   ?hours=  window size, clamps to [1,168], default 24.
+//   ?reason= optional exact drop_reason filter, format-validated ^[A-Z0-9_]+$
+//            → 400 on mismatch. Format-only on purpose: the enum lives at
+//            services/pipeline-events.js DROP_REASONS and grows — do NOT
+//            hardcode it here.
+//   ?limit=  row cap for `drops`, clamps to [1,200], default 50. `counts` is
+//            window-wide and never capped by limit. payload stays raw TEXT —
+//            the UI formats it.
+router.get('/drops', (req, res) => {
+  try {
+    const { db } = require('../services/database');
+
+    let hours = parseInt(req.query.hours, 10);
+    if (!Number.isFinite(hours)) hours = 24;
+    hours = Math.max(1, Math.min(168, hours));
+
+    let limit = parseInt(req.query.limit, 10);
+    if (!Number.isFinite(limit)) limit = 50;
+    limit = Math.max(1, Math.min(200, limit));
+
+    const reason = req.query.reason ? String(req.query.reason) : null;
+    if (reason && !/^[A-Z0-9_]+$/.test(reason)) {
+      return res.status(400).json({ error: 'Invalid reason (expected ^[A-Z0-9_]+$)' });
+    }
+
+    const since = Math.floor(Date.now() / 1000) - hours * 3600;
+    const where = ["event_type = 'DROP'", 'created_at >= ?'];
+    const params = [since];
+    if (reason) { where.push('drop_reason = ?'); params.push(reason); }
+
+    const counts = db.prepare(`
+      SELECT drop_reason, COUNT(*) AS n
+      FROM pipeline_events
+      WHERE ${where.join(' AND ')}
+      GROUP BY drop_reason
+      ORDER BY n DESC
+    `).all(...params);
+
+    const drops = db.prepare(`
+      SELECT id, ingest_id, bet_id, source_type, source_ref, drop_reason, payload, created_at
+      FROM pipeline_events
+      WHERE ${where.join(' AND ')}
+      ORDER BY created_at DESC, id DESC
+      LIMIT ?
+    `).all(...params, limit);
+
+    return res.status(200).json({ since, counts, drops });
+  } catch (err) {
+    console.error('[AdminAPI] /drops query error:', err.message);
+    return res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+// ── GET /grader-health ────────────────────────────────────────
+// One-call grader-health snapshot: the pending backlog, the last 24h of
+// grader attempts, and the last 24h of search-backend calls.
+//
+// TIMESTAMP UNITS differ per table (the classic footgun — docs/CODEMAP.md):
+//   bets.created_at          TEXT ISO       → MIN() lexicographic is correct
+//   grading_audit.timestamp  INTEGER MILLIS (Date.now(), writeGradingAudit)
+//   search_backend_calls.ts  INTEGER MILLIS (Date.now(), recordBackendCall)
+// Both 24h windows therefore use (nowSec-86400)*1000, bound as a param.
+router.get('/grader-health', (req, res) => {
+  try {
+    const { db } = require('../services/database');
+    const cutoffMs = (Math.floor(Date.now() / 1000) - 86400) * 1000;
+
+    const pendingTotals = db.prepare(`
+      SELECT COUNT(*) AS total, MIN(created_at) AS oldest_created_at
+      FROM bets WHERE result = 'pending'
+    `).get();
+    const pending = {
+      total: pendingTotals.total,
+      oldestCreatedAt: pendingTotals.oldest_created_at, // null when no pending bets
+      byReviewStatus: db.prepare(`
+        SELECT review_status, COUNT(*) AS n
+        FROM bets WHERE result = 'pending'
+        GROUP BY review_status ORDER BY n DESC
+      `).all(),
+    };
+
+    const gradingTotals = db.prepare(`
+      SELECT COUNT(*) AS attempts, COUNT(DISTINCT bet_id) AS distinct_bets
+      FROM grading_audit WHERE timestamp >= ?
+    `).get(cutoffMs);
+    const grading24h = {
+      attempts: gradingTotals.attempts,
+      distinctBets: gradingTotals.distinct_bets,
+      byProvider: db.prepare(`
+        SELECT provider_used, COUNT(*) AS n
+        FROM grading_audit WHERE timestamp >= ?
+        GROUP BY provider_used ORDER BY n DESC
+      `).all(cutoffMs),
+      byFinalStatus: db.prepare(`
+        SELECT final_status, COUNT(*) AS n
+        FROM grading_audit WHERE timestamp >= ?
+        GROUP BY final_status ORDER BY n DESC
+      `).all(cutoffMs),
+    };
+
+    const backends24h = db.prepare(`
+      SELECT backend, status, COUNT(*) AS n
+      FROM search_backend_calls WHERE ts >= ?
+      GROUP BY backend, status
+      ORDER BY backend ASC, n DESC
+    `).all(cutoffMs);
+
+    return res.status(200).json({ pending, grading24h, backends24h });
+  } catch (err) {
+    console.error('[AdminAPI] /grader-health query error:', err.message);
     return res.status(500).json({ error: 'Internal error' });
   }
 });
