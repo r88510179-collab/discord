@@ -248,9 +248,29 @@ const SCORE_UNIT_RX = {
 // adapters don't guard it at all — this audit refuses them outright.)
 const SEGMENT_RX = /\b(1st|2nd|3rd|4th|5th|6th|7th|8th|9th|inning|innings|inn|f5|1h|2h|first\s+half|second\s+half|halftime|half|quarter|qtr|1q|2q|3q|4q|period|1p|2p|3p|thru|through)\b/i;
 
+// A line of a multi-line message that carries a full pick: a team (in any
+// sport's alias table) or a prop shape, PLUS a market indicator. Header lines
+// ("NBA Plays:", capper names) and bare stake/odds lines don't count.
+function lineHasPick(line) {
+  const s = line.trim();
+  if (!s) return false;
+  if (!sideHasMarketIndicator(s)) return false;
+  if (SPORTS.some(sp => extractTeams(s, sp).length > 0)) return true;
+  if (/^(.+?)\s+(\d+(?:\.\d+)?)\+\s+(.+)$/.test(s)) return true;
+  if (/^(.+?)\s+(over|under|o|u)\s+(\d+(?:\.\d+)?)\s+(.+)$/i.test(s)) return true;
+  return false;
+}
+
 function classifyMarket(desc, sport, teams) {
   const d = desc.trim();
   const dlow = d.toLowerCase();
+
+  // Multi-pick message stored as one bet ("NBA Plays:\nPistons -3.5\nRaptors
+  // +6.5"): grading any single leg of it is meaningless — refuse.
+  const lines = d.split(/\n+/);
+  if (lines.length >= 2 && lines.filter(lineHasPick).length >= 2) {
+    return { market: 'multi_market', unresolvable: 'multi_market' };
+  }
 
   // Multi-market compound ("Clippers ML and Kawhi Leonard 3+ 3PTs").
   const sides = d.split(/\s+(?:and|&)\s+/i);
@@ -344,6 +364,11 @@ async function candidateGames(sport, ymd, teams) {
       const matchCount = teams.filter(t => t === away || t === home).length;
       if (!matchCount) continue;
       if (!(g.status && g.status.abstractGameState === 'Final')) continue;
+      // statsapi marks POSTPONED/SUSPENDED games abstractGameState='Final' with
+      // no scores; undefined scores would satisfy the ML tie check
+      // (undefined === undefined) and mint a false PUSH. Require a real final.
+      if (/postponed|suspended|cancelled/i.test((g.status && g.status.detailedState) || '')) continue;
+      if (!Number.isFinite(g.teams.away.score) || !Number.isFinite(g.teams.home.score)) continue;
       out.push({
         url, date: ymd, matchCount,
         competitors: [
@@ -364,11 +389,12 @@ async function candidateGames(sport, ymd, teams) {
       const matchCount = teams.filter(t => t === away || t === home).length;
       if (!matchCount) continue;
       if (!(g.gameState === 'OFF' || g.gameState === 'FINAL')) continue;
+      if (!Number.isFinite(g.awayTeam.score) || !Number.isFinite(g.homeTeam.score)) continue;
       out.push({
         url, date: ymd, matchCount,
         competitors: [
-          { displayName: away, shortName: '', abbrev: '', score: g.awayTeam.score ?? 0, homeAway: 'away' },
-          { displayName: home, shortName: '', abbrev: '', score: g.homeTeam.score ?? 0, homeAway: 'home' },
+          { displayName: away, shortName: '', abbrev: '', score: g.awayTeam.score, homeAway: 'away' },
+          { displayName: home, shortName: '', abbrev: '', score: g.homeTeam.score, homeAway: 'home' },
         ],
       });
     }
@@ -389,6 +415,7 @@ async function candidateGames(sport, ymd, teams) {
       homeAway: c.homeAway,
     }));
     if (competitors.length !== 2) continue;
+    if (!competitors.every(c => Number.isFinite(c.score))) continue;
     const matchCount = teams.filter(t => competitors.some(c => espn.teamMatches(t, c))).length;
     if (!matchCount) continue;
     out.push({ url, date: ymd, matchCount, competitors });
@@ -398,20 +425,22 @@ async function candidateGames(sport, ymd, teams) {
 
 // ── Team-market verdict with anchor → ±1-day widening ───────
 async function teamMarketVerdict(sport, parsed, teams, anchorYmd) {
-  let cands = await candidateGames(sport, anchorYmd, teams);
+  // A bet naming TWO teams is a specific matchup: a game containing only one
+  // of them is guaranteed to be the WRONG game (a "Bulls Knicks Over 237.5"
+  // must never grade a Knicks–Hawks final). Require every named matchup team
+  // in the game; single-team bets need just their team.
+  const required = Math.min(teams.length, 2);
+  const forDate = async ymd => (await candidateGames(sport, ymd, teams)).filter(c => c.matchCount >= required);
+  let cands = await forDate(anchorYmd);
   let dateShifted = false;
   if (!cands.length) {
     dateShifted = true;
     cands = [
-      ...await candidateGames(sport, shiftYMD(anchorYmd, -1), teams),
-      ...await candidateGames(sport, shiftYMD(anchorYmd, 1), teams),
+      ...await forDate(shiftYMD(anchorYmd, -1)),
+      ...await forDate(shiftYMD(anchorYmd, 1)),
     ];
   }
   if (!cands.length) return { verdict: 'UNRESOLVED', reason: 'no_game_found' };
-  if (teams.length >= 2) {
-    const full = cands.filter(c => c.matchCount >= 2);
-    if (full.length) cands = full;
-  }
   // gradeFromScore's evidence string hardcodes "(Final per ESPN)"; relabel to
   // the endpoint the score actually came from.
   const srcLabel = { MLB: 'statsapi.mlb.com', NHL: 'api-web.nhle.com', NBA: 'ESPN' }[sport];
@@ -574,6 +603,12 @@ function suggestedPu(bet, shadowVerdict) {
   const nullProfitUnits = all.filter(r => r.profit_units == null).length;
   console.error(`[shadow] input=${all.length} selected=${rows.length} profit_units_null=${nullProfitUnits}`);
 
+  // Date-confidence signals. Twitter batch imports share one created_at (the
+  // scrape time, not the post time), and a 00:00–07:59 ET creation can be a
+  // recap of the previous night — both weaken the created_at-derived anchor.
+  const createdCounts = {};
+  for (const r of all) createdCounts[r.created_at] = (createdCounts[r.created_at] || 0) + 1;
+
   const results = [];
   let done = 0;
   for (const bet of rows) {
@@ -585,6 +620,13 @@ function suggestedPu(bet, shadowVerdict) {
     }
     const storedResult = String(bet.result || '').toLowerCase();
     const agree = r.verdict === 'UNRESOLVED' ? null : r.verdict.toLowerCase() === storedResult;
+    const createdInstant = parseUtcInstant(bet.created_at);
+    const createdEtHour = createdInstant ? etParts(createdInstant).hour : null;
+    const batchCreated = (createdCounts[bet.created_at] || 0) >= 3;
+    // Anchor-confidence flag for operator triage: no event_date AND (batch
+    // import / early-ET-morning creation / the slate had to shift ±1 day).
+    const lowConfidenceDate = !bet.event_date &&
+      (batchCreated || (createdEtHour != null && createdEtHour < 8) || !!r.dateShifted);
     const row = {
       id: bet.id,
       sport_stored: bet.sport,
@@ -604,6 +646,9 @@ function suggestedPu(bet, shadowVerdict) {
       anchor_source: r.anchor ? r.anchor.from : null,
       date_used: r.dateUsed || null,
       date_shifted: !!r.dateShifted,
+      created_et_hour: createdEtHour,
+      batch_created: batchCreated,
+      low_confidence_date: lowConfidenceDate,
       evidence: r.evidence || null,
       evidence_url: r.url || null,
     };
