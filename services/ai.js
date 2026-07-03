@@ -1339,6 +1339,34 @@ async function generateRecap(stats, recentBets) {
   return (await callLLM(`Stats: ${JSON.stringify(stats)}\nBets: ${JSON.stringify(recentBets)}`, sys)) || 'Recap unavailable.';
 }
 
+// ── P1: dollar-stake → wager correction (twitter TEXT path) ──────────────────
+// The TEXT path (extractPickFromTweet) does NOT run normalizeBet's [0.01,100]
+// units clamp, so a model that reads a dollar STAKE ("I have $5,000 on Spurs
+// moneyline") as `units` sends units=5000 straight to the insert (bet 3e5c01a0,
+// human-confirmed with units intact). When a raw dollar amount in the tweet
+// EXACTLY equals the parsed units, that equality is the mis-assignment tell:
+// move the amount into `wager` (dollars) and reset units to 1. The exact-match
+// gate keeps a legitimate "5u on ..." (no `$`) or a real "$100 to win, 2u play"
+// (dollar ≠ units) untouched. Pure + exported for the unit test.
+function reassignDollarStakeUnits(pick, rawText) {
+  if (!pick || typeof pick !== 'object') return pick;
+  const units = Number(pick.units);
+  if (!Number.isFinite(units) || units <= 0) return pick;
+  const text = String(rawText || '');
+  const re = /\$\s*([\d,]+(?:\.\d+)?)/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const value = Number(m[1].replace(/,/g, ''));
+    if (Number.isFinite(value) && value === units) {
+      pick.wager = value;
+      pick.units = 1;
+      console.log(`[DollarStake] reassigned units=${units} -> wager=${value}`);
+      break;
+    }
+  }
+  return pick;
+}
+
 // ── Tweet Bouncer: extract a pick from raw tweet text or return null ──
 async function extractPickFromTweet(tweetText, capperName) {
   try {
@@ -1370,6 +1398,8 @@ STEP 3 — SETTLED CHECK:
   - If ALL picks have ✅ checkmarks next to them → NULL (settled recap, not new picks)
   - If SOME picks have no checkmarks → VALID (parse the unsettled ones)
 
+STAKE RULE: A DOLLAR stake ("$5,000 on X", "$100 play") is a WAGER in dollars — set "wager" to that number and "units" to 1. Only a "u"/"unit" figure ("5u", "3 units") sets units. NEVER put a dollar stake in units.
+
 Return {"status": "NULL"} if rejected, or extract into this JSON if valid:
 {
   "status": "VALID",
@@ -1378,6 +1408,7 @@ Return {"status": "NULL"} if rejected, or extract into this JSON if valid:
   "description": "Cleaned up pick",
   "odds": "-110 or N/A",
   "units": 1,
+  "wager": null,
   "legs": [{"description": "Leg text", "odds": -110}],
   "is_ladder": false,
   "ladder_step": 0
@@ -1413,6 +1444,9 @@ Each step MUST have its own description, odds, and units. Extract ALL steps visi
     }
 
     delete jsonResponse.status;
+    // Deterministic backstop to the STAKE RULE prompt above: if the raw tweet
+    // states a dollar amount equal to the parsed units, it was a wager, not units.
+    reassignDollarStakeUnits(jsonResponse, tweetText);
     return jsonResponse;
   } catch (err) {
     console.error('[Groq TweetBouncer Error]', err.message);
@@ -1571,6 +1605,13 @@ const FORBIDDEN_PLACEHOLDERS = [
   'missing legs', 'capper hid the picks', 'in a link or missing image',
   'unknown pick', 'tbd', 'placeholder', 'no picks found',
 ];
+
+// Raw-text teaser phrases (case-insensitive substring on the source tweet). A
+// tease that names no selection (no odds, no market token) is not a bet — see
+// the tease/no-selection guard in validateParsedBet. Deliberately NOT in
+// FORBIDDEN_PLACEHOLDERS: these are marketing copy in the tweet body, not bet
+// descriptions, so matching them against a description would over-reject.
+const TEASE_PATTERNS = ['find out here', 'link in bio', 'full card'];
 
 // Sport reclassification — catch misclassified sports at intake
 const SPORT_TEAM_MAP = {
@@ -2040,6 +2081,31 @@ function validateParsedBet(pick, sourceText, opts = {}) {
     return { valid: false, issues, reason: 'placeholder' };
   }
 
+  // Tease / no-selection guard. A promotional "find out here / link in bio /
+  // full card" tweet that names no real selection — no odds AND no market token
+  // in the description — is a teaser, not a bet (bet 3f78b923: "…50 units pending
+  // on an NBA Champion. Find out here." graded a bare "NBA Champion" WIN before
+  // the gates). Kept raw-text-side: the phrases are marketing copy, not
+  // descriptions, so they stay OUT of FORBIDDEN_PLACEHOLDERS. Skipped under
+  // slipExempt (has_media / slip-shape) so a real slip-image or slip-share tweet
+  // that also says "full card" still extracts.
+  if (!slipExempt && TEASE_PATTERNS.some(p => src.includes(p))) {
+    const oddsStr = String(pick.odds ?? '').trim();
+    const oddsPresent = /\d/.test(oddsStr); // null / "N/A" → absent
+    // Market token = a REAL betting market in the description. The sign is
+    // anchored at a token boundary (start / non-digit) so a digit-dash-digit run
+    // — dates "2023-2024", scores "98-100", pitcher records "5-2" — is NOT read
+    // as a spread/odds; over/under must be followed by a number so brand/entity
+    // words ("Under Armour", "Over the Top") don't match. (Hardens the prompt's
+    // literal regex against the adversarially-found false exemptions.)
+    const hasMarketToken = /(?:^|[^\d])[+-]\d|\bML\b|\bmoneyline\b|\b(?:over|under)\b\s*\d|\bspread\b/i.test(pick.description || '');
+    if (!oddsPresent && !hasMarketToken) {
+      issues.push(`Tease with no selection: promo phrase present, no odds, no market token in "${(pick.description || '').slice(0, 60)}"`);
+      maybeDrop('tease_no_selection', 'BOUNCER_REJECTED');
+      return { valid: false, issues, reason: 'TEASE_NO_SELECTION' };
+    }
+  }
+
   // Check sport seasonality. A shared nickname may have been mislabeled to an
   // out-of-season league ("SF Giants" → NFL); re-resolve before dropping so an
   // in-season reading (the MLB San Francisco Giants) is adopted instead of
@@ -2443,4 +2509,4 @@ function normalizeEventDate(raw) {
   return null;
 }
 
-module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, evaluateTweet, validateParsedBet, validateLegSportConsistency, validateLegShape, isSportsbookBrand, reclassifySport, inferLegSport, descNamesNationalTeam, disambiguateAmbiguousTeam, matchesKboTeam, normalizeKboLeg, declaredSportIncludesKbo, isInSeason, normalizeEventDate, AMBIGUITY_THRESHOLD, tryVisionGemma, parseGemmaOutputWithCerebras, runGemmaVisionFallback, logVisionFailure, GEMMA_SLIP_PROMPT, gemmaHealth, isGemmaHealthy, recordGemmaResult, callLLM, callLLMResult, callGemini, callOpenAI, AdapterError, FALLBACK_ELIGIBLE };
+module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, reassignDollarStakeUnits, evaluateTweet, validateParsedBet, validateLegSportConsistency, validateLegShape, isSportsbookBrand, reclassifySport, inferLegSport, descNamesNationalTeam, disambiguateAmbiguousTeam, matchesKboTeam, normalizeKboLeg, declaredSportIncludesKbo, isInSeason, normalizeEventDate, AMBIGUITY_THRESHOLD, tryVisionGemma, parseGemmaOutputWithCerebras, runGemmaVisionFallback, logVisionFailure, GEMMA_SLIP_PROMPT, gemmaHealth, isGemmaHealthy, recordGemmaResult, callLLM, callLLMResult, callGemini, callOpenAI, AdapterError, FALLBACK_ELIGIBLE };

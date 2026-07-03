@@ -1095,6 +1095,7 @@ function scheduleRecheckAfterDenial(betId, reason, minutes = 30) {
             result = 'void',
             grade = 'VOID',
             grade_reason = 'Auto-voided after retry cap exhausted (no evidence found after 15+ attempts).',
+            grader_version = 'retry-void-v1',
             graded_at = CURRENT_TIMESTAMP
         WHERE id = ?
           AND result = 'pending'
@@ -1823,7 +1824,7 @@ function sweepExpiredBet(bet) {
   // WIDEST revert window. evaluateSweep re-reads grading_state and skips 'done',
   // but a revert sets grading_state='ready', so only this write-time gate stops a
   // mid-cycle-reverted needs_review bet from being swept out of the review queue.
-  const sweepResult = gradeBet(bet.id, 'void', 0, 'VOID', sweepReason, true, { requireGraderEligible: true });
+  const sweepResult = gradeBet(bet.id, 'void', 0, 'VOID', sweepReason, true, { requireGraderEligible: true, graderVersion: 'sweeper-v1' });
   if (!sweepResult.graded) return { swept: false, reason: sweepResult.reason };
 
   emitAutonomousGradeTelemetry({
@@ -2109,7 +2110,7 @@ async function autoGradeFromRecap(client, { capperId, outcome, subjects, source 
   // operator revert (same doctrine as the AI grader + sweeper writes).
   const gradeResult = gradeBet(bet.id, result, profitUnits, result === 'win' ? 'B' : 'D',
     `Auto-graded from capper ${source === 'celebration' ? 'celebration' : 'graphic'}: ${matchedTerm}`,
-    false, { requireGraderEligible: true });
+    false, { requireGraderEligible: true, graderVersion: 'celebration-v1' });
 
   if (!gradeResult.graded) {
     console.log(`[AutoGrade] SKIP race-lost bet ${bet.id?.slice(0, 8)} (${gradeResult.reason})`);
@@ -3973,6 +3974,7 @@ module.exports = {
     buildEvidenceRecords, evaluateOffDate,             // evidence-record layer (re-exported from services/evidenceRecords.js)
     evaluateSweep, sweepGraceUntil,                    // Phase 2b-2 — 7-day sweeper grace for recovered bets
     sweepExpiredBet,                                   // DP-01/T6-01 — terminal sweep write (VOID + telemetry), unit-tested in tests/sweeper-void.test.js
+    scheduleRecheckAfterDenial,                        // retry-cap terminal VOID write (grader_version stamping test)
     emitAutonomousGradeTelemetry, AUTO_GRADE_MATCH_WINDOW_DAYS, // T6-01/T2-01 — terminal telemetry + recap match window
     nextAttemptForEvent,                               // Codex #3 — event-aware recheck planner (EVENT_AWARE_RECHECK)
   },

@@ -613,7 +613,7 @@ async function handleWarRoomInteraction(interaction) {
             await interaction.reply({ content: `❌ Could not log win (\`${gate.reason}\`).`, ephemeral: true });
             return true;
           }
-          const gr = gradeBetRecord(saved.id, 'win', profitUnits, null, 'Logged as untracked win via War Room', true);
+          const gr = gradeBetRecord(saved.id, 'win', profitUnits, null, 'Logged as untracked win via War Room', true, { graderVersion: 'war-room-v1' });
           if (gr.graded) {
             const bankroll = getBankroll(capperId);
             if (bankroll) {
