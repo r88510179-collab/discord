@@ -10,8 +10,10 @@ The re-anchor is [`scripts/tierb-reanchor.js`](../../scripts/tierb-reanchor.js).
 local export only; network was limited to the same public score APIs the engine already uses.
 
 > **NO corrections applied.** Report-only. The correction candidates below are a **separate
-> operator-gated pass after external verification** — see the last section. This run writes
-> nothing to the DB and ships no correction script.
+> operator-gated pass after external verification** — see §Corrections applied (pinned, verified)
+> at the end. This run writes nothing to the DB and ships no correction script. (The pinned subset
+> was subsequently re-verified per-game and an operator-run apply script authored — that later,
+> separate pass is documented in the final section.)
 
 ## Why re-anchor
 
@@ -177,3 +179,42 @@ carry the post instant as `event_date`, the only field the engine's `anchorFor` 
   the reasoning behind the prod multi-pick guard) refuses multi-pick strings only on newline and
   `and`/`&` splits — a **comma-separated** card ("A UNDER x, B -3.5, C -3.5") slips through as a
   lone total. `9aa55f5b` is the in-the-wild instance. Worth a guard extension + a targeted test.
+
+## Corrections applied (pinned, verified)
+
+**Operator-gated pass, 2026-07-03 (separate from the report-only run above).** After **per-game**
+external re-verification (ESPN + league-official finals, adversarial refute-by-default), the
+**truly-pinned** subset is corrected by `scripts/apply-tierb-corrections.js` — the same
+archive-before-update / idempotency / tail-hard-gate machinery as the Tier A
+[`scripts/apply-pregate-corrections.js`](../../scripts/apply-pregate-corrections.js) (#168), reusing
+`services/gradeOverride.js` with `getBankroll` neutered (Beta-era bets must not shift the S2 slate).
+**The agent built + PR'd it; the operator runs it in-container (dry-run → one archived txn). Agent
+never touches prod.** Write scope: `bets` + `bet_grade_history` only.
+
+Per-game verification **reclassified one report-time "pinned" row** (`2c12a667`, see below), so the
+pinned set is **5 → 4**. The 4 applied:
+
+| # (report row) | id | sport / market | pick | stored → new | new_pu | ΔPU | evidence (re-fetched 2026-07-03) |
+|--:|---|---|---|---|---:|---:|---|
+| 3 | `320bc36b` | NHL game_total | Lightning / Bruins OVER 6.5 | win → **loss** | −3.0000 | −5.7273 | TBL 2, BOS 1 = 3 < 6.5 (api-web.nhle.com, 2026-04-11; snowflake 04-13→04-11) |
+| 9 | `d7bf7159` | NBA spread | Toronto Raptors −13.5 | loss → **win** | +0.9091 | +1.9091 | TOR 128, MEM 96 → −13.5 covers (ESPN/b-ref, 2026-04-03; snowflake 04-06→04-03) |
+| 10 | `b5bb1ad7` | NBA game_total | Bulls / Knicks Over 237.5 | win → **loss** | −1.0000 | −1.9091 | NYK 136, CHI 96 = 232 < 237.5 (ESPN/b-ref, 2026-04-03; snowflake 04-06→04-03) |
+| 11 | `f4946029` | NBA game_total | Hornets / Pacers Under 235.5 | win → **loss** | −1.0000 | −1.9091 | CHA 129, IND 108 = 237 > 235.5 (ESPN/b-ref, 2026-04-03; snowflake 04-06→04-03) |
+
+**Net ΔPU of the 4 applied: −7.6364u (rounds to −7.64u)** — three matchup/total wins that actually
+lost, minus one spread cover recovered. This equals the report's provisional **pinned-5 −3.7316u**
+with `2c12a667`'s **+3.9048** ΔPU removed (−3.7316 − 3.9048 = −7.6364). The script embeds each
+row's stored American odds implicitly (empty odds → the −110 default: win = 0.9091×units, loss =
+−units); a per-row `calcProfit` cross-check refuses any row whose stored odds/units drifted from the
+audit. `expect_stored_result` + `grader_version IS NULL` guards make a re-run inert.
+
+### `2c12a667` DROPPED from the pinned set (reclassified → series bucket)
+
+Report row #6 (`2c12a667`, **Los Angeles Angels ML**, loss→win, ΔPU +3.9048) was listed **pinned** on
+the note "adjacent 04-13 game is vs NYY (diff opponent)". Per-game re-verification **refutes the pin**:
+LAA played **CIN on both days of a series** — **lost 7-3 on 04-11** (the day *before* the 04-12
+snowflake anchor) and won 9-6 on **04-12**. Because the named team faced the *same* opponent on
+adjacent days with opposite results, the tweet-post day alone does not pin which game the bettor
+intended — it is a **same-opponent-series** row, not pinned. It is therefore **NOT applied here** and
+moves to the series-disambiguation bucket pending per-game confirmation of the bettor's intended
+game. **Series bucket is now 8 rows** (the original 7 same-opponent-series candidates + `2c12a667`).
