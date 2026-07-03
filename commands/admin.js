@@ -331,7 +331,7 @@ module.exports = {
         for (const b of offseason) {
           const gate = canFinalizeBet({ db, betId: b.id, requestedResult: 'void', source: 'admin_revert_halluc', force: true });
           if (!gate.ok) { skipped.push(b); continue; }
-          const gr = gradeBetRecord(b.id, 'void', 0, null, 'REVERTED: AI hallucination — offseason or placeholder', true);
+          const gr = gradeBetRecord(b.id, 'void', 0, null, 'REVERTED: AI hallucination — offseason or placeholder', true, { graderVersion: 'manual-v1' });
           if (gr.graded) {
             db.prepare("UPDATE bets SET review_status = 'rejected' WHERE id = ?").run(b.id);
             reverted++;

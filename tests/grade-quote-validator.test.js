@@ -211,6 +211,32 @@ try {
   check('player-prop description → prop=1', buildGate3WouldFireMarker(shadow, PROP_LINE).includes('prop=1'), true);
   check('bet_type=prop → prop=1 (explicit type)', buildGate3WouldFireMarker(shadow, { description: 'x', bet_type: 'prop' }).includes('prop=1'), true);
 
+  // ── P1: futures / tease bet — Gate 3 backstops an uncited grade ──────────────
+  // Bet 3f78b923 shape: a bare "NBA Champion" futures bet with no odds. A model
+  // that returns WIN with a fabricated evidence_quote (not a substring of the
+  // evidence) must be force-PENDING under enforce (the Gate-3 anti-hallucination
+  // guarantee), and merely logged under shadow.
+  const FUTURES_EVIDENCE = 'The 2026 NBA Finals are scheduled for June. No champion has been crowned yet.';
+  const futuresClaim = { status: 'WIN', evidence: 'Thunder won the title', evidence_quote: 'Oklahoma City Thunder are the 2026 NBA Champions' };
+  // Sanity: the claimed quote is genuinely NOT in the evidence.
+  check('futures fabricated quote is not a substring (validateEvidenceQuote fails)',
+    validateEvidenceQuote(futuresClaim, FUTURES_EVIDENCE).ok, false);
+
+  const futuresEnforce = applyGate3(futuresClaim, FUTURES_EVIDENCE, { mode: 'enforce', betId: 'bet-3f78b923', legIndex: null });
+  check('futures WIN, non-substring quote, enforce → forces pending', futuresEnforce.forcePending, true);
+  check('futures forced-pending reason UNVERIFIED_QUOTE', futuresEnforce.reason, 'UNVERIFIED_QUOTE');
+  check('futures enforce would-fire true', futuresEnforce.wouldFire, true);
+
+  const futuresShadow = applyGate3(futuresClaim, FUTURES_EVIDENCE, { mode: 'shadow', betId: 'bet-3f78b923', legIndex: null });
+  check('futures shadow would-fire true (logged)', futuresShadow.wouldFire, true);
+  check('futures shadow does NOT force pending', futuresShadow.forcePending, false);
+
+  // A correctly-cited quote passes even in enforce (the guard is a substring
+  // check, not a blanket futures block).
+  const citedClaim = { status: 'WIN', evidence: 'x', evidence_quote: 'No champion has been crowned yet' };
+  check('futures with a real substring quote passes enforce',
+    applyGate3(citedClaim, FUTURES_EVIDENCE, { mode: 'enforce', betId: 'b', legIndex: null }).forcePending, false);
+
   console.log(`\n${pass} passed / ${fail} failed`);
   if (fail > 0) process.exit(1);
   console.log('Quote validator (Gate 3) validation passed.');

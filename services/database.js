@@ -174,6 +174,19 @@ try {
 // ── Active season helper ────────────────────────────────────
 const ACTIVE_SEASON = process.env.ACTIVE_SEASON || 'Beta';
 
+// ── UNITS_SANITY tripwire config (P1) ───────────────────────────────────────
+// Pure env resolvers (exported for the unit test). Mode is read at call time so
+// ops can flip it without a restart. Unset/unknown → 'off' (fully inert); a bad
+// UNITS_SANITY_MAX → the 100 default (matches normalizeBet's clamp ceiling).
+function resolveUnitsSanityMode(raw) {
+  const m = String(raw || '').trim().toLowerCase();
+  return (m === 'shadow' || m === 'enforce') ? m : 'off';
+}
+function unitsSanityMax(raw) {
+  const v = parseFloat(raw);
+  return Number.isFinite(v) ? v : 100;
+}
+
 // ── Prepared statements (fast) ──────────────────────────────
 const stmts = {
   getCapper:         db.prepare('SELECT * FROM cappers WHERE discord_id = ?'),
@@ -615,6 +628,28 @@ function dedupeParlayLegs(legs, betId = null, ingestId = null) {
 }
 
 function createBetWithLegs(betData, legs) {
+  // ── UNITS_SANITY tripwire (P1) ────────────────────────────────────────────
+  // createBetWithLegs is the sole ingest INSERT choke point (twitter + discord).
+  // The twitter TEXT path bypasses normalizeBet's [0.01,100] units clamp, so a
+  // dollar stake mis-read as units (bet 3e5c01a0: "$5,000 on Spurs ML" →
+  // units=5000) can reach here unclamped. This NEVER clamps/drops/mutates units
+  // (that would corrupt a legitimately large stake) — it only observes (shadow)
+  // or diverts to human review (enforce). Non-numeric units keep existing
+  // behavior. Default off → fully inert.
+  const unitsSanityMode = resolveUnitsSanityMode(process.env.UNITS_SANITY_MODE);
+  if (unitsSanityMode !== 'off') {
+    const numUnits = typeof betData.units === 'number' ? betData.units : Number(betData.units);
+    const maxUnits = unitsSanityMax(process.env.UNITS_SANITY_MAX);
+    if (Number.isFinite(numUnits) && numUnits > maxUnits) {
+      console.warn(`UNITS_SANITY_WOULD_FIRE|mode=${unitsSanityMode}|units=${numUnits}|max=${maxUnits}|source=${betData.source || 'unknown'}|capper_id=${betData.capper_id ?? 'unknown'}`);
+      // enforce: park THIS insert in the human review queue. Non-destructive
+      // clone — never mutate the caller's object; units are left untouched.
+      if (unitsSanityMode === 'enforce') {
+        betData = { ...betData, review_status: 'needs_review' };
+      }
+    }
+  }
+
   const fingerprint = buildFingerprint(betData);
   if (fingerprint) {
     const existing = stmts.getBetByFingerprint.get(fingerprint);
@@ -1224,6 +1259,8 @@ module.exports = {
   getOrCreateCapperByTwitter,
   createBet,
   createBetWithLegs,
+  resolveUnitsSanityMode,
+  unitsSanityMax,
   dedupeParlayLegs,
   normalizeLeg,
   gradeBet: gradeBetRecord,

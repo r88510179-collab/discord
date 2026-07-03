@@ -81,8 +81,10 @@ function applyGradeOverride(deps, { betId, result, reason, invokerId }) {
     `).run(bet.id, oldResult, bet.profit_units, bet.grade, bet.grade_reason, bet.graded_at, invokerId, effectiveReason);
 
     // c. Rewrite the bet directly (NOT gradeBet() — it no-ops on graded rows).
+    //    Stamp grader_version so a manual override is attributable (B2) instead
+    //    of leaving the NULL every non-main-grader write used to leave.
     db.prepare(`
-      UPDATE bets SET result = ?, profit_units = ?, grade_reason = ?, graded_at = datetime('now')
+      UPDATE bets SET result = ?, profit_units = ?, grade_reason = ?, grader_version = 'manual-v1', graded_at = datetime('now')
       WHERE id = ?
     `).run(result, newProfit, gradeReason, bet.id);
 

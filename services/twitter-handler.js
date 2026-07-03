@@ -314,8 +314,10 @@ async function handleTwitterWebhookPayload(payload, client) {
         continue;
       }
 
-      // Normal bet
-      const saved = createBetWithLegs({ capper_id: capper.id, sport: pick.sport || 'Unknown', bet_type: pick.type || 'straight', description: pick.description, odds: normalOdds, units: pick.units || 1, source: betSource, source_url: sourceUrl, source_tweet_id: tweetId, source_tweet_handle: cleanHandle, raw_text: text.slice(0, 500), review_status: 'needs_review', is_ladder: pick.is_ladder || false, ladder_step: pick.ladder_step || 0 }, legs);
+      // Normal bet. `wager`: the P1 dollar-stake correction (services/ai.js
+      // reassignDollarStakeUnits) moves a mis-parsed "$5,000" out of units into
+      // pick.wager; persist it so the dollar stake is recorded (units stays sane).
+      const saved = createBetWithLegs({ capper_id: capper.id, sport: pick.sport || 'Unknown', bet_type: pick.type || 'straight', description: pick.description, odds: normalOdds, units: pick.units || 1, wager: pick.wager ?? null, source: betSource, source_url: sourceUrl, source_tweet_id: tweetId, source_tweet_handle: cleanHandle, raw_text: text.slice(0, 500), review_status: 'needs_review', is_ladder: pick.is_ladder || false, ladder_step: pick.ladder_step || 0 }, legs);
 
       if (saved && !saved._deduped) {
         if (client) {
