@@ -228,10 +228,15 @@ window). No writes until signed off.
 
 ## Corrections applied
 
-**Pending operator run.** [`scripts/apply-pregate-corrections.js`](../../scripts/apply-pregate-corrections.js)
-embeds the 24 high-confidence rows above (23 flips + the `223d9043` no-selection VOID carve-out)
-plus a retro-archive of the 3 prior manual corrections (`3e5c01a0`, `3f78b923`, `b6065d701c`).
-The **operator** uploads it to the container and runs it per
-`docs/RUNBOOKS/db-interventions.md` — dry run first (readonly), then `--apply` (one
-transaction; archives to `bet_grade_history` as `shadow-regrade-2026-07-02`; refuses tailed
-rows). Dry-run + apply output and any refused/skipped rows land here after the run.
+**Applied 2026-07-02** via [`scripts/apply-pregate-corrections.js`](../../scripts/apply-pregate-corrections.js)
+([#168](https://github.com/)) in a single transaction. **24 rows corrected** — 12 loss→win,
+11 win→loss, and 1 win→VOID (`223d9043`, the play-in no-selection carve-out) — plus **3
+retro-archives** of the prior manual corrections (`3e5c01a0`, `3f78b923`, `b6065d701c`). Net P/L
+impact **+2.8u**. `bet_grade_history` gained **24** rows tagged `shadow-regrade-2026-07-02` and
+**3** tagged `operator-retro-2026-07-02`. The tailed-row `expect`-guard fired on none.
+
+Reconciliation: remaining pre-gate AI settles went **709 → 684** (−25 = the 24 script corrections +
+1 earlier manual fix `b6065d70`). The 24 corrected rows are excluded from `prompts/pregate-export-v2.json`
+(467 = 491 − 24), the input to the 2026-07-03 **Tier B** snowflake re-anchor — see
+[2026-07-03-pregate-tierb-reanchor.md](2026-07-03-pregate-tierb-reanchor.md), which re-examines the
+47 LC rows above (5 dissolve, 42 confirm) and surfaces 12 externally-verified new candidates.
