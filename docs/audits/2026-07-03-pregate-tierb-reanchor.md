@@ -218,3 +218,50 @@ adjacent days with opposite results, the tweet-post day alone does not pin which
 intended — it is a **same-opponent-series** row, not pinned. It is therefore **NOT applied here** and
 moves to the series-disambiguation bucket pending per-game confirmation of the bettor's intended
 game. **Series bucket is now 8 rows** (the original 7 same-opponent-series candidates + `2c12a667`).
+
+### Tail-gated pinned rows settled via follow-up (2026-07-03)
+
+`apply-tierb-corrections.js` (#172) applied **only `320bc36b`** (0 tails). Its user_bets **HARD GATE**
+refused the other 3 pinned rows because each carries a single `user_bets` "tail" and
+`applyGradeOverride` does not reconcile `user_bets`. A follow-up,
+[`scripts/apply-tierb-tailed-corrections.js`](../../scripts/apply-tierb-tailed-corrections.js),
+corrects those 3 **and settles their tails** in one atomic transaction (flip bet → archive → settle
+tail), relaxing the HARD GATE to a **scoped allow**. Same reuse of `applyGradeOverride` with
+`getBankroll` neutered; write scope widens by exactly the `user_bets.status` UPDATE. **Agent built +
+PR'd; the operator runs it in-container (dry-run → one txn). No deploy, no prod writes by the agent.**
+
+Operator-verified 2026-07-03: every tail across `user_bets` belongs to the single
+synthetic/admin `user_id='1059681615418236948'` (the only id in the table; all 25 rows
+`status='pending'`, `action='fade'`, `risk_amount=1.0`). No live P/L. The **relaxed gate is scoped to
+that one id** — any tail on a different `user_id` still refuses (a real bettor needs a proper
+settlement ledger, out of scope). Because these are **fades**, the tail settles *opposite* the bet:
+
+| # (report row) | id | stored → new bet | new_pu | ΔPU | tail (fade) settles → | evidence |
+|--:|---|---|---:|---:|---|---|
+| 9 | `d7bf7159` | loss → **win** | +0.9091 | +1.9091 | **lost** (bet won) | TOR 128-96 MEM −13.5 covers (ESPN/b-ref, 2026-04-03) |
+| 10 | `b5bb1ad7` | win → **loss** | −1.0000 | −1.9091 | **won** (bet lost) | NYK 136-96 CHI = 232 < 237.5 (ESPN/b-ref, 2026-04-03) |
+| 11 | `f4946029` | win → **loss** | −1.0000 | −1.9091 | **won** (bet lost) | CHA 129-108 IND = 237 > 235.5 (ESPN/b-ref, 2026-04-03) |
+
+**Settled-status vocabulary:** `user_bets.status` is **never written to a terminal value and never
+read** anywhere in the codebase (`!mystats` derives a tailing record from the joined `bets.result`,
+not `ub.status`; `payoutTailers` only moves `users.bankroll`, and only for `action='tail'`). There is
+therefore no existing vocabulary to match — the script writes **`'won'` / `'lost'`**. Settling here is
+forward-looking bookkeeping (nothing consumes it today) but it is the correct terminal state and it is
+what lets the tail gate release. The permanent fix (a real settlement path, or marking the table
+test-only) is a **backlog item** (`docs/BACKLOG.md`) — the HARD GATE exists *because of* this.
+
+**Arithmetic (the whole pinned set, once #172 + this follow-up both run):**
+
+| set | rows | net ΔPU (running-total impact) | Σ new profit_units carried |
+|---|---:|---:|---:|
+| #172 (`320bc36b`) | 1 | −5.7273u | −3.00u |
+| this follow-up (`d7bf7159` / `b5bb1ad7` / `f4946029`) | 3 | **−1.9091u** | −1.0909u |
+| **combined pinned** | **4** | **−7.6364u ≈ −7.64u** | −4.0909u |
+
+The combined **−7.64u** equals the audit's original pinned-set ΔPU exactly: the tail HARD GATE
+**deferred** these 3 rows to this follow-up, it did **not** drop any correction, so nothing is lost.
+The two per-row figures are different quantities and must not be conflated: **ΔPU = new_pu − stored_pu
+= −1.9091u** is the running-total impact (the column above and #172's convention), while the 3
+corrected rows *carry* new `profit_units` summing to **−1.0909u** (≈ −1.09u). An earlier draft's
+"−6.82u actual" combined #172's ΔPU (−5.73u) with this follow-up's *Σ-new-pu* (−1.09u) — a mix of the
+two conventions — and is superseded by the **−7.64u** above (all ΔPU).
