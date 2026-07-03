@@ -401,6 +401,61 @@ function parlayLegDataComplete(description, legCount) {
   return legCount === expectedPicks;
 }
 
+// ── Multi-pick straight guard ──────────────────────────────────
+// A card like "Pistons/Magic UNDER 209.5, Rockets -3.5, Cavaliers -3.5" is a
+// three-leg parlay. The ingest parser is told to type 2+ legs as 'parlay'
+// (ai.js), but on raw tweet text it misfires and stores the whole card as ONE
+// 'straight' (live case 9aa55f5b) — then gradeSingleBet grades only the first
+// market and mints a false single-grader result. Parlays already have the
+// parlayLegDataComplete PENDING guard; that guard is scoped to bet_type
+// parlay/sgp and never runs on a straight, and it counts picks by `•` bullets
+// (a comma-separated card has zero), so a mis-typed straight sails past every
+// existing check. This detector closes the straight path by routing such a card
+// to manual review instead of grading a lone leg.
+//
+// Deliberately HIGH-PRECISION to avoid parking legitimate single bets: the
+// description must split (on commas / semicolons / newlines / " and " / "&")
+// into >= 2 segments that EACH name a real subject (a team/player word, not a
+// bare market keyword or odds number) AND carry a market indicator (spread
+// ±N, over/under N, ML, or N+ stat). Slash is NOT a separator, so a lone
+// matchup total ("TeamA/TeamB UNDER 209.5") is one segment and never trips it;
+// an odds tail ("Lakers -5.5, -110") fails because the 2nd segment has no
+// subject; a segment qualifier ("Yankees -1.5, first 5 innings") fails because
+// it has no market indicator. Pure + exported via _internal for unit tests.
+const MULTI_PICK_STOPWORDS = new Set([
+  'over', 'under', 'ml', 'moneyline', 'spread', 'total', 'totals', 'and', 'the',
+  'vs', 'versus', 'game', 'combined', 'first', 'second', 'third', 'fourth',
+  'half', 'halftime', 'quarter', 'qtr', 'inning', 'innings', 'period', 'leg',
+  'legs', 'pick', 'picks', 'unit', 'units', 'points', 'pts', 'runs', 'goals',
+  'assists', 'rebounds', 'yards', 'for', 'o', 'u',
+]);
+
+function segmentIsPick(segment) {
+  const s = String(segment == null ? '' : segment).trim();
+  if (!s) return false;
+  const hasMarket =
+    /\b(?:over|under|o|u)\s*\d/i.test(s) ||   // over/under total
+    /[+-]\d/.test(s) ||                        // spread or odds (sign + digit)
+    /\bml\b/i.test(s) ||                       // moneyline
+    /\b\d+(?:\.\d+)?\s*\+/.test(s);            // N+ stat ("3+ threes")
+  if (!hasMarket) return false;
+  // A real pick names a subject — a word that isn't a market keyword. Bare odds
+  // ("-110") or a lone total tail ("over 220") have no such word.
+  const words = s.match(/[A-Za-z][A-Za-z.'’-]{2,}/g) || [];
+  return words.some(w => !MULTI_PICK_STOPWORDS.has(w.toLowerCase()));
+}
+
+function looksLikeMultiPickStraight(description) {
+  const d = String(description == null ? '' : description);
+  if (!d.trim()) return false;
+  // Separators: comma / semicolon / newline / standalone "and" / "&". NOT slash
+  // (matchup totals use it to join the two teams of ONE total).
+  const segments = d.split(/\s*[,;\n]\s*|\s+and\s+|\s*&\s*/i);
+  if (segments.length < 2) return false;
+  const picks = segments.filter(segmentIsPick).length;
+  return picks >= 2;
+}
+
 // ── Supported sports for grading ──
 // Bets outside this set get auto-voided at the top of gradePropWithAI
 // (see the "AUTO-VOID UNSCOPED BETS" block). Keep in sync with the
@@ -3038,6 +3093,58 @@ async function gradePropWithAI(bet) {
     console.log(`[AI Grader] Parlay detected: ${legs.length} legs for bet ${bet.id?.slice(0, 8)}`);
     return await gradeParlay(bet, legs);
   }
+
+  // ── DIVERT MULTI-PICK STRAIGHTS TO MANUAL REVIEW ──
+  // A card the ingest parser mis-typed as one 'straight' (e.g. the comma-
+  // separated "Pistons/Magic UNDER 209.5, Rockets -3.5, Cavaliers -3.5",
+  // live bet 9aa55f5b) would otherwise be graded by gradeSingleBet as its
+  // FIRST market alone — a hallucinated single-grader result (a false WIN when
+  // the real parlay lost). The parlay guards above never see it (bet_type is
+  // straight; comma cards carry no `•` bullets). Park it for a human instead:
+  // result stays 'pending' (NO grade written), review_status='needs_review'
+  // hides it from the autograder AND the 7-day sweeper (both draw from
+  // getPendingBets, which excludes GRADER_HIDDEN_REVIEW_STATUSES), so it can
+  // never be swept to a false loss. grading_state='done' stops the retry loop.
+  // Kill-switch: MULTIPICK_STRAIGHT_GUARD=off reverts to grading it as a single.
+  if (process.env.MULTIPICK_STRAIGHT_GUARD !== 'off' && looksLikeMultiPickStraight(bet.description)) {
+    console.log(`[AutoGrade] Manual-review multi-pick straight: ${bet.id?.slice(0, 8)} | "${(bet.description || '').slice(0, 80)}"`);
+    let diverted = false;
+    try {
+      // Idempotent via GRADER_ELIGIBLE_WHERE: a re-grade of an already-parked
+      // bet changes 0 rows and emits no second drop; if an operator parked it
+      // in needs_review mid-flight, that label is preserved (0-change no-op).
+      const info = db.prepare(`UPDATE bets SET
+        review_status = 'needs_review',
+        grading_state = 'done',
+        grading_lock_until = NULL,
+        grade_reason = ?
+      WHERE id = ? AND (result = 'pending' OR result IS NULL)
+        AND ${GRADER_ELIGIBLE_WHERE}`).run(
+        'Manual review: multi-pick card stored as a single straight — legs were not split; parked for a human to split/grade (NOT graded as one leg)',
+        bet.id
+      );
+      diverted = info.changes > 0;
+    } catch (e) {
+      console.error(`[AutoGrade] Multi-pick divert write error: ${e.message}`);
+    }
+    if (diverted) {
+      bets.recordDrop({
+        betId: bet.id,
+        stage: 'GRADING_DROPPED',
+        dropReason: 'GRADE_MANUAL_REVIEW_MULTIPICK',
+        payload: {
+          sport: bet.sport || null,
+          bet_type: bet.bet_type || null,
+          bet_desc_preview: String(bet.description || '').slice(0, 200),
+        },
+        ingestId: bet.ingest_id || null,
+      });
+    }
+    // Sentinel status runAutoGrade's if/else won't match → silent no-op (the DB
+    // write above is the real finalize; result stays pending for the human).
+    return { status: 'MANUAL_REVIEW_MULTIPICK', evidence: 'Manual review required: multi-pick card stored as a single straight' };
+  }
+
   return await gradeSingleBet(bet);
 }
 
@@ -3963,6 +4070,7 @@ module.exports = {
   _internal: {
     looksLikePlayerProp, parsePlayerPropDescription, searchWeb, isTrustedLossLeg, aggregateParlayLegResults,
     parlayLegDataComplete,                             // early leg-completeness guard (1-leg-parlay fix)
+    looksLikeMultiPickStraight, segmentIsPick,         // multi-pick straight guard (comma-separated card mis-typed as one straight)
     assessSearchResults, getBackendSnapshot, extractSubject, parseBingHtml, // S2 — search backend honesty (M-3) + query builder + defensive Bing parse
 
     // Phase-1 grading gates:
