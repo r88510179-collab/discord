@@ -1,0 +1,1019 @@
+[
+  {
+    "bet_id": "680aa82f7e8ea904472c4a073b29190d",
+    "result": "loss",
+    "profit_units": -1.0,
+    "grade_reason": "The Braves beat the Phillies 3-1 (Apr 18). The game's first run was Felix Reyes's home run in the second inning; the first inning was scoreless for both teams, so the -155 'first-inning run, either team' loses.",
+    "evidence_url": "https://www.espn.com/mlb/recap/_/gameId/401814986",
+    "evidence_source": "espn_mlb",
+    "evidence_quote": "Reyes became the sixth Phillies player to homer in his first at-bat, driving a 94 mph four-seamer from Sale into the seats in right field in the second inning"
+  },
+  {
+    "bet_id": "0b5960a2723c538bb1fc9f0b3e6e3796",
+    "result": "loss",
+    "profit_units": -1.0,
+    "grade_reason": "On the UFC Fight Night (Apr 25) prelims, Eric McConico beat Rodolfo Vieira by unanimous decision (scorecards 28-29, 28-29, 28-29), leaving Vieira 11-5. 'Vieira by Sub or KO' required Vieira to win by finish, so it loses.",
+    "evidence_url": "https://cagesidepress.com/2026/04/25/eric-mcconico-closes-out-ufc-vegas-116-prelims-with-win-over-rodolfo-vieira/",
+    "evidence_source": "cageside_press",
+    "evidence_quote": "Official Result: Eric McConico def. Rodolfo Vieira by unanimous decision (29–28, 29–28, 29–28)"
+  },
+  {
+    "bet_id": "6d37abfc6badfd2ef741e9aa421ea1fb",
+    "result": "unknown",
+    "profit_units": null,
+    "grade_reason": "The entry bundles two different markets ('Rangers ML' and 'A's/Guardians under 9.5') with no indication of whether it is a two-leg parlay or two straight bets, and the mixed-format source gives no game date. The wager structure cannot be determined, so it cannot be settled.",
+    "evidence_url": null,
+    "evidence_source": null,
+    "evidence_quote": null
+  },
+  {
+    "bet_id": "7bad6d124eb100e8bc3afa7e90b1beb4",
+    "result": "unknown",
+    "profit_units": null,
+    "grade_reason": "The pick lists three team names ('Rays, Dodgers, Braves') with no market, line, or game reference. There is no gradable wager.",
+    "evidence_url": null,
+    "evidence_source": null,
+    "evidence_quote": null
+  },
+  {
+    "bet_id": "75623152979a940780aff677ae56e710",
+    "result": "unknown",
+    "profit_units": null,
+    "grade_reason": "Around the post time Budkov Kjaer played two Rome qualifying matches — a win over Otto Virtanen and a loss to Dalibor Svrcina — which produce opposite moneyline results, and the source's timing cannot be established to fix the intended match. The target is ambiguous, so it cannot be settled.",
+    "evidence_url": null,
+    "evidence_source": null,
+    "evidence_quote": null
+  },
+  {
+    "bet_id": "905e69c0465a3d2737e9467b4f856209",
+    "result": "unknown",
+    "profit_units": null,
+    "grade_reason": "The pick reads only 'Tennis picks' with no player, match, or market. There is no gradable wager.",
+    "evidence_url": null,
+    "evidence_source": null,
+    "evidence_quote": null
+  },
+  {
+    "bet_id": "90ccfc64593a9518d298723376e90a51",
+    "result": "unknown",
+    "profit_units": null,
+    "grade_reason": "The entry bundles three MLB markets in one record with no parlay-versus-straights structure, the stake is recorded as 'N/A' so no payout can be computed, and the mixed-format source gives no game date. It cannot be settled.",
+    "evidence_url": null,
+    "evidence_source": null,
+    "evidence_quote": null
+  },
+  {
+    "bet_id": "5c91eb68dc240765aeef1b7053a482cf",
+    "result": "loss",
+    "profit_units": -1.0,
+    "grade_reason": "In the anchoring Rome quarterfinal Medvedev beat Landaluce 1-6, 6-4, 7-5, taking 14 games to Landaluce's 15. A -4.5 games handicap needed Medvedev to win by five-plus games, so it loses (and he also lost the following semifinal).",
+    "evidence_url": "https://www.atptour.com/en/news/landaluce-medvedev-rome-2026-qf-thursday",
+    "evidence_source": "atp_official",
+    "evidence_quote": "he battled past lucky loser Martin Landaluce 1-6, 6-4, 7-5 to set a semi-final showdown with Jannik Sinner"
+  },
+  {
+    "bet_id": "f9de70dc296a653f752b9f64dc66a97e",
+    "result": "unknown",
+    "profit_units": null,
+    "grade_reason": "The description merges an NFL team ('Buffalo Bills') with an NHL team ('Sabres') in a single NHL-tagged entry, leaving no coherent gradable selection. It cannot be settled.",
+    "evidence_url": null,
+    "evidence_source": null,
+    "evidence_quote": null
+  },
+  {
+    "bet_id": "be25e51b58a5a327cc6f93e866b91400",
+    "result": "loss",
+    "profit_units": -1.0,
+    "grade_reason": "In Cavs-Pistons Game 6 (May 15) Mitchell had 18 points, 4 rebounds and 3 assists = 25 combined points+rebounds+assists, under the 35+ line.",
+    "evidence_url": "https://www.cbssports.com/nba/players/2842760/donovan-mitchell/",
+    "evidence_source": "cbs_sports",
+    "evidence_quote": "Mitchell posted 18 points (6-20 FG, 2-6 3Pt, 4-4 FT), four rebounds, three assists and one steal in 37 minutes during Friday's 115-94 loss to the Pistons in Game 6"
+  },
+  {
+    "bet_id": "3a7c2046a9d66947f9afbc4757c9fcc2",
+    "result": "win",
+    "profit_units": 1.1429,
+    "grade_reason": "In the anchoring Rome quarterfinal Medvedev beat Landaluce 1-6, 6-4, 7-5, taking 14 games to Landaluce's 15. A +6.5 games handicap clears comfortably (14 + 6.5 = 20.5 vs 15). Win.",
+    "evidence_url": "https://www.atptour.com/en/news/landaluce-medvedev-rome-2026-qf-thursday",
+    "evidence_source": "atp_official",
+    "evidence_quote": "he battled past lucky loser Martin Landaluce 1-6, 6-4, 7-5 to set a semi-final showdown with Jannik Sinner"
+  },
+  {
+    "bet_id": "b90927f4fc5ebb8e0cf91cb58d168930",
+    "result": "loss",
+    "profit_units": -1.0,
+    "grade_reason": "In the Yankees' May 15 win the only Yankees home run was Ben Rice's; Aaron Judge went 1-for-4 with no home run, so the prop loses.",
+    "evidence_url": "https://www.espn.com/mlb/recap/_/gameId/401815349",
+    "evidence_source": "espn_mlb",
+    "evidence_quote": "Ben Rice added his 14th homer in the ninth for the Yankees"
+  },
+  {
+    "bet_id": "a91e3e0bc0e2d5d7b4a7a827cf9ce87d",
+    "result": "win",
+    "profit_units": 14.0,
+    "grade_reason": "In Sabres-Canadiens Game 6 (May 16) Ivan Demidov scored a first-period power-play goal, so 'Ivan Demidov Goal' (+350) wins.",
+    "evidence_url": "https://www.nhl.com/news/buffalo-sabres-montreal-canadiens-game-6-recap-may-16-2026",
+    "evidence_source": "nhl_com",
+    "evidence_quote": "Demidov put Montreal up 2-1 with a power-play goal at 8:12"
+  },
+  {
+    "bet_id": "dae98165bf085c579f5a9cd9a0a132f7",
+    "result": "loss",
+    "profit_units": -4.0,
+    "grade_reason": "In Sabres-Canadiens Game 6 (May 16) Rasmus Dahlin scored the game's first goal 32 seconds in; Demidov scored later, so 'Ivan Demidov 1st Goal' (+2500) loses.",
+    "evidence_url": "https://www.espn.com/nhl/recap?gameId=401871409",
+    "evidence_source": "espn_nhl",
+    "evidence_quote": "After Dahlin opened the scoring 32 seconds in"
+  },
+  {
+    "bet_id": "091383a89fac9f04819b7ec7d60f79c0",
+    "result": "loss",
+    "profit_units": -2.0,
+    "grade_reason": "In the FA Cup final (May 16) Man City beat Chelsea 1-0; the only goal was Semenyo's (Chelsea's official report lists Palmer in the starting XI, not substituted off). Chelsea scored none, so Cole Palmer's goal-or-assist prop loses.",
+    "evidence_url": "https://www.chelseafc.com/en/news/article/fa-cup-final-report-chelsea-1-0-manchester-city",
+    "evidence_source": "chelsea_official",
+    "evidence_quote": "Scorer: Semenyo 72"
+  },
+  {
+    "bet_id": "857c14f3835a993766ebb2419f7b9beb",
+    "result": "win",
+    "profit_units": 0.8696,
+    "grade_reason": "At UFC Fight Night (May 16) Khaos Williams won by first-round TKO over Nikolay Veretennikov. His moneyline (-115) wins.",
+    "evidence_url": "https://www.ufc.com/news/ufc-fight-night-allen-vs-costa-official-scorecards-judges",
+    "evidence_source": "ufc_com",
+    "evidence_quote": "Official Result: Khaos Williams defeated Nikolay Veretennikov by TKO (strikes) at 3:31 of Round 1"
+  },
+  {
+    "bet_id": "61912d9792440913a8b44459b59e2daf",
+    "result": "unknown",
+    "profit_units": null,
+    "grade_reason": "'Tuco Tokkos +5.5' does not correspond to an identifiable fighter, and a +5.5 handicap has no defined meaning in MMA (no game or point spread). The wager cannot be identified or settled.",
+    "evidence_url": null,
+    "evidence_source": null,
+    "evidence_quote": null
+  },
+  {
+    "bet_id": "9f767dc05449823336e688903245c153",
+    "result": "unknown",
+    "profit_units": null,
+    "grade_reason": "Daniel Barez is a UFC flyweight, but '+3.5' has no defined meaning as an MMA market (no standard game or point spread), so the intended wager cannot be identified or settled.",
+    "evidence_url": null,
+    "evidence_source": null,
+    "evidence_quote": null
+  },
+  {
+    "bet_id": "34d064d2acfb0f04d4492451b73c4894",
+    "result": "win",
+    "profit_units": 1.4815,
+    "grade_reason": "At the IIHF World Championship (May 16) Canada beat Italy 6-0, a six-goal margin. Canada -5.5 covers. Win.",
+    "evidence_url": "https://www.flohockey.tv/articles/15910276-hockey-canada-vs-italy-live-updates-iihf-world-championship-scores",
+    "evidence_source": "flohockey",
+    "evidence_quote": "Macklin Celebrini Scores Two In Canada's Win Over Italy 6-0 At IIHF Worlds"
+  },
+  {
+    "bet_id": "2d1b94bd6fe7a6d875d55c96c3d0a83c",
+    "result": "win",
+    "profit_units": 1.0256,
+    "grade_reason": "In the anchoring Hamburg qualifying match Squire beat Cristian Garin 1-6, 6-4, 6-3, winning the match outright, so a +5.5 games handicap clears easily. Win.",
+    "evidence_url": "https://www.atptour.com/en/scores/archive/hamburg/414/2026/results",
+    "evidence_source": "atp_official",
+    "evidence_quote": "Henri Squire wins the match 1-6 6-4 6-3"
+  },
+  {
+    "bet_id": "3e4a0f1cef8d362545a55cda606963b2",
+    "result": "unknown",
+    "profit_units": null,
+    "grade_reason": "Around the post time Giron played a Hamburg qualifying win over Sumit Nagal (which covers -2.5) and a qualifying loss to Max Schoenhaus (17 games to 19, which does not), and no match-completion times are available to determine which the recap referenced. The target is ambiguous, so it cannot be settled.",
+    "evidence_url": null,
+    "evidence_source": null,
+    "evidence_quote": null
+  },
+  {
+    "bet_id": "5fdca3352695356a8842bb30e40b8467",
+    "result": "loss",
+    "profit_units": -2.0,
+    "grade_reason": "Sinner won the Rome final 6-4, 6-4, a four-game margin (12 games to 8); a -4.5 games handicap needed a five-plus-game margin, so it loses (his semifinal was also a four-game win).",
+    "evidence_url": "https://www.atptour.com/en/news/sinner-ruud-rome-2026-final-sunday",
+    "evidence_source": "atp_official",
+    "evidence_quote": "he defeated Casper Ruud 6-4, 6-4 to win his sixth consecutive ATP Masters 1000 title"
+  },
+  {
+    "bet_id": "33290fccf6017a5cefa343319dce7203",
+    "result": "unknown",
+    "profit_units": null,
+    "grade_reason": "'Atletico Madrid ML' from a mixed-format source carries no opponent, date, or competition, and Atletico played multiple fixtures in this window, so the intended match cannot be identified. It cannot be settled.",
+    "evidence_url": null,
+    "evidence_source": null,
+    "evidence_quote": null
+  },
+  {
+    "bet_id": "9a81c61d428705ca2f791773d50b0f06",
+    "result": "win",
+    "profit_units": 1.6,
+    "grade_reason": "Ruud lost the Rome final 6-4, 6-4, an eight-games-to-twelve scoreline (a four-game deficit); a +5.5 games handicap clears (8 + 5.5 = 13.5 vs 12). Win.",
+    "evidence_url": "https://www.atptour.com/en/news/sinner-ruud-rome-2026-final-sunday",
+    "evidence_source": "atp_official",
+    "evidence_quote": "he defeated Casper Ruud 6-4, 6-4 to win his sixth consecutive ATP Masters 1000 title"
+  },
+  {
+    "bet_id": "d511b5b6ce95a2a358805c9a96907804",
+    "result": "loss",
+    "profit_units": -2.5,
+    "grade_reason": "Rayo Vallecano beat Villarreal 2-0 (May 17); both goals were Rayo's (Camello 28', Alemao 47') and Villarreal were shut out. Pape Gueye (Villarreal #18) started and was substituted off at 72' having scored none, so 'Papa Gueye Goal' loses.",
+    "evidence_url": "https://www.rotowire.com/betting/soccer/game/rayo-vallecano-vs-villarreal-odds-2026-05-17-2572303",
+    "evidence_source": "rotowire",
+    "evidence_quote": "Camello scored a goal while taking five shots (two on goal) during Sunday's 2-0 win over Villarreal"
+  },
+  {
+    "bet_id": "8d324898b5abc3801696f47f8edf27e9",
+    "result": "loss",
+    "profit_units": -3.0,
+    "grade_reason": "In Pistons-Cavaliers Game 7 (May 17, recap anchor) Ausar Thompson's line was 29 MIN, 5 PTS, 7 REB, 0 AST = 12 combined points+rebounds+assists, under the 19.5 line.",
+    "evidence_url": "https://www.espn.com/nba/boxscore/_/gameId/401871339",
+    "evidence_source": "espn_nba",
+    "evidence_quote": "29 5 2-7 1-2 0-2 7 0 1 0 2 1 6 4 -14"
+  },
+  {
+    "bet_id": "1251e549cbea6094164f49f18c84ea58",
+    "result": "loss",
+    "profit_units": -1.0,
+    "grade_reason": "Shelton's last completed match before the post was his Hamburg first-round win over Marcos Giron, 6-3 4-6 7-6(3) — a 2-1 (three-set) result, not 2-0, so the 'Shelton 2:0' correct-score bet loses.",
+    "evidence_url": "https://www.atptour.com/en/scores/archive/hamburg/414/2026/results",
+    "evidence_source": "atp_official",
+    "evidence_quote": "Ben Shelton wins the match 6-3 4-6 7-6(3)"
+  },
+  {
+    "bet_id": "3aef1e80fcb638c1bd18d935622f581c",
+    "result": "win",
+    "profit_units": 2.7273,
+    "grade_reason": "In Western Conference Finals Game 1 (May 18, recap anchor) Shai Gilgeous-Alexander had 24 PTS, 3 REB, 12 AST (double-OT) = 39 combined points+rebounds+assists, under the 41.5 line. The Under wins.",
+    "evidence_url": "https://www.espn.com/nba/boxscore/_/gameId/401873197",
+    "evidence_source": "espn_nba",
+    "evidence_quote": "51 24 7-23 2-7 8-9 3 12 4 5 1 0 3 3 -15"
+  },
+  {
+    "bet_id": "8f669d03387cb4d161d242672c5976f3",
+    "result": "loss",
+    "profit_units": -1.0,
+    "grade_reason": "In Montreal's Game 7 win over Buffalo (May 18, recap anchor) the Canadiens goals were scored by Danault, Bolduc and Newhook (OT). Slafkovsky did not score, so 'Slafkovsky Goal' loses.",
+    "evidence_url": "https://www.nhl.com/news/montreal-canadiens-buffalo-sabres-game-7-recap-may-18-2026",
+    "evidence_source": "nhl_com",
+    "evidence_quote": "Phillip Danault got his first goal of the 2026 playoffs and Zachary Bolduc padded the lead with a power play marker in the first period"
+  },
+  {
+    "bet_id": "5531018d0f3e83129b7f6f910af71af3",
+    "result": "loss",
+    "profit_units": -1.0,
+    "grade_reason": "Manchester City drew 1-1 at Bournemouth (May 19). A moneyline on City to win loses on a draw.",
+    "evidence_url": "https://www.espn.com/soccer/report/_/gameId/740958",
+    "evidence_source": "espn_soccer",
+    "evidence_quote": "Manchester City were held to a 1-1 draw by a Europe-bound Bournemouth side"
+  },
+  {
+    "bet_id": "b197ed242b6825c7adc754420b1ef665",
+    "result": "win",
+    "profit_units": 1.4815,
+    "grade_reason": "Altmaier's last completed match before the post was his Hamburg round-of-16 win over Ben Shelton, 3-6 7-6(4) 6-4 — a 2-1 result. Winning the match (2 sets) covers +1.5 sets.",
+    "evidence_url": "https://www.atptour.com/en/scores/archive/hamburg/414/2026/results",
+    "evidence_source": "atp_official",
+    "evidence_quote": "Daniel Altmaier wins the match 4-6 7-6(4) 6-4"
+  },
+  {
+    "bet_id": "cfa61ef77e62faef7721d22c8d068492",
+    "result": "win",
+    "profit_units": 0.9091,
+    "grade_reason": "The next Colorado-Vegas game (WCF Game 1, May 20) finished 4-2 = 6 total goals, under the 6.5 line.",
+    "evidence_url": "https://www.nhl.com/news/vegas-golden-knights-colorado-avalanche-game-1-recap-may-20-2026",
+    "evidence_source": "nhl_com",
+    "evidence_quote": "the Vegas Golden Knights defeated the Colorado Avalanche 4-2 in Game 1 of the Western Conference Final at Ball Arena on Wednesday"
+  },
+  {
+    "bet_id": "a0bcbcc4f18aefae5a3e276a7559fca8",
+    "result": "loss",
+    "profit_units": -6.0,
+    "grade_reason": "Davidovich Fokina's last completed match before the post was his Hamburg round-of-16 loss to De Minaur, 2-6 6-4 4-6 — 12 games to 16, a four-game deficit. A +3.5 games handicap (12+3.5=15.5<16) loses.",
+    "evidence_url": "https://www.atptour.com/en/scores/archive/hamburg/414/2026/results",
+    "evidence_source": "atp_official",
+    "evidence_quote": "Alex de Minaur wins the match 6-2 4-6 6-4"
+  },
+  {
+    "bet_id": "6ff19f1a1a9ac6f28da3e6b9ce433b83",
+    "result": "loss",
+    "profit_units": -1.0,
+    "grade_reason": "The next Montreal-Carolina game (Eastern Conference Final Game 1, May 21) finished 6-2 = 8 total goals, over the 6 line, so Under 6 loses.",
+    "evidence_url": "https://en.wikipedia.org/wiki/2026_Stanley_Cup_playoffs",
+    "evidence_source": "nhl_com",
+    "evidence_quote": "Game 1: Montreal 6 at Carolina 2"
+  },
+  {
+    "bet_id": "1108841590b06fb19be65d755f2ca696",
+    "result": "loss",
+    "profit_units": -1.0,
+    "grade_reason": "StatMuse game log: in Eastern Conference Finals Game 2 (May 21, the pregame target) OG Anunoby had 14 PTS, 4 REB in 32 minutes = 18 points+rebounds, under the 20.5 line.",
+    "evidence_url": "https://www.statmuse.com/nba/player/og-anunoby-9602/game-log?seasonYear=2026",
+    "evidence_source": "statmuse",
+    "evidence_quote": "Thu 5/21 ... W 109-93 ... 32 14 4 3"
+  },
+  {
+    "bet_id": "09ec010383361cc42bb78b60d0c4117a",
+    "result": "unknown",
+    "profit_units": null,
+    "grade_reason": "The pick reads only 'Tennis picks' with no player, match, or market, and the stake is recorded as 'N/A'. There is no gradable wager.",
+    "evidence_url": null,
+    "evidence_source": null,
+    "evidence_quote": null
+  },
+  {
+    "bet_id": "25fe1497e8f6832188e25d166b30d489",
+    "result": "loss",
+    "profit_units": -2.0,
+    "grade_reason": "Altmaier's last completed match before the post was his Hamburg quarterfinal loss to Tommy Paul, 2-6 5-7 — 7 games to 13, a six-game deficit. A +3.5 games handicap (7+3.5=10.5<13) loses. (Corrects an earlier grade that mislabeled his round-of-16 win as the quarterfinal.)",
+    "evidence_url": "https://www.foxsports.com/tennis/tommy-paul-player",
+    "evidence_source": "fox_sports",
+    "evidence_quote": "Paul defeated Daniel Altmaier in the quarterfinal of the Hamburg Open with a score of 6-2, 7-5"
+  },
+  {
+    "bet_id": "3050b24d78150cf52185f8f83dea2da5",
+    "result": "win",
+    "profit_units": 0.9091,
+    "grade_reason": "San Diego beat the Athletics 7-3 (May 22), so the Padres moneyline wins. (Stored odds -110; ticket text reads -130 — flagged; computed at stored odds.)",
+    "evidence_url": "https://www.espn.com/mlb/game/_/gameId/401815452/athletics-padres",
+    "evidence_source": "espn_mlb",
+    "evidence_quote": "the San Diego Padres beat the Athletics 7-3 on Friday night"
+  },
+  {
+    "bet_id": "0c729aec1f658d724549ed8e7c7a9ea1",
+    "result": "unknown",
+    "profit_units": null,
+    "grade_reason": "De Minaur's May 22 Hamburg match was his semifinal loss to Tommy Paul, but his May 21 quarterfinal was a win over Darderi; with rbss's post-timing relative to the semifinal unverifiable, the anchor is genuinely ambiguous between a win and a loss. Cannot be settled.",
+    "evidence_url": null,
+    "evidence_source": null,
+    "evidence_quote": null
+  },
+  {
+    "bet_id": "a98029ff1ba3a246db247b8a26e64651",
+    "result": "win",
+    "profit_units": 0.9091,
+    "grade_reason": "The next Montreal-Carolina game (Eastern Conference Final Game 2, May 23) finished 3-2 in overtime = 5 total goals, under the 5.5 line. Under wins.",
+    "evidence_url": "https://en.wikipedia.org/wiki/2026_Stanley_Cup_playoffs",
+    "evidence_source": "nhl_com",
+    "evidence_quote": "Game 2: Montreal 2 at Carolina 3 (OT)"
+  },
+  {
+    "bet_id": "3f96e2c83b62cf30b2f867b9249ec38f",
+    "result": "unknown",
+    "profit_units": null,
+    "grade_reason": "The pick reads 'G&P French Open picks' with no player, match, or market, and the stake is recorded as 'N/A'. There is no gradable wager.",
+    "evidence_url": null,
+    "evidence_source": null,
+    "evidence_quote": null
+  },
+  {
+    "bet_id": "4d96c99041db8a408e118efd6bf24eea",
+    "result": "loss",
+    "profit_units": -1.0,
+    "grade_reason": "Marozsan lost his Roland Garros first-round match to Kecmanovic 6-7(0) 3-6 4-6 — 13 games to 19, a six-game deficit. A +2.5 games handicap (13+2.5=15.5<19) loses.",
+    "evidence_url": "https://www.skysports.com/tennis/news/12040/13547318",
+    "evidence_source": "sky_sports",
+    "evidence_quote": "Miomir Kecmanovic bt Fabian Marozsan 7-6 (7-0) 6-3 6-4"
+  },
+  {
+    "bet_id": "683c86736c4b6d2606a658b6862b169e",
+    "result": "loss",
+    "profit_units": -1.0,
+    "grade_reason": "Dellien lost his Roland Garros first-round match to Royer 4-6 2-6 2-6 (bobby recapped the first-round round alongside Marozsan). The Dellien moneyline loses.",
+    "evidence_url": "https://www.skysports.com/tennis/news/12040/13547318",
+    "evidence_source": "sky_sports",
+    "evidence_quote": "Valentin Royer bt (Q) Hugo Dellien 6-4 6-2 6-2"
+  },
+  {
+    "bet_id": "716a7b2cd0dadea096350c0c6d353c94",
+    "result": "loss",
+    "profit_units": -1.0,
+    "grade_reason": "MacKinnon's last completed game before the post was WCF Game 2 (May 22). He recorded no goal in the series' first three games (two assists only), so 'MacKinnon Goal' loses. [stake set to ticket 1u]",
+    "evidence_url": "https://www.nhl.com/news/vegas-golden-knights-colorado-avalanche-2026-western-conference-final-series-preview",
+    "evidence_source": "nhl_com",
+    "evidence_quote": "has been held to two assists in the first three games against Vegas"
+  },
+  {
+    "bet_id": "fb85d588940b9682ac2811064ef65150",
+    "result": "unknown",
+    "profit_units": null,
+    "grade_reason": "Hunter Goodman was out of the Rockies' lineup for the May 24 game against the Diamondbacks (per CBS Sports: rested, Brett Sullivan started at catcher). With no plate appearances, the 'total bases' prop has no result and is voided.",
+    "evidence_url": null,
+    "evidence_source": null,
+    "evidence_quote": null
+  },
+  {
+    "bet_id": "07e146459adba01055fef9b6254d35a4",
+    "result": "loss",
+    "profit_units": -2.0,
+    "grade_reason": "Basavareddy lost the third set of his Roland Garros first-round match against Fritz (6-7, tiebreak 9-11). A 'set 3 moneyline' on Basavareddy loses regardless of the overall result.",
+    "evidence_url": "https://www.skysports.com/tennis/news/12040/13547318",
+    "evidence_source": "sky_sports",
+    "evidence_quote": "(WC) Nishesh Basavareddy bt (7) Taylor Fritz 7-6 (7-5) 7-6 (7-5) 6-7 (9-11) 6-1"
+  },
+  {
+    "bet_id": "b63a6431185522ba7c8d284b03a9dd2d",
+    "result": "unknown",
+    "profit_units": null,
+    "grade_reason": "The bet is on the opening-tip winner of Spurs-Thunder WCF Game 4 (May 24). No retrieved whitelisted source records the jump-ball outcome; the recap's 'from the opening tip the Spurs were the aggressors' describes play, not the tip winner, and 'opened the scoring' does not establish who won the tip. It cannot be settled without play-by-play.",
+    "evidence_url": null,
+    "evidence_source": null,
+    "evidence_quote": null
+  },
+  {
+    "bet_id": "4ac7b11a35d0b4ea1cb772dfbafd2738",
+    "result": "win",
+    "profit_units": 0.9091,
+    "grade_reason": "Hurkacz beat Munar 6-3 6-3 2-6 6-3 in the Roland Garros first round = 35 total games, under the 38.5 line. Under wins.",
+    "evidence_url": "https://bleacherreport.com/articles/25430519",
+    "evidence_source": "bleacher_report",
+    "evidence_quote": "Hubert Hurkacz def. Jaume Munar, 6-3, 6-3, 2-6, 6-3"
+  },
+  {
+    "bet_id": "73a5594034b4bcd3799bba1deae289f4",
+    "result": "loss",
+    "profit_units": -1.0,
+    "grade_reason": "Michelsen beat Shevchenko 6-2 6-4 6-2 in the Roland Garros first round; Shevchenko took 8 games to Michelsen's 18, a ten-game deficit. A +3.5 games handicap loses.",
+    "evidence_url": "https://bleacherreport.com/articles/25430519",
+    "evidence_source": "bleacher_report",
+    "evidence_quote": "Alex Michelsen def. Alexandr Shevchenko, 6-2, 6-4, 6-2"
+  },
+  {
+    "bet_id": "f8109bffce9aef3951f6a45d2050adb5",
+    "result": "loss",
+    "profit_units": -1.0,
+    "grade_reason": "Teichmann beat Samsonova 6-4 6-4 in the Roland Garros first round = 20 total games, over the 19.5 line, so Under 19.5 loses.",
+    "evidence_url": "https://bleacherreport.com/articles/25430519",
+    "evidence_source": "bleacher_report",
+    "evidence_quote": "Jil Teichmann def. No. 20 Liudmila Samsonova, 6-4, 6-4"
+  },
+  {
+    "bet_id": "3c5d680b951b013ac63bd47156a033f6",
+    "result": "win",
+    "profit_units": 0.9091,
+    "grade_reason": "Bondar lost her RG R1 to Svitolina 6-3 1-6 6-7(3) — 13 games to 16, a 3-game deficit. A +5.5 games handicap covers (13+5.5=18.5>16).",
+    "evidence_url": "https://bleacherreport.com/articles/25430796",
+    "evidence_source": "bleacher_report",
+    "evidence_quote": "No. 7 Elina Svitolina def. Anna Bondar, 3-6, 6-1, 7-6 (3)"
+  },
+  {
+    "bet_id": "4335d71ad8b71aaa99a6d78cd0e54b66",
+    "result": "unknown",
+    "profit_units": null,
+    "grade_reason": "The pick reads only 'MLB picks' with no game, market, or line, and the stake is recorded as 'N/A'. There is no gradable wager.",
+    "evidence_url": null,
+    "evidence_source": null,
+    "evidence_quote": null
+  },
+  {
+    "bet_id": "368f497761991e3222e04f816900c8d3",
+    "result": "unknown",
+    "profit_units": null,
+    "grade_reason": "Bet won on the merits but the ticket carries no odds, so the payout cannot be priced; voided and stake refunded (recoverable to a real credit if the closing price is found).",
+    "evidence_url": null,
+    "evidence_source": null,
+    "evidence_quote": null
+  },
+  {
+    "bet_id": "7596d20a589c39c3820ca1f1531b8901",
+    "result": "win",
+    "profit_units": 0.5128,
+    "grade_reason": "In Knicks-Cavaliers ECF Game 4 (May 25, the recap anchor) Mitchell Robinson had 10 rebounds in 18 minutes (Land of Basketball game log), clearing the 4+ line. [stake set to ticket 1u]",
+    "evidence_url": "https://www.landofbasketball.com/nba_players_games/last_10/mitchell_robinson_all.htm",
+    "evidence_source": "landofbasketball",
+    "evidence_quote": "May. 25, 2026"
+  },
+  {
+    "bet_id": "0eabbeaeb4f8282552af1485b4dc58a0",
+    "result": "win",
+    "profit_units": 0.6897,
+    "grade_reason": "Adam Walton beat Medvedev in RG R1 (won the match), so a +9.5 games handicap covers.",
+    "evidence_url": "https://www.skysports.com/tennis/news/12040/13547318",
+    "evidence_source": "sky_sports",
+    "evidence_quote": "(WC) Adam Walton bt (6) Daniil Medvedev 6-2 1-6 6-1 1-6 6-4"
+  },
+  {
+    "bet_id": "97c2f49e8ffcf32678f37bda94e94e8c",
+    "result": "win",
+    "profit_units": 0.9524,
+    "grade_reason": "Tabilo beat Majchrzak 6-1 6-3 6-4 in RG R1 — 18 games to 8, a 10-game margin. A -6.5 games handicap covers (10>6.5).",
+    "evidence_url": "https://www.skysports.com/tennis/news/12040/13547318",
+    "evidence_source": "sky_sports",
+    "evidence_quote": "Alejandro Tabilo bt Kamil Majchrzak 6-1 6-3 6-4"
+  },
+  {
+    "bet_id": "3a0407891ff87ff59d4b237d47e13120",
+    "result": "win",
+    "profit_units": 0.6452,
+    "grade_reason": "Altmaier lost his Roland Garros R1 to Auger-Aliassime 4-6 6-4 4-6 6-1 7-6(7) — 23 games to 27, a 4-game deficit. A +6.5 games handicap covers (23+6.5=>27).",
+    "evidence_url": "https://www.atptour.com/en/news/altmaier-auger-aliassime-roland-garros-2026-tuesday-r1",
+    "evidence_source": "atp_official",
+    "evidence_quote": "rallying from the brink to outlast Daniel Altmaier 4-6, 6-4, 4-6, 6-1, 7-6(7)"
+  },
+  {
+    "bet_id": "a2d82de51c32ce45e57548502e667454",
+    "result": "win",
+    "profit_units": 0.9524,
+    "grade_reason": "Altmaier lost his Roland Garros R1 to Auger-Aliassime 4-6 6-4 4-6 6-1 7-6(7) — 23 games to 27, a 4-game deficit. A +5.5 games handicap covers (23+5.5=>27).",
+    "evidence_url": "https://www.atptour.com/en/news/altmaier-auger-aliassime-roland-garros-2026-tuesday-r1",
+    "evidence_source": "atp_official",
+    "evidence_quote": "rallying from the brink to outlast Daniel Altmaier 4-6, 6-4, 4-6, 6-1, 7-6(7)"
+  },
+  {
+    "bet_id": "34bacd0476d74bf30fe7c463c3e51864",
+    "result": "win",
+    "profit_units": 1.15,
+    "grade_reason": "Altmaier lost his Roland Garros R1 to Auger-Aliassime 4-6 6-4 4-6 6-1 7-6(7) — 23 games to 27, a 4-game deficit. A +4.5 games handicap covers (23+4.5=>27).",
+    "evidence_url": "https://www.atptour.com/en/news/altmaier-auger-aliassime-roland-garros-2026-tuesday-r1",
+    "evidence_source": "atp_official",
+    "evidence_quote": "rallying from the brink to outlast Daniel Altmaier 4-6, 6-4, 4-6, 6-1, 7-6(7)"
+  },
+  {
+    "bet_id": "4c81da0c03c5e49b6f633750e0085ac2",
+    "result": "loss",
+    "profit_units": -1.0,
+    "grade_reason": "Altmaier lost his Roland Garros R1 to Auger-Aliassime 4-6 6-4 4-6 6-1 7-6(7) — 23 games to 27, a 4-game deficit. A +3.5 games handicap fails (23+3.5=<27).",
+    "evidence_url": "https://www.atptour.com/en/news/altmaier-auger-aliassime-roland-garros-2026-tuesday-r1",
+    "evidence_source": "atp_official",
+    "evidence_quote": "rallying from the brink to outlast Daniel Altmaier 4-6, 6-4, 4-6, 6-1, 7-6(7)"
+  },
+  {
+    "bet_id": "670261fc12a3b43966627bc0df8ed163",
+    "result": "loss",
+    "profit_units": -1.0,
+    "grade_reason": "Altmaier lost his Roland Garros R1 to Auger-Aliassime 4-6 6-4 4-6 6-1 7-6(7) — 23 games to 27, a 4-game deficit. A +2.5 games handicap fails (23+2.5=<27).",
+    "evidence_url": "https://www.atptour.com/en/news/altmaier-auger-aliassime-roland-garros-2026-tuesday-r1",
+    "evidence_source": "atp_official",
+    "evidence_quote": "rallying from the brink to outlast Daniel Altmaier 4-6, 6-4, 4-6, 6-1, 7-6(7)"
+  },
+  {
+    "bet_id": "c914da6970ecbeefab307572843daa35",
+    "result": "loss",
+    "profit_units": -1.0,
+    "grade_reason": "Altmaier lost his Roland Garros R1 to Auger-Aliassime 4-6 6-4 4-6 6-1 7-6(7) — 23 games to 27, a 4-game deficit. A +1.5 games handicap fails (23+1.5=<27).",
+    "evidence_url": "https://www.atptour.com/en/news/altmaier-auger-aliassime-roland-garros-2026-tuesday-r1",
+    "evidence_source": "atp_official",
+    "evidence_quote": "rallying from the brink to outlast Daniel Altmaier 4-6, 6-4, 4-6, 6-1, 7-6(7)"
+  },
+  {
+    "bet_id": "4b3298905bebb8fac1343a2e7e589c9f",
+    "result": "win",
+    "profit_units": 0.813,
+    "grade_reason": "Van Assche beat Gaubas 6-4 6-2 2-6 7-5 in RG R1 (won the match), so the moneyline wins.",
+    "evidence_url": "https://www.skysports.com/tennis/news/12040/13547318",
+    "evidence_source": "sky_sports",
+    "evidence_quote": "Luca Van Assche bt (LL) Vilius Gaubas 6-4 6-2 2-6 7-5"
+  },
+  {
+    "bet_id": "920e9c7168da25fa323a00d1d19ab0b3",
+    "result": "win",
+    "profit_units": 0.6897,
+    "grade_reason": "Humbert beat Mannarino 6-3 6-4 6-3 in RG R1 — 18 games to 10, an 8-game margin. A -6.5 games handicap covers (8>6.5).",
+    "evidence_url": "https://bleacherreport.com/articles/25430796",
+    "evidence_source": "bleacher_report",
+    "evidence_quote": "No. 32 Ugo Humbert def. Adrian Mannarino, 6-3, 6-4, 6-3"
+  },
+  {
+    "bet_id": "bc74c5d132ee2704030bebd4e19b7d49",
+    "result": "loss",
+    "profit_units": -1.0,
+    "grade_reason": "Monfils lost his RG R1 to Gaston in five sets, so the Monfils moneyline loses.",
+    "evidence_url": "https://bleacherreport.com/articles/25430796",
+    "evidence_source": "bleacher_report",
+    "evidence_quote": "Hugo Gaston def. Gael Monfils, 6-2, 6-3, 3-6, 2-6, 6-0"
+  },
+  {
+    "bet_id": "0f7156184e95848688ba10679dc85eb7",
+    "result": "loss",
+    "profit_units": -1.0,
+    "grade_reason": "In WCF Game 5 (May 26, the pregame target) Chet Holmgren had 16 points and 11 rebounds = 27 points+rebounds, over the 20.5 line, so the Under loses.",
+    "evidence_url": "https://www.nba.com/player/1631096/chet-holmgren",
+    "evidence_source": "nba_com",
+    "evidence_quote": "Holmgren posted 16 points (6-9 FG, 0-1 3Pt, 4-4 FT), 11 rebounds, one assist, one block and one steal over 30 minutes"
+  },
+  {
+    "bet_id": "597288d0b51165a48da599f0261dabb9",
+    "result": "win",
+    "profit_units": 0.8333,
+    "grade_reason": "Struff beat ninth seed Bublik in four sets in RG R1 (won the match), so a +5.5 games handicap covers.",
+    "evidence_url": "https://www.tennismajors.com/roland-garros-news/auger-aliassime-survives-1-4-down-in-the-fifth-against-altmaier-the-last-first-round-match-of-roland-garros-and-the-first-to-be-decided-in-a-fifth-set-tie-break-851639.html",
+    "evidence_source": "tennis_majors",
+    "evidence_quote": "Struff outlasts Bublik in four sets, the third top-10 player out in the first round at Roland-Garros"
+  },
+  {
+    "bet_id": "ab2bfa1de55089fcc2a44b0ba53de534",
+    "result": "win",
+    "profit_units": 8.5714,
+    "grade_reason": "Altmaier lost his Roland Garros R1 to Auger-Aliassime 4-6 6-4 4-6 6-1 7-6(7) — 23 games to 27, a 4-game deficit. A +5.5 games handicap covers (23+5.5=>27).",
+    "evidence_url": "https://www.atptour.com/en/news/altmaier-auger-aliassime-roland-garros-2026-tuesday-r1",
+    "evidence_source": "atp_official",
+    "evidence_quote": "rallying from the brink to outlast Daniel Altmaier 4-6, 6-4, 4-6, 6-1, 7-6(7)"
+  },
+  {
+    "bet_id": "fe6db93bdae59dbc59fafe6cf1cd79c4",
+    "result": "win",
+    "profit_units": 10.35,
+    "grade_reason": "Altmaier lost his Roland Garros R1 to Auger-Aliassime 4-6 6-4 4-6 6-1 7-6(7) — 23 games to 27, a 4-game deficit. A +4.5 games handicap covers (23+4.5=>27).",
+    "evidence_url": "https://www.atptour.com/en/news/altmaier-auger-aliassime-roland-garros-2026-tuesday-r1",
+    "evidence_source": "atp_official",
+    "evidence_quote": "rallying from the brink to outlast Daniel Altmaier 4-6, 6-4, 4-6, 6-1, 7-6(7)"
+  },
+  {
+    "bet_id": "3535190b814ae1e1d5216ad4f4134db3",
+    "result": "win",
+    "profit_units": 2.0513,
+    "grade_reason": "Fonseca beat Prizmic 3-6 4-6 6-3 6-1 6-2 in RG R2 (won the match, 25 games to 18), so a +4.5 games handicap covers.",
+    "evidence_url": "https://bleacherreport.com/articles/25431110",
+    "evidence_source": "bleacher_report",
+    "evidence_quote": "Joao Fonseca overcame a two-set deficit against Dino Prizmic"
+  },
+  {
+    "bet_id": "04ff16f61ab5fb0ed6ecdab16e75494c",
+    "result": "win",
+    "profit_units": 1.7143,
+    "grade_reason": "Fonseca beat Prizmic in RG R2 (won the match by 7 games), so a +3.5 games handicap covers.",
+    "evidence_url": "https://bleacherreport.com/articles/25431110",
+    "evidence_source": "bleacher_report",
+    "evidence_quote": "Joao Fonseca overcame a two-set deficit against Dino Prizmic"
+  },
+  {
+    "bet_id": "420e4e182eb46a34b3f951baa0fe8664",
+    "result": "win",
+    "profit_units": 1.3793,
+    "grade_reason": "Fonseca beat Prizmic in RG R2 (won the match by 7 games), so a +2.5 games handicap covers.",
+    "evidence_url": "https://bleacherreport.com/articles/25431110",
+    "evidence_source": "bleacher_report",
+    "evidence_quote": "Joao Fonseca overcame a two-set deficit against Dino Prizmic"
+  },
+  {
+    "bet_id": "9d3d074982db946bc6a02cde1efa2ace",
+    "result": "win",
+    "profit_units": 0.8,
+    "grade_reason": "Fonseca beat Prizmic in RG R2 (won the match by 7 games), so a +1.5 games handicap covers.",
+    "evidence_url": "https://bleacherreport.com/articles/25431110",
+    "evidence_source": "bleacher_report",
+    "evidence_quote": "Joao Fonseca overcame a two-set deficit against Dino Prizmic"
+  },
+  {
+    "bet_id": "b3198994e1fc82464ab3b449b78cd2db",
+    "result": "win",
+    "profit_units": 2.0513,
+    "grade_reason": "Diaz Acosta lost his RG R2 to Tien 5-7 6-4 6-3 6-7(4) 3-6 — 26 games to 27, a 1-game deficit. A +7.5 games handicap covers (26+7.5=33.5>27). [stake set to ticket 4u]",
+    "evidence_url": "https://onefootball.com/en/news/diaz-acosta-blew-two-match-points-tien-into-roland-garros-2026-r3-42934990",
+    "evidence_source": "onefootball",
+    "evidence_quote": "the Argentine fell to Learner Tien (18th) 7-5, 4-6, 3-6, 7-6 (4), 6-3"
+  },
+  {
+    "bet_id": "5df44d7cb8cb9c49fb273e1805566e2b",
+    "result": "win",
+    "profit_units": 1.9355,
+    "grade_reason": "Diaz Acosta lost his RG R2 to Tien 26 games to 27, a 1-game deficit. A +6.5 games handicap covers (26+6.5=32.5>27). [stake set to ticket 3u]",
+    "evidence_url": "https://onefootball.com/en/news/diaz-acosta-blew-two-match-points-tien-into-roland-garros-2026-r3-42934990",
+    "evidence_source": "onefootball",
+    "evidence_quote": "the Argentine fell to Learner Tien (18th) 7-5, 4-6, 3-6, 7-6 (4), 6-3"
+  },
+  {
+    "bet_id": "9113745924df1bc89683dee1e772bc3d",
+    "result": "win",
+    "profit_units": 1.9048,
+    "grade_reason": "Diaz Acosta lost his RG R2 to Tien 26 games to 27 (a 1-game deficit). A +5.5 games handicap covers (26+5.5>27). [stake set to ticket 2u]",
+    "evidence_url": "https://onefootball.com/en/news/diaz-acosta-blew-two-match-points-tien-into-roland-garros-2026-r3-42934990",
+    "evidence_source": "onefootball",
+    "evidence_quote": "the Argentine fell to Learner Tien (18th) 7-5, 4-6, 3-6, 7-6 (4), 6-3"
+  },
+  {
+    "bet_id": "f4416fce693c6d0bdace61ba077ee1fe",
+    "result": "win",
+    "profit_units": 1.25,
+    "grade_reason": "Diaz Acosta lost his RG R2 to Tien 26 games to 27 (a 1-game deficit). A +4.5 games handicap covers (26+4.5>27).",
+    "evidence_url": "https://onefootball.com/en/news/diaz-acosta-blew-two-match-points-tien-into-roland-garros-2026-r3-42934990",
+    "evidence_source": "onefootball",
+    "evidence_quote": "the Argentine fell to Learner Tien (18th) 7-5, 4-6, 3-6, 7-6 (4), 6-3"
+  },
+  {
+    "bet_id": "bd5bb34e1d94b89b6223b7f3dd706d6e",
+    "result": "loss",
+    "profit_units": -3.0,
+    "grade_reason": "Vallejo lost his RG R2 to Kouame in a fifth-set tiebreak. A -4.5 games handicap requires winning by 5+, so it loses (he lost the match, 26 games to 27). [stake set to ticket 3u]",
+    "evidence_url": "https://www.skysports.com/tennis/news/12110/13547318",
+    "evidence_source": "sky_sports",
+    "evidence_quote": "(WC) Mahe Kouame bt Adolfo Daniel Vallejo 6-3 7-5 3-6 2-6 7-6 (10-8)"
+  },
+  {
+    "bet_id": "15473d07ae67e791d2ae1368426f6bcc",
+    "result": "loss",
+    "profit_units": -1.0,
+    "grade_reason": "In the 2026 Champions League final (PSG 1-1 Arsenal, 4-3 pens) the first goal was Kai Havertz's at 5'; Kvaratskhelia did not score (he won a penalty that Dembele converted). 'Kvaratskhelia to score first goal' loses.",
+    "evidence_url": "https://www.olympics.com/en/news/football-uefa-mens-champions-league-final-2026-arsenal-psg-results",
+    "evidence_source": "olympics_com",
+    "evidence_quote": "Kai Havertz broke the deadlock after just five minutes to put Arsenal in front"
+  },
+  {
+    "bet_id": "b78e6f3c44fa6654095fdf6724cecb08",
+    "result": "loss",
+    "profit_units": -3.0,
+    "grade_reason": "The Red Sox lost 2-10 to the Braves on May 28, so the Red Sox moneyline loses. (DB odds null; loss = -stake, so no odds needed.)",
+    "evidence_url": "https://www.espn.com/mlb/boxscore/_/gameId/401815530",
+    "evidence_source": "espn_mlb",
+    "evidence_quote": "Braves 10-2 Red Sox (May 28, 2026) Box Score"
+  },
+  {
+    "bet_id": "f684990e1e318222777209968ce74de6",
+    "result": "win",
+    "profit_units": 1.9355,
+    "grade_reason": "Diaz Acosta lost his RG R2 to Tien 26 games to 27 (a 1-game deficit). A +6.5 games handicap covers (26+6.5>27).",
+    "evidence_url": "https://onefootball.com/en/news/diaz-acosta-blew-two-match-points-tien-into-roland-garros-2026-r3-42934990",
+    "evidence_source": "onefootball",
+    "evidence_quote": "the Argentine fell to Learner Tien (18th) 7-5, 4-6, 3-6, 7-6 (4), 6-3"
+  },
+  {
+    "bet_id": "92d9239f518a0b7227ca123df16d12a3",
+    "result": "win",
+    "profit_units": 1.25,
+    "grade_reason": "Diaz Acosta lost his RG R2 to Tien 26 games to 27 (a 1-game deficit). A +4.5 games handicap covers (26+4.5>27).",
+    "evidence_url": "https://onefootball.com/en/news/diaz-acosta-blew-two-match-points-tien-into-roland-garros-2026-r3-42934990",
+    "evidence_source": "onefootball",
+    "evidence_quote": "the Argentine fell to Learner Tien (18th) 7-5, 4-6, 3-6, 7-6 (4), 6-3"
+  },
+  {
+    "bet_id": "5ee21dac70c00f46e884726c1fe64678",
+    "result": "win",
+    "profit_units": 0.9524,
+    "grade_reason": "In his start that window (Thu 5/28 vs the Cubs; the 5/29 timestamp is slip ingestion) Paul Skenes struck out 10 over 5.1 innings (StatMuse game log), over the 6.5 line.",
+    "evidence_url": "https://www.statmuse.com/mlb/player/paul-skenes-96925/game-log",
+    "evidence_source": "statmuse",
+    "evidence_quote": "Thu 5/28 ... PIT vs CHC ... L 2-7 ... SO 10"
+  },
+  {
+    "bet_id": "c7db336a2657bdea3ed158606a7770aa",
+    "result": "loss",
+    "profit_units": -4.0,
+    "grade_reason": "In his RG R2 (the recap anchor) Nakashima won the match but lost the third set 5-7, so the set-3 moneyline loses.",
+    "evidence_url": "https://www.skysports.com/tennis/news/12110/13547318",
+    "evidence_source": "sky_sports",
+    "evidence_quote": "(31) Brandon Nakashima bt Luca Van Assche 5-7 (5-7) 6-4 5-7 6-1 6-3"
+  },
+  {
+    "bet_id": "20a10aa5443fcb241541cd877abe3a21",
+    "result": "loss",
+    "profit_units": -4.0,
+    "grade_reason": "Shelton lost his RG R2 to Collignon in straight sets, losing the second set 5-7, so the set-2 moneyline loses.",
+    "evidence_url": "https://www.skysports.com/tennis/news/12110/13547318",
+    "evidence_source": "sky_sports",
+    "evidence_quote": "Raphael Collignon bt (5) Ben Shelton 6-4 7-5 6-4"
+  },
+  {
+    "bet_id": "d29b466d0c35d66554194102992ec7d6",
+    "result": "win",
+    "profit_units": 1.7778,
+    "grade_reason": "Fonseca beat Djokovic 4-6 4-6 6-3 7-5 7-5 in RG R3 (won by 3 games), so a +6.5 games handicap covers.",
+    "evidence_url": "https://www.cbssports.com/tennis/news/2026-french-open-results-novak-djokovic-upset-joao-fonseca-roland-garros/",
+    "evidence_source": "cbs_sports",
+    "evidence_quote": "Novak Djokovic was ousted in a five-set thriller (4-6, 4-6, 6-3, 7-5, 7-5) by 19-year-old rising Brazilian star Joao Fonseca"
+  },
+  {
+    "bet_id": "a17d44a133e04faee1d8eace2b44e39b",
+    "result": "win",
+    "profit_units": 1.7143,
+    "grade_reason": "Fonseca beat Djokovic 4-6 4-6 6-3 7-5 7-5 in RG R3 (won by 3 games), so a +5.5 games handicap covers.",
+    "evidence_url": "https://www.cbssports.com/tennis/news/2026-french-open-results-novak-djokovic-upset-joao-fonseca-roland-garros/",
+    "evidence_source": "cbs_sports",
+    "evidence_quote": "Novak Djokovic was ousted in a five-set thriller (4-6, 4-6, 6-3, 7-5, 7-5) by 19-year-old rising Brazilian star Joao Fonseca"
+  },
+  {
+    "bet_id": "f02a0958931fbe8e4c2d13772cf1b4f8",
+    "result": "win",
+    "profit_units": 1.7391,
+    "grade_reason": "Fonseca beat Djokovic 4-6 4-6 6-3 7-5 7-5 in RG R3 (won by 3 games), so a +4.5 games handicap covers.",
+    "evidence_url": "https://www.cbssports.com/tennis/news/2026-french-open-results-novak-djokovic-upset-joao-fonseca-roland-garros/",
+    "evidence_source": "cbs_sports",
+    "evidence_quote": "Novak Djokovic was ousted in a five-set thriller (4-6, 4-6, 6-3, 7-5, 7-5) by 19-year-old rising Brazilian star Joao Fonseca"
+  },
+  {
+    "bet_id": "eb89c7dc3c5866b90e7cee66b188c70a",
+    "result": "win",
+    "profit_units": 1.0,
+    "grade_reason": "Fonseca beat Djokovic 4-6 4-6 6-3 7-5 7-5 in RG R3 (won by 3 games), so a +3.5 games handicap covers.",
+    "evidence_url": "https://www.cbssports.com/tennis/news/2026-french-open-results-novak-djokovic-upset-joao-fonseca-roland-garros/",
+    "evidence_source": "cbs_sports",
+    "evidence_quote": "Novak Djokovic was ousted in a five-set thriller (4-6, 4-6, 6-3, 7-5, 7-5) by 19-year-old rising Brazilian star Joao Fonseca"
+  },
+  {
+    "bet_id": "2306a85df82fa620c2732fa19ebba828",
+    "result": "win",
+    "profit_units": 0.65,
+    "grade_reason": "Fonseca beat Djokovic 4-6 4-6 6-3 7-5 7-5 in RG R3 (won by 3 games), so a +2.5 games handicap covers.",
+    "evidence_url": "https://www.cbssports.com/tennis/news/2026-french-open-results-novak-djokovic-upset-joao-fonseca-roland-garros/",
+    "evidence_source": "cbs_sports",
+    "evidence_quote": "Novak Djokovic was ousted in a five-set thriller (4-6, 4-6, 6-3, 7-5, 7-5) by 19-year-old rising Brazilian star Joao Fonseca"
+  },
+  {
+    "bet_id": "9ec575e591ba9a5bc7fd077d1fa23e0f",
+    "result": "win",
+    "profit_units": 0.375,
+    "grade_reason": "Fonseca beat Djokovic 4-6 4-6 6-3 7-5 7-5 in RG R3 (won by 3 games), so a +1.5 games handicap covers.",
+    "evidence_url": "https://www.cbssports.com/tennis/news/2026-french-open-results-novak-djokovic-upset-joao-fonseca-roland-garros/",
+    "evidence_source": "cbs_sports",
+    "evidence_quote": "Novak Djokovic was ousted in a five-set thriller (4-6, 4-6, 6-3, 7-5, 7-5) by 19-year-old rising Brazilian star Joao Fonseca"
+  },
+  {
+    "bet_id": "1de45fe5d04bfee0e023221a19abc9e2",
+    "result": "win",
+    "profit_units": 4.0,
+    "grade_reason": "Fonseca beat Djokovic 4-6 4-6 6-3 7-5 7-5 in RG R3 (the +400 underdog won outright), so the moneyline wins.",
+    "evidence_url": "https://www.cbssports.com/tennis/news/2026-french-open-results-novak-djokovic-upset-joao-fonseca-roland-garros/",
+    "evidence_source": "cbs_sports",
+    "evidence_quote": "Novak Djokovic was ousted in a five-set thriller (4-6, 4-6, 6-3, 7-5, 7-5) by 19-year-old rising Brazilian star Joao Fonseca"
+  },
+  {
+    "bet_id": "57572a00eed91771498e70ad68a1e9c9",
+    "result": "win",
+    "profit_units": 0.4444,
+    "grade_reason": "Fonseca beat Djokovic 4-6 4-6 6-3 7-5 7-5 in RG R3 (won by 3 games), so a +6.5 games handicap covers.",
+    "evidence_url": "https://www.cbssports.com/tennis/news/2026-french-open-results-novak-djokovic-upset-joao-fonseca-roland-garros/",
+    "evidence_source": "cbs_sports",
+    "evidence_quote": "Novak Djokovic was ousted in a five-set thriller (4-6, 4-6, 6-3, 7-5, 7-5) by 19-year-old rising Brazilian star Joao Fonseca"
+  },
+  {
+    "bet_id": "5f28d0ec7cdff5f02b4bdbebf8fe62be",
+    "result": "win",
+    "profit_units": 0.5714,
+    "grade_reason": "Fonseca beat Djokovic 4-6 4-6 6-3 7-5 7-5 in RG R3 (won by 3 games), so a +5.5 games handicap covers.",
+    "evidence_url": "https://www.cbssports.com/tennis/news/2026-french-open-results-novak-djokovic-upset-joao-fonseca-roland-garros/",
+    "evidence_source": "cbs_sports",
+    "evidence_quote": "Novak Djokovic was ousted in a five-set thriller (4-6, 4-6, 6-3, 7-5, 7-5) by 19-year-old rising Brazilian star Joao Fonseca"
+  },
+  {
+    "bet_id": "58fc06ece8c95da924715d8c085bedc5",
+    "result": "win",
+    "profit_units": 0.8696,
+    "grade_reason": "Fonseca beat Djokovic 4-6 4-6 6-3 7-5 7-5 in RG R3 (won by 3 games), so a +4.5 games handicap covers.",
+    "evidence_url": "https://www.cbssports.com/tennis/news/2026-french-open-results-novak-djokovic-upset-joao-fonseca-roland-garros/",
+    "evidence_source": "cbs_sports",
+    "evidence_quote": "Novak Djokovic was ousted in a five-set thriller (4-6, 4-6, 6-3, 7-5, 7-5) by 19-year-old rising Brazilian star Joao Fonseca"
+  },
+  {
+    "bet_id": "d5198c10a5ead98f61c86859c38a27b8",
+    "result": "win",
+    "profit_units": 1.0,
+    "grade_reason": "Fonseca beat Djokovic 4-6 4-6 6-3 7-5 7-5 in RG R3 (won by 3 games), so a +3.5 games handicap covers.",
+    "evidence_url": "https://www.cbssports.com/tennis/news/2026-french-open-results-novak-djokovic-upset-joao-fonseca-roland-garros/",
+    "evidence_source": "cbs_sports",
+    "evidence_quote": "Novak Djokovic was ousted in a five-set thriller (4-6, 4-6, 6-3, 7-5, 7-5) by 19-year-old rising Brazilian star Joao Fonseca"
+  },
+  {
+    "bet_id": "0d3e00e03a1321988048d6b681e6d4bd",
+    "result": "win",
+    "profit_units": 1.3,
+    "grade_reason": "Fonseca beat Djokovic 4-6 4-6 6-3 7-5 7-5 in RG R3 (won by 3 games), so a +2.5 games handicap covers.",
+    "evidence_url": "https://www.cbssports.com/tennis/news/2026-french-open-results-novak-djokovic-upset-joao-fonseca-roland-garros/",
+    "evidence_source": "cbs_sports",
+    "evidence_quote": "Novak Djokovic was ousted in a five-set thriller (4-6, 4-6, 6-3, 7-5, 7-5) by 19-year-old rising Brazilian star Joao Fonseca"
+  },
+  {
+    "bet_id": "0ea7c64f3cad70baddfbe2694e6f8e80",
+    "result": "win",
+    "profit_units": 1.5,
+    "grade_reason": "Fonseca beat Djokovic 4-6 4-6 6-3 7-5 7-5 in RG R3 (won by 3 games), so a +1.5 games handicap covers.",
+    "evidence_url": "https://www.cbssports.com/tennis/news/2026-french-open-results-novak-djokovic-upset-joao-fonseca-roland-garros/",
+    "evidence_source": "cbs_sports",
+    "evidence_quote": "Novak Djokovic was ousted in a five-set thriller (4-6, 4-6, 6-3, 7-5, 7-5) by 19-year-old rising Brazilian star Joao Fonseca"
+  },
+  {
+    "bet_id": "4539df2e499927b20b72f134a1947296",
+    "result": "unknown",
+    "profit_units": null,
+    "grade_reason": "The recorded odds (+1900) are corrupt for a 1+ shot-on-target prop (which would price near -500), so the ticket is unreliable as stored. Saka's shot-on-target count in the Champions League final is not verifiable from available sources (player ratings describe a defensive, shot-less performance, subbed off 83', but state no SOT figure). Voided.",
+    "evidence_url": null,
+    "evidence_source": null,
+    "evidence_quote": null
+  },
+  {
+    "bet_id": "94ee365d06f59b382fb15d76d21ce4b9",
+    "result": "loss",
+    "profit_units": -1.0,
+    "grade_reason": "In the 2026 Champions League final the first goal was Kai Havertz's at 5'; Kvaratskhelia did not score, so '1st Goalscorer: Kvaratskhelia' loses.",
+    "evidence_url": "https://www.olympics.com/en/news/football-uefa-mens-champions-league-final-2026-arsenal-psg-results",
+    "evidence_source": "olympics_com",
+    "evidence_quote": "Kai Havertz broke the deadlock after just five minutes to put Arsenal in front"
+  },
+  {
+    "bet_id": "453e09526e70cacbcdbef06927d27ba7",
+    "result": "win",
+    "profit_units": 1.8182,
+    "grade_reason": "Bosnia drew 1-1 with Canada on June 12. A +0.5 Asian handicap (win or draw) covers on a draw.",
+    "evidence_url": "https://www.uefa.com/european-qualifiers/news/02a6-20c3aa0fafe2-4a6b4459a3fc-1000--2026-world-cup-all-the-european-sides-group-stage-fixtures-a/",
+    "evidence_source": "uefa",
+    "evidence_quote": "Friday 12 June: D 1-1 vs Canada (Toronto)"
+  },
+  {
+    "bet_id": "7e0e7777d778776b69531156c19b6544",
+    "result": "loss",
+    "profit_units": -1.0,
+    "grade_reason": "Nickal beat Daukaus by TKO at 4:34 of Round 1, so the fight did not reach 1.5 rounds; Over 1.5 Total Rounds loses.",
+    "evidence_url": "https://www.cbssports.com/ufc/news/ufc-freedom-250-white-house-results-highlights-bo-nickal-kyle-daukaus-knockout/",
+    "evidence_source": "cbs_sports",
+    "evidence_quote": "The finish came at the 4:34 mark of Round 1"
+  },
+  {
+    "bet_id": "16df346494edfa7bf1b781d93d3321f3",
+    "result": "win",
+    "profit_units": 4.5455,
+    "grade_reason": "Austria beat Jordan 3-1 in their opening match (June 17; pick posted the day before). Winning by 2 covers -1.5.",
+    "evidence_url": "https://www.cbssports.com/soccer/news/world-cup-group-standings-table-results/",
+    "evidence_source": "cbs_sports",
+    "evidence_quote": "Wednesday, June 17 Austria 3, Jordan 1"
+  },
+  {
+    "bet_id": "d58bb52bc44cf823eaaf855dac2dfb26",
+    "result": "win",
+    "profit_units": 3.6364,
+    "grade_reason": "Algeria lost 0-3 to Argentina on June 16, scoring zero, so the Algeria team-total Under 0.5 wins.",
+    "evidence_url": "https://sports.yahoo.com/soccer/article/2026-world-cup-results-standings-and-schedule-live-scores-group-stage-updates-and-how-to-watch-050724193.html",
+    "evidence_source": "yahoo_sports",
+    "evidence_quote": "Tuesday, June 16: Argentina 3, Algeria 0"
+  },
+  {
+    "bet_id": "af42d18b715e63cb1a6adf567b6c5644",
+    "result": "unknown",
+    "profit_units": null,
+    "grade_reason": "Germany did not play June 21; the nearest match (recap anchor) is the June 20 win over Ivory Coast, where ESPN says Havertz only 'came close' and does not confirm a shot on target. No verifiable SOT figure + null odds -> voided.",
+    "evidence_url": null,
+    "evidence_source": null,
+    "evidence_quote": null
+  },
+  {
+    "bet_id": "aae0e7e42d1beb5852313ef0a5d1df21",
+    "result": "win",
+    "profit_units": 0.8333,
+    "grade_reason": "The Cubs swept their four-game series against the Mets (June 22-25), so they won on June 22 and the moneyline wins.",
+    "evidence_url": "https://www.espn.com/mlb/game/_/gameId/401815897/cubs-mets",
+    "evidence_source": "espn_mlb",
+    "evidence_quote": "a sweep of the four-game series"
+  },
+  {
+    "bet_id": "8436c0c7a28e303fed1d561af23fa595",
+    "result": "win",
+    "profit_units": 4.6512,
+    "grade_reason": "UFC (not soccer): 'Christian Rodriguez ML' is a fighter moneyline from UFC Vegas 119 (Jun 20), mislabeled sport=Soccer by the vision parser. Rodriguez beat Hyder Amil by first-round guillotine, so the ML wins. Stake set to ticket 10u (DB had 1u).",
+    "evidence_url": "https://www.si.com/fannation/mma/news/ufc-fight-night-manel-kape-vs-kyoji-horiguchi-2-live-stream-results-highlights",
+    "evidence_source": "si_mma",
+    "evidence_quote": "Christian Rodriguez def. Hyder Amil via Technical Submission (Guillotine Choke): R1, 3:43"
+  },
+  {
+    "bet_id": "32bb89a6b974769acb80ad18da548187",
+    "result": "win",
+    "profit_units": 4.5455,
+    "grade_reason": "Recap anchor: Spain did not play June 23; last completed match was the June 21 win vs Saudi Arabia (the -110 line on Spain -2.5 fits that weak opponent, not the June 26 Uruguay match). Spain won 4-0, covering -2.5.",
+    "evidence_url": "https://www.cbssports.com/soccer/news/world-cup-group-standings-table-results/",
+    "evidence_source": "cbs_sports",
+    "evidence_quote": "Sunday, June 21 Spain 4, Saudi Arabia 0"
+  },
+  {
+    "bet_id": "424e92512fb85e90c2b19553c3a262dd",
+    "result": "win",
+    "profit_units": 3.0303,
+    "grade_reason": "Recap anchor: Japan did not play June 23; last completed match was the June 20 win over Tunisia 4-0, so the moneyline wins.",
+    "evidence_url": "https://www.cbssports.com/soccer/news/world-cup-group-standings-table-results/",
+    "evidence_source": "cbs_sports",
+    "evidence_quote": "Saturday, June 20 Netherlands 5, Sweden 1 Tunisia 0, Japan 4"
+  },
+  {
+    "bet_id": "bf1133c5e8a5de5b82527ea78c21e4d0",
+    "result": "win",
+    "profit_units": 4.5455,
+    "grade_reason": "Recap anchor: Spain did not play June 23; last completed match was the June 21 win vs Saudi Arabia (the -110 line on Spain -2.5 fits that weak opponent, not the June 26 Uruguay match). Spain won 4-0, covering -2.5.",
+    "evidence_url": "https://www.cbssports.com/soccer/news/world-cup-group-standings-table-results/",
+    "evidence_source": "cbs_sports",
+    "evidence_quote": "Sunday, June 21 Spain 4, Saudi Arabia 0"
+  },
+  {
+    "bet_id": "f39d7da9109ce0b4c8bef4c47f36e16f",
+    "result": "win",
+    "profit_units": 2.7027,
+    "grade_reason": "In Portugal's June 23 match Ronaldo scored twice in a 5-0 win over Uzbekistan, so 'Ronaldo Goal' wins.",
+    "evidence_url": "https://www.fourfourtwo.com/competition/all-of-the-world-cup-scores-so-far-at-the-2026-tournament",
+    "evidence_source": "fourfourtwo",
+    "evidence_quote": "Cristiano Ronaldo announced himself at this tournament with two goals as Portugal beat Uzbekistan 5-0"
+  },
+  {
+    "bet_id": "ea2a00dcb4acc4f40324c03f012c1fef",
+    "result": "unknown",
+    "profit_units": null,
+    "grade_reason": "Bet won on the merits but the ticket carries no odds, so the payout cannot be priced; voided and stake refunded (recoverable to a real credit if the closing price is found).",
+    "evidence_url": null,
+    "evidence_source": null,
+    "evidence_quote": null
+  },
+  {
+    "bet_id": "08e39a1b595686d1fb780c9ad030fabc",
+    "result": "win",
+    "profit_units": 0.6897,
+    "grade_reason": "Vinicius scored twice in Brazil's 3-0 win over Scotland on June 25, so 'to Score or Give Assist' wins.",
+    "evidence_url": "https://www.goal.com/en/lists/world-cup-2026-golden-boot-standings-fifa-award/blt29fdba0896b8fd09",
+    "evidence_source": "goal",
+    "evidence_quote": "having been selected from the start against Scotland, Vinicius took his tally to four for tournament with two more goals"
+  }
+]
