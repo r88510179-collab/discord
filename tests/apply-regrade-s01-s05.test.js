@@ -19,6 +19,12 @@
 const path = require('path');
 const os = require('os');
 
+// The script resolves app-module requires from APP_ROOT (default /app for its
+// in-container /tmp upload). Point it at the repo root so requiring the script
+// below — and the Section C child processes that inherit this env — resolve
+// services/gradeOverride.js locally. Honors an operator-set APP_ROOT.
+process.env.APP_ROOT = process.env.APP_ROOT || path.join(__dirname, '..');
+
 const S = require('../scripts/apply-regrade-s01-s05.js');
 
 let pass = 0, fail = 0;

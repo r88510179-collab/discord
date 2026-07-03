@@ -60,11 +60,17 @@
 const fs = require('fs');
 const path = require('path');
 
+// App-module resolution root. The operator uploads this script to /tmp and runs
+// it there (sftp), so a relative `../services/…` require would resolve against
+// /tmp and throw MODULE_NOT_FOUND. Resolve app modules from APP_ROOT (default
+// /app, matching apply-pregate-corrections.js) so load works regardless of the
+// script's on-disk location. requireBetterSqlite() uses the same base.
+const APP_ROOT = process.env.APP_ROOT || '/app';
+
 // Canonical result vocabulary — reused from services/gradeOverride.js so our
 // mapped targets ('win'/'loss'/'void') can never drift from the codebase set.
-// Required relatively so an in-container /app/scripts upload resolves it at
-// /app/services/gradeOverride.js. Side-effect-free (no better-sqlite3 at load).
-const { VALID_RESULTS } = require('../services/gradeOverride');
+// Side-effect-free (no better-sqlite3 at load).
+const { VALID_RESULTS } = require(path.join(APP_ROOT, 'services/gradeOverride'));
 
 const GRADER_VERSION = 'manual-regrade-s01-s05';
 const ARCHIVED_BY = 'manual-regrade-s01-s05';
@@ -308,7 +314,7 @@ function parseArgs(argv) {
 }
 
 function requireBetterSqlite() {
-  const candidates = ['better-sqlite3', path.join(process.env.APP_ROOT || '/app', 'node_modules', 'better-sqlite3')];
+  const candidates = ['better-sqlite3', path.join(APP_ROOT, 'node_modules', 'better-sqlite3')];
   let lastErr;
   for (const c of candidates) { try { return require(c); } catch (err) { lastErr = err; } }
   throw new Error(`better-sqlite3 not resolvable (tried ${candidates.join(', ')}): ${lastErr && lastErr.message}`);
