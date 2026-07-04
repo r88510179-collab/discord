@@ -981,7 +981,10 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
     const cleanText = hardScrub(fullText);
 
     // ═══ Multi-image loop: process EVERY image attachment, not just the first ═══
-    const imageUrls = hasImages ? combinedImages.map(img => img.url) : [];
+    // Only multi-process real slip attachments; TweetShift/FixTwitter embed cards
+    // (slip card + research card) must NOT each parse into a separate bet and merge
+    // into a doubled parlay. Mirrors handleSlipFeed. See selectSlipImages (F-07).
+    const imageUrls = hasImages ? selectSlipImages(combinedImages).map(img => img.url) : [];
     const textPrompt = cleanText || 'Read the attached betting slip image and extract all bets.';
 
     // Merge results from all images into a single parsed object

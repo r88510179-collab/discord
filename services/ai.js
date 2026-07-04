@@ -425,6 +425,64 @@ function toSafeNumber(value, fallback = null) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+// ── Odds resolution ─────────────────────────────────────────
+// American odds are always |o| >= 100. Parlays: prefer exact leg-combination,
+// then derive from the slip's total-return payout, then a plausible model value.
+// Unknown resolves to null — NEVER a fabricated -110 (that silently corrupts P&L:
+// a winning +10372 would grade as +0.91u). A bare -110 on a PARLAY is treated as a
+// stale default and ignored in favor of derived odds.
+const ODDS_MAX = 1000000; // hard ceiling — anything larger is a hallucination
+
+function americanFromDecimal(dec) {
+  if (!(dec > 1)) return null;
+  return dec >= 2 ? Math.round((dec - 1) * 100) : Math.round(-100 / (dec - 1));
+}
+
+function decimalFromAmerican(o) {
+  if (o == null || o === 0) return null;
+  return o > 0 ? (o / 100 + 1) : (100 / -o + 1);
+}
+
+function combineLegOdds(legs) {
+  if (!Array.isArray(legs) || legs.length === 0) return null;
+  let dec = 1;
+  for (const l of legs) {
+    const o = toSafeNumber(l?.odds, null);
+    // Every leg must be a valid American price — mirror resolveOdds's rawOk
+    // invariant (|o| in [100, ODDS_MAX]) on BOTH bounds. A decimal (1.91) or
+    // sub-100 junk leg is treated as UNPRICED so we fall through to payout
+    // derivation instead of computing garbage combined odds (e.g. legs read as
+    // decimals collapse to a large negative American number). Combined odds are
+    // NOT ceiling-clamped afterward — a real longshot parlay legitimately runs
+    // past ODDS_MAX (the +10372 Cape Verde case); the ceiling only rejects an
+    // individual hallucinated leg price.
+    if (o == null || Math.abs(o) < 100 || Math.abs(o) > ODDS_MAX) return null;
+    const d = decimalFromAmerican(o);
+    if (d == null) return null; // need every leg priced
+    dec *= d;
+  }
+  return americanFromDecimal(dec);
+}
+
+function resolveOdds(bet) {
+  const isParlay = String(bet?.bet_type || '').toLowerCase() === 'parlay';
+  const raw = toSafeNumber(bet?.odds, null);
+  const rawOk = raw != null && Math.abs(raw) >= 100 && Math.abs(raw) <= ODDS_MAX;
+  const w = toSafeNumber(bet?.wager, null);
+  const p = toSafeNumber(bet?.payout, null);
+  // Slip "Total Payout" / "Potential payout" = total return (stake + winnings).
+  const fromPayout = (w > 0 && p > w) ? americanFromDecimal(p / w) : null;
+
+  if (isParlay) {
+    const combined = combineLegOdds(bet?.legs);
+    if (combined != null) return combined;     // exact when all legs are priced
+    if (fromPayout != null) return fromPayout; // SGP/correlated: no per-leg prices
+    return rawOk ? Math.trunc(raw) : null;     // do not trust a bare default here
+  }
+  if (rawOk) return Math.trunc(raw);           // straight: trust a plausible value
+  return fromPayout;                           // else derive; null if unknown
+}
+
 function normalizeBet(bet) {
   if (!bet || typeof bet !== 'object') return null;
   // Cap description length defensively. Parlays legitimately run long because
@@ -447,8 +505,7 @@ function normalizeBet(bet) {
   const declaredSport = bet.sport;
   const description = normalizeDescription(rawDesc, declaredSport);
 
-  const rawOdds = toSafeNumber(bet.odds, -110);
-  const odds = Math.abs(rawOdds) > 9999 ? -110 : Math.trunc(rawOdds);
+  const odds = resolveOdds(bet);
   const units = Math.min(Math.max(toSafeNumber(bet.units, 1), 0.01), 100);
   const betType = String(bet.bet_type || 'straight').toLowerCase();
   const allowedTypes = new Set(['straight', 'parlay', 'teaser', 'prop', 'future', 'ladder']);
@@ -2519,4 +2576,4 @@ function normalizeEventDate(raw) {
   return null;
 }
 
-module.exports = { parseBetText, parseBetSlipImage, processImageForAI, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, reassignDollarStakeUnits, evaluateTweet, validateParsedBet, validateLegSportConsistency, validateLegShape, isSportsbookBrand, reclassifySport, inferLegSport, descNamesNationalTeam, disambiguateAmbiguousTeam, matchesKboTeam, normalizeKboLeg, declaredSportIncludesKbo, isInSeason, normalizeEventDate, AMBIGUITY_THRESHOLD, tryVisionGemma, parseGemmaOutputWithCerebras, runGemmaVisionFallback, logVisionFailure, GEMMA_SLIP_PROMPT, gemmaHealth, isGemmaHealthy, recordGemmaResult, callLLM, callLLMResult, callGemini, callOpenAI, AdapterError, FALLBACK_ELIGIBLE };
+module.exports = { parseBetText, parseBetSlipImage, processImageForAI, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, reassignDollarStakeUnits, evaluateTweet, validateParsedBet, validateLegSportConsistency, validateLegShape, isSportsbookBrand, reclassifySport, inferLegSport, descNamesNationalTeam, disambiguateAmbiguousTeam, matchesKboTeam, normalizeKboLeg, declaredSportIncludesKbo, isInSeason, normalizeEventDate, AMBIGUITY_THRESHOLD, tryVisionGemma, parseGemmaOutputWithCerebras, runGemmaVisionFallback, logVisionFailure, GEMMA_SLIP_PROMPT, gemmaHealth, isGemmaHealthy, recordGemmaResult, callLLM, callLLMResult, callGemini, callOpenAI, AdapterError, FALLBACK_ELIGIBLE, resolveOdds };
