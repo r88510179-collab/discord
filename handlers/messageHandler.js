@@ -1,6 +1,6 @@
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const { parseBetText, parseBetSlipImage, processImageForAI, evaluateTweet, validateParsedBet } = require('../services/ai');
-const { getOrCreateCapper, createBetWithLegs, isAuditMode } = require('../services/database');
+const { getOrCreateCapper, createBetWithLegs, isAuditMode, db } = require('../services/database');
 const { betEmbed } = require('../utils/embeds');
 const { postPickTracked } = require('../services/dashboard');
 const { sendStagingEmbed } = require('../services/warRoom');
@@ -1590,4 +1590,238 @@ async function reportErrorToAdmin(error, context, client) {
   }
 }
 
-module.exports = { handleMessage, processSlipImage, buildParsedPayload, sendHoldReviewEmbed, getImageAttachments, resolveCapper, selectSlipImages, slipImageIngestId };
+// ═══════════════════════════════════════════════════════════════
+// 🔄 re-ingest — operator-triggered slip re-extraction
+// ─────────────────────────────────────────────────────────────
+// reingestSlipMessage re-fetches a Discord message's slip image(s) and
+// re-extracts them through the Onyx-aware, BETS-ONLY vision path
+// (processImageForAI → parseBetSlipImage), then stages fresh to the War Room —
+// the SAME TYPE 1 vision_slip path PR #179's pure-slip re-extraction uses. It
+// operates on the Discord MESSAGE, not pipeline state, so it recovers dropped,
+// landed, AND landed-but-broken slips alike, bypassing the green-check
+// parseBetText win-classifier entirely.
+//
+// It reuses the shipped PRIMITIVES without touching the load-bearing PR #179
+// re-extraction branches. Because this is an OPERATOR-AUTHORIZED override
+// (gated to OWNER_ID + a human-submission channel by the reaction listener),
+// it deliberately does NOT run the automated-firehose anti-hallucination
+// validator (validateParsedBet) — the operator has already vouched for the
+// slip; the validator exists to catch parser hallucinations on the unattended
+// ingest path, not to veto a manual re-ingest.
+//
+// Returns { status, betIds }. status ∈
+//   created         — no prior bet for this message; staged fresh
+//   replaced        — prior bet(s) still in the review queue (needs_review +
+//                     result=pending + grader_version NULL); deleted + re-staged
+//   skipped_graded  — a prior bet is already approved/graded; left UNTOUCHED
+//   no_images       — the message carries no slip image
+//   no_bets         — vision recovered no bet from any image
+//   error           — unexpected failure (never thrown to the caller)
+// Idempotency keys on bets.source_message_id = message.id.
+//
+// v1 limitation: when a REPLACE deletes an old needs_review bet, its stale War
+// Room staging embed is NOT deleted (the bets schema does not track the staging
+// message id) — the operator sees a fresh embed alongside the old one; acting on
+// the stale embed no-ops because its bet row is gone. Tracking the embed id for
+// cleanup is a documented follow-up.
+async function reingestSlipMessage(client, message, opts = {}) {
+  const actorId = opts.actorId || null;
+  const ingestId = makeIngestId('discord', message.id); // disc_<message.id>
+  const sourceRef = message.id;
+  try {
+    recordStage({ ingestId, sourceType: 'discord', sourceRef, stage: 'REINGEST_ATTEMPT', eventType: 'STAGE_ENTER', payload: { actorId, channelId: message.channel?.id } });
+
+    // 1. Images — none → nothing to re-extract.
+    const images = getImageAttachments(message);
+    if (images.length === 0) return { status: 'no_images', betIds: [] };
+
+    // 2. Bets-only re-extraction over every image (Onyx-aware). skipDedup: the
+    //    original ingest already hashed these exact URLs, so without it the
+    //    re-fetch hits processImageForAI's 12h dedup and yields no base64.
+    const recovered = [];
+    for (const img of images) {
+      if (!img?.url) continue;
+      let processed;
+      try {
+        processed = await processImageForAI(img.url, { skipDedup: true });
+      } catch (e) {
+        console.warn(`[Reingest] image fetch failed (${(img.url || '').slice(0, 60)}): ${e.message}`);
+        continue;
+      }
+      if (!processed?.base64) continue;
+      const slip = await parseBetSlipImage(processed.base64, processed.mediaType || img.type, {
+        ingestId, sourceType: 'discord', sourceRef, imageUrl: img.url,
+      });
+      if (slip?.bets?.length > 0) recovered.push(...slip.bets);
+    }
+    if (recovered.length === 0) return { status: 'no_bets', betIds: [] };
+
+    // 3. Resolve capper + source metadata (mirrors processAggregatedMessage).
+    const capperInfo = resolveCapper(message);
+    const capper = await getOrCreateCapper(capperInfo.discordId, capperInfo.name, capperInfo.avatar);
+    const rawContent = message.content || '';
+    const embedText = (message.embeds || []).map(e => [e.description, e.title].filter(Boolean).join(' ')).join(' ');
+    const cleanText = hardScrub((rawContent + ' ' + embedText).trim());
+    let sourceTweetId = null;
+    let sourceTweetHandle = null;
+    for (const embed of (message.embeds || [])) {
+      const m = (embed.url || '').match(/(?:x\.com|twitter\.com)\/([^/]+)\/status\/(\d+)/);
+      if (m) { sourceTweetHandle = m[1].toLowerCase(); sourceTweetId = m[2]; break; }
+    }
+
+    // 4. Idempotency on bets.source_message_id. The SELECT runs synchronously
+    //    immediately before the atomic mutation below (no await between), so a
+    //    concurrent approval cannot slip in mid-decision.
+    const existing = db.prepare(
+      'SELECT id, review_status, result, grader_version FROM bets WHERE source_message_id = ?'
+    ).all(message.id);
+    const isReplaceable = (r) => r.review_status === 'needs_review' && r.result === 'pending' && r.grader_version == null;
+    let mode;
+    if (existing.length === 0) mode = 'create';
+    else if (existing.every(isReplaceable)) mode = 'replace';
+    else return { status: 'skipped_graded', betIds: [] };
+    const oldBetIds = mode === 'replace' ? existing.map((r) => r.id) : [];
+
+    // 5. Atomic mutation: (REPLACE only) delete the old row(s), then create the
+    //    recovered bet(s) — ALL in ONE db.transaction, so if a create throws
+    //    (e.g. a transient SQLite write error) the DELETE rolls back and the old
+    //    review-queue bet SURVIVES (mirrors the delete+recreate atomicity in
+    //    services/holdReview.js). buildFingerprint keys on source_message_id, so
+    //    the delete MUST precede the create — the new bet would otherwise dedup
+    //    against the stale row — and wrapping both in one txn is exactly what
+    //    makes that delete-first safe. createBetWithLegs' DB work is synchronous
+    //    (callers only await it), so it composes inside the txn; do NOT await in
+    //    here (a txn fn may not return a promise). Staging embeds + pipeline
+    //    events run AFTER commit (below), never inside the txn (no Discord I/O in
+    //    a transaction, and events for rolled-back writes would be misleading).
+    const created = db.transaction(() => {
+      for (const id of oldBetIds) {
+        // Mirror the war-room Reject delete (bot.js action==='delete').
+        db.prepare('DELETE FROM parlay_legs WHERE bet_id = ?').run(id);
+        db.prepare('DELETE FROM bets WHERE id = ?').run(id);
+      }
+      return recovered.map((bet) => createBetWithLegs({
+        capper_id: capper.id,
+        sport: bet.sport, league: bet.league,
+        bet_type: bet.bet_type, description: bet.description,
+        odds: bet.odds, units: Math.min(bet.units || 1, 50),
+        wager: bet.wager || null, payout: bet.payout || null,
+        event_date: bet.event_date,
+        source: 'vision_slip',
+        source_url: message.url || null,
+        source_channel_id: message.channel.id,
+        source_message_id: message.id,
+        source_tweet_id: sourceTweetId,
+        source_tweet_handle: sourceTweetHandle,
+        raw_text: cleanText.slice(0, 500),
+        review_status: 'needs_review',
+      }, bet.legs || [], bet.props || []));
+    })();
+
+    // Post-commit side-effects for what actually landed. created[i] pairs 1:1
+    // with recovered[i] (recovered.map above), so the original bet is available
+    // for the stage payloads.
+    const betIds = [];
+    const stagedRecords = [];
+    for (let i = 0; i < created.length; i++) {
+      const saved = created[i];
+      const bet = recovered[i];
+      if (!saved?._deduped) {
+        betIds.push(saved.id);
+        stagedRecords.push(saved);
+        recordStage({ ingestId, betId: saved.id, sourceType: 'discord', sourceRef, stage: 'VALIDATED', eventType: 'STAGE_EXIT', payload: { pipeline: 'reingest', reviewStatus: 'needs_review' } });
+        recordStage({ ingestId, betId: saved.id, sourceType: 'discord', sourceRef, stage: 'STAGED', eventType: 'STAGE_EXIT', payload: { pipeline: 'reingest', sport: bet.sport, betType: bet.bet_type } });
+      } else {
+        recordDrop({ ingestId, sourceType: 'discord', sourceRef, stage: 'DROPPED', dropReason: 'DUPLICATE_IMAGE', payload: { pipeline: 'reingest', dedup: 'fingerprint' } });
+      }
+    }
+
+    // Unreachable in practice (the in-txn delete frees the fingerprint so the
+    // create can't dedup), but guard anyway: nothing staged → ⚠️, not a false ✅.
+    // On this path a REPLACE has already committed its delete — but that only
+    // happens if EVERY create deduped, which the delete-first ordering prevents.
+    if (betIds.length === 0) return { status: 'no_bets', betIds: [] };
+
+    if (mode === 'replace') {
+      recordStage({ ingestId, betId: betIds[0], sourceType: 'discord', sourceRef, stage: 'REINGEST_REPLACED', eventType: 'STAGE_ENTER', payload: { old_bet_id: oldBetIds, new_bet_id: betIds } });
+    }
+
+    // War Room staging embeds — async, after all DB writes have committed.
+    for (const record of stagedRecords) {
+      await sendStagingEmbed(client, record, capperInfo.name, message.url);
+    }
+
+    recordStage({ ingestId, betId: betIds[0], sourceType: 'discord', sourceRef, stage: 'REINGEST_STAGED', eventType: 'STAGE_EXIT', payload: { mode, betCount: betIds.length, betIds } });
+    return { status: mode === 'replace' ? 'replaced' : 'created', betIds };
+  } catch (err) {
+    console.error('[Reingest] reingestSlipMessage error:', err.message);
+    try {
+      recordError({ ingestId, sourceType: 'discord', sourceRef, stage: 'ERROR', error: err, payload: { where: 'reingestSlipMessage' } });
+    } catch (_) { /* observability must never mask the error status */ }
+    return { status: 'error', betIds: [] };
+  }
+}
+
+// Thin, unit-testable reaction handler for the 🔄 re-ingest feature. bot.js's
+// Events.MessageReactionAdd listener delegates here (mirroring how every other
+// client.on handler delegates to a module fn), so the gate + ACK are testable
+// without booting bot.js. deps = { reingest, env } — defaults wire the real
+// core + process.env; tests inject a spy + a fixture env. Every gate returns
+// early + SILENTLY; the whole body is try/catch-wrapped so a handler error can
+// never crash the process.
+async function handleReingestReaction(reaction, user, deps = {}) {
+  const env = deps.env || process.env;
+  const reingest = deps.reingest || reingestSlipMessage;
+  try {
+    // Cheap gates first (no fetch): ignore bots + non-owners.
+    if (!user || user.bot) return;
+    if (!env.OWNER_ID || user.id !== env.OWNER_ID) return;
+
+    // Resolve partials before reading emoji / channel.
+    if (reaction.partial) { try { await reaction.fetch(); } catch (_) { return; } }
+    const message = reaction.message;
+    if (message && message.partial) { try { await message.fetch(); } catch (_) { return; } }
+    if (!message) return;
+
+    const emoji = env.REINGEST_EMOJI || '🔄';
+    if (reaction.emoji?.name !== emoji) return;
+
+    const humanIds = (env.HUMAN_SUBMISSION_CHANNEL_IDS || '').split(',').map((s) => s.trim()).filter(Boolean);
+    if (!humanIds.includes(message.channel?.id)) return;
+
+    const client = message.client;
+
+    // ACK via bot reactions (a reaction has no ephemeral reply): ⏳ while
+    // working, then ✅ (created/replaced) / ⚠️ (skipped_graded/no_bets/no_images)
+    // / ❌ (error) by outcome.
+    let working = null;
+    try { working = await message.react('⏳'); } catch (_) { /* best-effort ACK */ }
+
+    const result = await reingest(client, message, { actorId: user.id });
+    const status = (result && result.status) || 'error';
+
+    if (working) { try { await working.users.remove(client.user); } catch (_) { /* leave ⏳ if removal fails */ } }
+    const ack = (status === 'created' || status === 'replaced') ? '✅'
+      : status === 'error' ? '❌'
+        : '⚠️';
+    try { await message.react(ack); } catch (_) { /* best-effort ACK */ }
+
+    // One-line #admin-log summary: actor + message id + status.
+    try {
+      const adminLogId = env.ADMIN_LOG_CHANNEL_ID;
+      if (adminLogId && client && client.channels && typeof client.channels.fetch === 'function') {
+        const adminLog = await client.channels.fetch(adminLogId).catch(() => null);
+        if (adminLog) {
+          const n = (result && result.betIds && result.betIds.length) || 0;
+          await adminLog.send(`🔄 Re-ingest by <@${user.id}> on \`${message.id}\` → **${status}**${n ? ` (${n} bet${n === 1 ? '' : 's'})` : ''}`);
+        }
+      }
+    } catch (_) { /* admin-log is best-effort */ }
+
+    return result;
+  } catch (err) {
+    console.error('[Reingest] reaction handler error:', err.message);
+  }
+}
+
+module.exports = { handleMessage, processSlipImage, buildParsedPayload, sendHoldReviewEmbed, getImageAttachments, resolveCapper, selectSlipImages, slipImageIngestId, reingestSlipMessage, handleReingestReaction };

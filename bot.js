@@ -36,7 +36,7 @@ app.post('/api/webhooks/apify', (req, res) => {
 const port = process.env.PORT || 8080;
 app.listen(port, '0.0.0.0', () => console.log(`[SYSTEM] Health check server listening on 0.0.0.0:${port}`));
 
-const { handleMessage } = require('./handlers/messageHandler');
+const { handleMessage, handleReingestReaction } = require('./handlers/messageHandler');
 const { handleWarRoomInteraction, openEditModal } = require('./services/warRoom');
 const { handleGradeInteraction } = require('./handlers/gradeButtons');
 const { handleAdminButtonInteraction } = require('./handlers/adminButtons');
@@ -119,8 +119,13 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
+    // 🔄 re-ingest reaction (operator-triggered slip re-extraction). Reaction
+    // events on cached AND uncached messages need this gateway intent.
+    GatewayIntentBits.GuildMessageReactions,
   ],
-  partials: [Partials.Message, Partials.Channel],
+  // Partials.Reaction/User let MessageReactionAdd fire for reactions on
+  // messages the bot never cached (older slips); the handler fetch()es them.
+  partials: [Partials.Message, Partials.Channel, Partials.Reaction, Partials.User],
   // Cache sweeper — prevent OOM on busy servers
   makeCache: Options.cacheWithLimits({
     ...Options.DefaultMakeCacheSettings,
@@ -128,6 +133,7 @@ const client = new Client({
     ThreadManager: { maxSize: 0 },
     PresenceManager: 0,
     VoiceStateManager: 0,
+    // Fetch reaction partials on demand — no persistent reaction cache.
     ReactionManager: 0,
   }),
 });
@@ -213,6 +219,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
     } catch (replyErr) {
       console.error(`[Command Error] Failed to send error reply:`, replyErr.message);
     }
+  }
+});
+
+// ── 🔄 re-ingest reaction (operator-only slip re-extraction) ──
+// Owner reacts 🔄 on any message in a HUMAN_SUBMISSION_CHANNEL_IDS channel →
+// re-fetch + re-extract via the Onyx-aware bets-only vision path + stage fresh
+// to the War Room. All gating/ACK lives in handleReingestReaction (exported
+// from messageHandler so it is unit-testable without booting bot.js); this
+// listener is the thin wiring, wrapped so a handler error can never crash the
+// process (mirrors the other client.on delegations above).
+client.on(Events.MessageReactionAdd, async (reaction, user) => {
+  try {
+    await handleReingestReaction(reaction, user);
+  } catch (err) {
+    console.error('[Reingest] listener error:', err.message);
   }
 });
 
