@@ -7,6 +7,7 @@ const { extractPickFromTweet, parseBetText, evaluateTweet, validateParsedBet, re
 const { db, getOrCreateCapper, createBetWithLegs, updateLastTweetId, logTweetAudit } = require('./database');
 const { sendStagingEmbed } = require('./warRoom');
 const { recordStage, recordDrop, recordError, makeIngestId } = require('./pipeline-events');
+const slateResplit = require('./slateResplit');
 
 const delay = ms => new Promise(r => setTimeout(r, ms));
 
@@ -300,6 +301,46 @@ async function handleTwitterWebhookPayload(payload, client) {
         logTweetAudit({ ...auditBase, stage: 'saved', reason: `Ladder: ${ladderBets.length} steps`, bet_id: ladderBets[0]?.id });
         updateLastTweetId(cleanHandle, tweetId);
         continue;
+      }
+
+      // ── Slate re-split (gated: SLATE_RESPLIT_MODE off|shadow|cutover) ──────────
+      // A mixed-sport recap SHEET (independently-staked picks) that Vision
+      // collapsed into ONE dominant-sport parlay (bet 8436c0c7 — every leg incl.
+      // the MMA fighters stamped Soccer, per-pick stakes lost). off: no-op.
+      // shadow: measure only (emits slate_resplit_shadow; the parlay still stages
+      // as today — zero behavior change). cutover: re-split into per-pick
+      // straights with per-pick sport (ITD/finish→MMA, nations→Soccer, else
+      // inherits the vision sport low-confidence) and per-pick units recovered
+      // from the raw tweet text. See services/slateResplit.js + docs diagnosis.
+      if (slateResplit.MODE !== 'off') {
+        const resplit = slateResplit.applySlateResplit({
+          pick, rawText: text, ingestId, sourceRef: tweetId, recordStageFn: recordStage,
+        });
+        if (slateResplit.MODE === 'cutover' && resplit.isSheet && resplit.picks.length >= 2) {
+          const sheetBets = [];
+          for (const p of resplit.picks) {
+            // Per-pick F-12 content-window dedup (sheet picks save as straights).
+            const priorPick = findRecentRepost({ capperId: capper.id, description: p.description, odds: p.odds ?? null, betType: 'straight' });
+            if (priorPick) {
+              recordDrop({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'DROPPED', dropReason: 'DUPLICATE_REPOST', payload: { window: '12h', handle: cleanHandle, prior_bet_id: priorPick.id, resplit: true } });
+              continue;
+            }
+            const saved = createBetWithLegs({ capper_id: capper.id, sport: p.sport || pick.sport || 'Unknown', bet_type: 'straight', description: p.description, odds: p.odds ?? null, units: p.units || 1, source: betSource, source_url: sourceUrl, source_tweet_id: tweetId, source_tweet_handle: cleanHandle, raw_text: (p.description || text).slice(0, 500), review_status: 'needs_review' }, []);
+            if (saved && !saved._deduped) sheetBets.push(saved);
+          }
+          for (const sb of sheetBets) {
+            recordStage({ ingestId, betId: sb.id, sourceType: 'twitter', sourceRef: tweetId, stage: 'STAGED', eventType: 'STAGE_EXIT', payload: { pipeline: 'twitter_slate_resplit', sport: sb.sport } });
+          }
+          if (sheetBets.length > 0) {
+            if (client) {
+              for (const sb of sheetBets) { try { await sendStagingEmbed(client, sb, displayName, sourceUrl); } catch (_) { /* embed best-effort */ } }
+            }
+            staged += sheetBets.length;
+            logTweetAudit({ ...auditBase, stage: 'saved', reason: `Slate re-split: ${sheetBets.length} straights`, bet_id: sheetBets[0]?.id });
+          }
+          updateLastTweetId(cleanHandle, tweetId);
+          continue;
+        }
       }
 
       // F-12: content-window repost dedup (ignores tweet id) — drop a same-capper
