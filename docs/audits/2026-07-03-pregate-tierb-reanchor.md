@@ -111,6 +111,11 @@ snowflake day:
   with the **opposite** grade (playoff series). The snowflake (tweet-post day) selects the same-day
   game, which is the correct disambiguator in aggregate, but for any single row the operator should
   confirm the bettor's intended series game before applying. These are flagged, not high-confidence.
+  **These 7 (+ `2c12a667`, reclassified below) were re-examined at minute resolution — see
+  [`2026-07-03-pregate-series-disambig.md`](2026-07-03-pregate-series-disambig.md):** the
+  snowflake-**hour** pin confirms 4 (net ≈ 0.00u — a wash) and leaves 4 UNRESOLVED, including the
+  two largest day-pin swings (`aef0b95b` +13.5u, `e949537b` −9.55u), whose posts landed *after*
+  their same-day game had already started.
 
 ## NEW correction candidates (report-only; sorted by |ΔPU|)
 
@@ -218,6 +223,11 @@ adjacent days with opposite results, the tweet-post day alone does not pin which
 intended — it is a **same-opponent-series** row, not pinned. It is therefore **NOT applied here** and
 moves to the series-disambiguation bucket pending per-game confirmation of the bettor's intended
 game. **Series bucket is now 8 rows** (the original 7 same-opponent-series candidates + `2c12a667`).
+**Disambiguated at minute resolution in the follow-up report
+[`2026-07-03-pregate-series-disambig.md`](2026-07-03-pregate-series-disambig.md)** (snowflake-hour
+pin): of the 8, **4 pin + disagree** (net ≈ 0.00u — correction candidates) and **4 are UNRESOLVED**
+(stay pending); `2c12a667` itself is UNRESOLVED there — its post fell ~3.2h after the 04-12 CIN
+first pitch, confirming the reclassification.
 
 ### Tail-gated pinned rows settled via follow-up (2026-07-03)
 
