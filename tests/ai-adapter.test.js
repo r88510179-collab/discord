@@ -423,6 +423,43 @@ async function phase7_callLLMStringNull() {
   realLog('  PASS — string-or-null surface preserved');
 }
 
+// ── Phase 8: processImageForAI skipDedup bypasses the 12h dedup ──
+//
+// Onyx-vision fix: the pure-slip re-extraction (handlers/messageHandler.js) re-runs
+// processImageForAI on a slip the win-classifier already processed this session.
+// Without opts.skipDedup the second fetch of the same bytes hits the SHA-256 12h
+// dedup, whose DUPLICATE_IMAGE_DETECTED throw is caught by processImageForAI's OWN
+// catch → it RETURNS NULL. The re-extraction then has no base64 to parse and can't
+// recover the bet — silently defeating the fix. This proves the second call returns
+// null WITHOUT the flag and base64 WITH it. A real 1x1 PNG so the Sharp pipeline
+// succeeds; global.fetch is mocked to serve the same bytes.
+async function phase8_processImageSkipDedup() {
+  realLog('Phase 8: processImageForAI skipDedup bypasses the 12h dedup...');
+  const ai = require('../services/ai');
+  const realFetch = global.fetch;
+  const pngB64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+  const pngBuf = Buffer.from(pngB64, 'base64');
+  const url = `https://example.com/onyx-skipdedup-${process.pid}.png`;
+  global.fetch = async () => ({ ok: true, arrayBuffer: async () => pngBuf });
+  try {
+    const first = await ai.processImageForAI(url);
+    assert.ok(first && typeof first.base64 === 'string' && first.base64.length > 0, 'first call returns base64 (caches the hash)');
+
+    // Second call on the same bytes within 12h → dedup fires; processImageForAI's own
+    // catch swallows the DUPLICATE_IMAGE_DETECTED throw and returns null (so a naive
+    // re-extraction gets no image and silently gives up).
+    const dup = await ai.processImageForAI(url);
+    assert.strictEqual(dup, null, `2nd call (no skipDedup) must return null (dedup fired, throw swallowed), got: ${JSON.stringify(dup)}`);
+
+    // skipDedup bypasses the dedup → the re-extraction path gets its base64.
+    const reextract = await ai.processImageForAI(url, { skipDedup: true });
+    assert.ok(reextract && typeof reextract.base64 === 'string' && reextract.base64.length > 0, 'skipDedup call must return base64 (dedup bypassed)');
+  } finally {
+    global.fetch = realFetch;
+  }
+  realLog('  PASS — skipDedup bypasses the dedup (null → base64)');
+}
+
 // ── Run sequentially (rate-limit gap is ~4.2s so phases share state) ──
 async function main() {
   const t0 = Date.now();
@@ -433,6 +470,7 @@ async function main() {
   await phase5_authNoFallback();
   await phase6_primarySuccess();
   await phase7_callLLMStringNull();
+  await phase8_processImageSkipDedup();
   const dur = ((Date.now() - t0) / 1000).toFixed(1);
   realLog(`\nAll adapter contract tests passed (${dur}s).`);
 }

@@ -339,7 +339,7 @@ async function callLLM(prompt, system, imageBase64, mediaType) {
  * processImageForAI — download, resize, grayscale, compress via Sharp.
  * Returns { base64, mediaType } optimized for AI vision models.
  */
-async function processImageForAI(imageUrl) {
+async function processImageForAI(imageUrl, opts = {}) {
   try {
     const res = await fetch(imageUrl);
     if (!res.ok) {
@@ -348,10 +348,17 @@ async function processImageForAI(imageUrl) {
     }
     const rawBuffer = Buffer.from(await res.arrayBuffer());
 
-    // SHA-256 dedup: reject identical images within 12h window
+    // SHA-256 dedup: reject identical images within 12h window.
+    // opts.skipDedup bypasses the dedup for AUTHORITATIVE RE-EXTRACTION callers:
+    // the win-classifier's parseBetText already ran processImageForAI on this exact
+    // URL (caching its hash) during classification, so a pure-slip reclassification
+    // (handlers/messageHandler.js) that re-fetches the same slip would otherwise hit
+    // the dedup and RETURN NULL — the DUPLICATE_IMAGE_DETECTED throw below is caught
+    // by this function's own catch (return null), so the re-extraction gets no image
+    // to parse and can't recover the bet. Default (unset) = byte-identical prior behavior.
     const fileHash = crypto.createHash('sha256').update(rawBuffer).digest('hex');
     const cached = imageHashCache.get(fileHash);
-    if (cached && (Date.now() - cached) < IMAGE_DEDUP_WINDOW) {
+    if (cached && (Date.now() - cached) < IMAGE_DEDUP_WINDOW && !opts.skipDedup) {
       throw new Error('DUPLICATE_IMAGE_DETECTED');
     }
     imageHashCache.set(fileHash, Date.now());
@@ -1025,6 +1032,9 @@ CRITICAL MULTI-EXTRACTION RULE: This image may contain MULTIPLE betting slips or
 
 LADDER DETECTION: If the image says "LADDER", "CHALLENGE", "$X to $Y", "Step X", or "Day X", set is_ladder to true and ladder_step to the visible step number (default 1). BUT you MUST still verify there is a REAL BET present — a specific team, player, or line being wagered on (e.g., "Lakers -3", "Kawhi 6+ Rebounds", "Over 220.5"). If the image only shows payouts, ladder steps, promotional graphics, or challenge text with NO specific teams/players/lines to bet on, return type "ignore" with is_bet false. Never invent placeholder picks like "$50 Ladder Challenge" — a valid pick MUST name the entity being wagered on.` : ''}
 
+OPEN-STATE RULE (evaluate BEFORE Types 2 & 3):
+A slip showing "Pick Placed", "Pick Receipt", "Open", "Cash Out", "To Pay", a live/upcoming game time, or a 0-0 / non-final score is an OPEN, unsettled bet: classify as TYPE 1 (bet) and extract all legs. A green checkmark or "receipt" styling ALONE does NOT indicate a win — sportsbooks (e.g. Onyx) render a green ✓ on every PLACED pick. Only an EXPLICIT settlement signal (see Types 2 & 3) may override this. When open/placement cues are present, prefer TYPE 1.
+
 RESPONSE TYPE 1 — New Bet:
 If the text contains a clear actionable bet (team/player + line/odds + prediction):
 
@@ -1049,14 +1059,14 @@ CRITICAL FORMAT RULES:
 - "description" for parlays = bulleted list (one line per leg). For straights = the single pick.
 
 RESPONSE TYPE 2 — Result/Grading Event:
-If the text celebrates a WIN or reports a LOSS (e.g., "WINNER", "CASHED", "CASH IT", "HIT!", "BANG", or loss indicators like "took an L", "tough loss"):
+If the text/image shows EXPLICIT settlement evidence — an outcome word like "Won"/"Winner"/"Cashed"/"Settled - Won"/"Paid"/"WINNER"/"CASH IT"/"HIT!"/"BANG", a red X / "Lost"/"Settled - Lost"/"took an L"/"tough loss", or a FINAL score with a decided outcome:
 {"type":"result","is_bet":false,"outcome":"win","subject":["Real Madrid","Gonzaga"]}
-The "subject" array should contain the team names or player names mentioned. "outcome" must be "win" or "loss".
+The "subject" array should contain the team names or player names mentioned. "outcome" must be "win" or "loss". A bare green checkmark, "receipt" styling, or a placed/open slip is NOT settlement evidence — if open/placement cues are present (see OPEN-STATE RULE), classify as TYPE 1 instead.
 
 RESPONSE TYPE 3 — Untracked Winner:
-If the capper is celebrating their OWN winning bet (e.g., "BOOM", "Cash it!", green checkmarks, "another W") AND you can identify what team/player/event they won on, but it looks like a result not a new pick:
+If the capper is EXPLICITLY celebrating their OWN already-settled winning bet (e.g., "BOOM", "Cash it!", "another W", "Settled - Won", "Paid") AND you can identify what team/player/event they won on, but it looks like a result not a new pick:
 {"type":"untracked_win","is_bet":false,"description":"Lakers ML","outcome":"win","subject":["Lakers"]}
-Use this ONLY when the capper is clearly celebrating their own win with identifiable details. If you can't identify the bet, use "result" instead.
+Use this ONLY when the capper is clearly celebrating their own SETTLED win with identifiable details. A green checkmark or "receipt" styling ALONE is NOT a win — an open/placed slip with checkmarks is TYPE 1 (see OPEN-STATE RULE). If you can't identify the bet, use "result" instead.
 
 RESPONSE TYPE 4 — Not a Bet:
 If the text is sports news, commentary, game recaps, opinions, retweets, fan replies, or celebrating someone ELSE's win (e.g., "Look at this hit!", "Great call by @someone"):
@@ -2509,4 +2519,4 @@ function normalizeEventDate(raw) {
   return null;
 }
 
-module.exports = { parseBetText, parseBetSlipImage, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, reassignDollarStakeUnits, evaluateTweet, validateParsedBet, validateLegSportConsistency, validateLegShape, isSportsbookBrand, reclassifySport, inferLegSport, descNamesNationalTeam, disambiguateAmbiguousTeam, matchesKboTeam, normalizeKboLeg, declaredSportIncludesKbo, isInSeason, normalizeEventDate, AMBIGUITY_THRESHOLD, tryVisionGemma, parseGemmaOutputWithCerebras, runGemmaVisionFallback, logVisionFailure, GEMMA_SLIP_PROMPT, gemmaHealth, isGemmaHealthy, recordGemmaResult, callLLM, callLLMResult, callGemini, callOpenAI, AdapterError, FALLBACK_ELIGIBLE };
+module.exports = { parseBetText, parseBetSlipImage, processImageForAI, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, reassignDollarStakeUnits, evaluateTweet, validateParsedBet, validateLegSportConsistency, validateLegShape, isSportsbookBrand, reclassifySport, inferLegSport, descNamesNationalTeam, disambiguateAmbiguousTeam, matchesKboTeam, normalizeKboLeg, declaredSportIncludesKbo, isInSeason, normalizeEventDate, AMBIGUITY_THRESHOLD, tryVisionGemma, parseGemmaOutputWithCerebras, runGemmaVisionFallback, logVisionFailure, GEMMA_SLIP_PROMPT, gemmaHealth, isGemmaHealthy, recordGemmaResult, callLLM, callLLMResult, callGemini, callOpenAI, AdapterError, FALLBACK_ELIGIBLE };
