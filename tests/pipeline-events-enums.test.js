@@ -134,6 +134,15 @@ run('PURE_SLIP_RECLASSIFIED_EXTRACT is registered in STAGES', () => {
   );
 });
 
+// 🔄 operator re-ingest (handlers/messageHandler.js reingestSlipMessage): three
+// trace markers emitted via recordStage when an operator re-extracts a slip.
+// Registered so the warn-only write-boundary tripwire stays quiet on each.
+run('REINGEST_* stages are registered in STAGES', () => {
+  for (const stage of ['REINGEST_ATTEMPT', 'REINGEST_STAGED', 'REINGEST_REPLACED']) {
+    assert.ok(pe.STAGES.includes(stage), `${stage} missing from STAGES`);
+  }
+});
+
 // ── (b) drift: unknown value warns ONCE, does NOT throw, does NOT skip ──
 run('unknown stage → warns, does NOT throw, row STILL written', () => {
   const before = countRows();

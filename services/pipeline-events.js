@@ -22,6 +22,15 @@ const STAGES = [
   'MANUAL_REVIEW_RELEASED',  // human reviewer released a held slip back into the pipeline (services/holdReview.js:221) — F-04/F-05 enum-drift registration
   'PURE_SLIP_SKIP_HOLD', // PR #2: pure-slip channel skipped MANUAL_REVIEW_HOLD staging (trace-only marker, NOT a drop; like MANUAL_REVIEW_HOLD it is intentionally absent from pipelineHealth.EXPECTED_STAGES)
   'PURE_SLIP_RECLASSIFIED_EXTRACT', // Onyx-vision fix: a pure-slip channel image that the win-classifier (parseBetText) mislabeled type:'result'/'untracked_win' (green ✓ on an OPEN Onyx pick receipt) was authoritatively re-extracted via parseBetSlipImage and staged as a fresh vision_slip bet instead of diverting to VISION_RESULT_RECAP/VISION_UNTRACKED_WIN. Marker payload {betCount, legCount}; one per constituent ingest_id. Trace-only (the recovered bet emits its own STAGED); NOT a drop; intentionally absent from pipelineHealth.EXPECTED_STAGES.
+  // ── 🔄 operator re-ingest (handlers/messageHandler.js reingestSlipMessage) ──
+  // Operator reacts 🔄 on a human-submission-channel slip → re-fetch + bets-only
+  // re-extraction (parseBetSlipImage) + fresh War Room staging, bypassing the
+  // green-check parseBetText path. Three trace markers on ingestId disc_<message.id>;
+  // NOT drops; intentionally absent from pipelineHealth.EXPECTED_STAGES. Siblings
+  // to PURE_SLIP_SKIP_HOLD (F-05 enum-drift discipline).
+  'REINGEST_ATTEMPT',    // one at entry, payload {actorId, channelId}
+  'REINGEST_STAGED',     // one on success, payload {mode:'create'|'replace', betCount, betIds}; the recovered bet also emits its own STAGED
+  'REINGEST_REPLACED',   // REPLACE mode only: prior needs_review bet(s) deleted + re-staged, payload {old_bet_id, new_bet_id}
   'RECOVERY_ATTEMPT_FAILED', // hold-recovery attempt burned vision+OCR but yielded no bet (validator_drop / no_bet_found / extract threw) — services/holdReview.js records one per failed attempt; COUNT(*) per ingest_id is the retry-cap counter (RECOVERY_RETRY_CAP). Trace-only marker, NOT a drop (the hold stays open); intentionally absent from pipelineHealth.EXPECTED_STAGES.
   'OCR_FIRST',           // OCR-first wiring observability marker (services/ocrFirstWiring.js): shadow compare + cutover route. Trace-only, NOT a drop; intentionally absent from pipelineHealth.EXPECTED_STAGES.
   'SLATE_RESPLIT',       // slate re-split wiring marker (services/slateResplit.js): a mixed-sport recap SHEET Vision collapsed into one dominant-sport parlay. shadow = would-split measurement; cutover = re-split into per-pick straights. Trace-only, NOT a drop; intentionally absent from pipelineHealth.EXPECTED_STAGES.
