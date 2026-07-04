@@ -1608,3 +1608,14 @@ Derives American odds from payout/wager decimal; a mis-parsed micro wager (wager
 
 **Watch — null-odds → 0u ROI drag (services/grading.js calcProfit).**
 Post-#181, straights with unknown odds resolve to null; calcProfit(null,…) hits the trailing `return 0` on a win → the bet counts as settled 0u with full stake in the ROI denominator → slight ROI drag on winning no-odds straights (vs dropping out via `profit_units IS NULL`). Monitor N/A-odds straights in war-room. If material: (a) calcProfit win-fallthrough `return 0` → `return null` (drops them from ROI), or (b) assume -110 for spread/total market types only, keep ML/prop null.
+
+## Deferred from PR #181 (resolveOdds hardening) — 2026-07-04
+
+**F1 — straight-odds ceiling too loose (services/ai.js resolveOdds).**
+Straight branch trusts raw model odds for |o| in [100, ODDS_MAX=1e6]. Old code clamped |o|>9999 → -110. So a garbage 5-figure straight odds (e.g. a payout misparsed into the odds field) now books as-is → a +50000 straight = +500u on a win, vs the old +0.91u. Trigger is compound-rare (misparse >9999 AND no wager/payout to override AND review-approved AND grades win); war-room review catches it. Fix if it surfaces: tight straight ceiling (|o|>9999 → fall through to fromPayout/null); leave the parlay path (combineLegOdds/fromPayout) untouched.
+
+**F2 — fromPayout unbounded on tiny wagers (services/ai.js resolveOdds).**
+Derives American odds from payout/wager decimal; a mis-parsed micro wager (wager 0.01, payout 1000 → decimal 1e5 → ~+9,999,900) blows up, and ODDS_MAX=1e6 doesn't catch a penny-wager. Needs a wager-sanity floor (ignore wager below a $ threshold for derivation) — a design call, not a one-liner.
+
+**Watch — null-odds → 0u ROI drag (services/grading.js calcProfit).**
+Post-#181, straights with unknown odds resolve to null; calcProfit(null,…) hits the trailing `return 0` on a win → the bet counts as settled 0u with full stake in the ROI denominator → slight ROI drag on winning no-odds straights (vs dropping out via `profit_units IS NULL`). Monitor N/A-odds straights in war-room. If material: (a) calcProfit win-fallthrough `return 0` → `return null` (drops them from ROI), or (b) assume -110 for spread/total market types only, keep ML/prop null.
