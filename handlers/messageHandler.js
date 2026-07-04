@@ -1,5 +1,5 @@
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
-const { parseBetText, evaluateTweet, validateParsedBet } = require('../services/ai');
+const { parseBetText, parseBetSlipImage, processImageForAI, evaluateTweet, validateParsedBet } = require('../services/ai');
 const { getOrCreateCapper, createBetWithLegs, isAuditMode } = require('../services/database');
 const { betEmbed } = require('../utils/embeds');
 const { postPickTracked } = require('../services/dashboard');
@@ -957,6 +957,13 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
     const allBets = [];
     const reviewBets = [];
 
+    // Pure-slip channel detection — hoisted to the TOP so the EARLIER
+    // untracked_win / result branches can read it (Onyx-vision fix), not just the
+    // is_bet=false / ai_indeterminate holds further down. Same comma-split + trim
+    // contract as HUMAN_SUBMISSION_CHANNEL_IDS; empty/unset → [] → no bypass.
+    const pureSlipChannelIds = (process.env.PURE_SLIP_CHANNEL_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+    const isPureSlip = pureSlipChannelIds.includes(message.channel.id);
+
     // Extract source tweet data from Discord embed URLs (TweetShift/FixTwitter)
     let sourceTweetId = null;
     let sourceTweetHandle = null;
@@ -1062,8 +1069,92 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
         parsed = ocrRes.parsed;
       }
 
+      // ═══ Onyx-vision fix: pure-slip authoritative re-extraction ═══
+      // In pure-slip capper channels, the win-classifier (parseBetText) sometimes
+      // mislabels an OPEN Onyx "Pick Receipt" as a settled result/untracked_win
+      // because Onyx renders a green ✓ on every PLACED pick. That returns
+      // {type:'result'|'untracked_win', is_bet:false, bets:[]} — the real legs are
+      // discarded and the ingest diverts (autoGradeFromRecap / sendUntrackedWinEmbed)
+      // as VISION_RESULT_RECAP / VISION_UNTRACKED_WIN with no tracked bet. This helper
+      // BYPASSES the win-classifier: it re-runs the bets-only, Onyx-aware
+      // parseBetSlipImage over each image and, if it recovers any bet, stages them
+      // through the existing TYPE 1 vision_slip path (needs_review) reusing this
+      // ingest's ids. Returns true when it handled (staged/attempted) the ingest so
+      // the caller RETURNs without diverting; false → fall through UNCHANGED (fail-safe
+      // to current behavior, e.g. vision provider down or a genuine settled recap).
+      const reextractPureSlipBets = async () => {
+        const recovered = [];
+        for (const img of combinedImages) {
+          if (!img?.url) continue;
+          let processed;
+          try {
+            // skipDedup: the classifier's parseBetText already ran processImageForAI
+            // on this exact URL (caching its SHA-256), so without this the re-fetch
+            // hits the 12h dedup and RETURNS NULL (processImageForAI's own catch
+            // swallows its DUPLICATE_IMAGE_DETECTED throw) — leaving no base64 to
+            // re-parse, so the recovery would silently no-op and divert anyway.
+            processed = await processImageForAI(img.url, { skipDedup: true });
+          } catch (e) {
+            console.warn(`[PureSlipReclassify] image fetch failed (${(img.url || '').slice(0, 60)}): ${e.message}`);
+            continue;
+          }
+          if (!processed?.base64) continue;
+          const slip = await parseBetSlipImage(processed.base64, processed.mediaType || img.type, {
+            ingestId, sourceType: 'discord', sourceRef, imageUrl: img.url,
+          });
+          if (slip?.bets?.length > 0) recovered.push(...slip.bets);
+        }
+        if (recovered.length === 0) return false; // fail-safe: fall through to divert
+
+        const legCount = recovered.reduce((n, b) => n + (Array.isArray(b.legs) ? b.legs.length : 1), 0);
+        stageAll('PURE_SLIP_RECLASSIFIED_EXTRACT', { betCount: recovered.length, legCount, priorType: parsed.type });
+
+        let stagedCount = 0;
+        for (const bet of recovered) {
+          // Anti-hallucination validation, exactly like the TYPE 1 / processSlipImage
+          // path. Slip has an image → hasMedia:true (brand-exempt).
+          const validation = validateParsedBet(bet, cleanText, { hasMedia: true });
+          if (!validation.valid) {
+            const mappedReason = validation.reason === 'leg_sport_mismatch' ? 'VALIDATOR_SPORT_MISMATCH'
+              : validation.reason === 'entity_mismatch' ? 'VALIDATOR_ENTITY_MISMATCH'
+              : 'BOUNCER_REJECTED';
+            dropAll('DROPPED', mappedReason, { where: 'pureSlipReclassify', validator: validation.reason, issues: validation.issues, description: (bet.description || '').slice(0, 120) });
+            continue;
+          }
+          const saved = await createBetWithLegs({
+            capper_id: capper.id,
+            sport: bet.sport, league: bet.league,
+            bet_type: bet.bet_type, description: bet.description,
+            odds: bet.odds, units: Math.min(bet.units || 1, 50),
+            wager: bet.wager || null, payout: bet.payout || null,
+            event_date: bet.event_date,
+            source: 'vision_slip',
+            source_url: message.url || null,
+            source_channel_id: message.channel.id,
+            source_message_id: message.id,
+            source_tweet_id: sourceTweetId,
+            source_tweet_handle: sourceTweetHandle,
+            raw_text: cleanText.slice(0, 500),
+            review_status: 'needs_review',
+          }, bet.legs || [], bet.props || []);
+          if (!saved?._deduped) {
+            recordStage({ ingestId, betId: saved?.id || null, sourceType: 'discord', sourceRef, stage: 'VALIDATED', eventType: 'STAGE_EXIT', payload: { pipeline: 'pure_slip_reclassify', reviewStatus: 'needs_review' } });
+            recordStage({ ingestId, betId: saved?.id || null, sourceType: 'discord', sourceRef, stage: 'STAGED', eventType: 'STAGE_EXIT', payload: { pipeline: 'pure_slip_reclassify', sport: bet.sport, betType: bet.bet_type } });
+            stagedCount++;
+            await sendStagingEmbed(message.client, saved, capperInfo.name, message.url);
+          } else {
+            recordDrop({ ingestId, sourceType: 'discord', sourceRef, stage: 'DROPPED', dropReason: 'DUPLICATE_IMAGE', payload: { pipeline: 'pure_slip_reclassify', dedup: 'fingerprint' } });
+          }
+        }
+        if (stagedCount > 0) await safeReact(message, '🔒');
+        return true; // handled — do NOT divert to the win-classifier route
+      };
+
       // Auto-grade detection
       if (parsed.type === 'result') {
+        // Onyx-vision fix: before diverting an OPEN pure-slip receipt to auto-grade,
+        // attempt authoritative bets-only re-extraction. If it recovers a bet, RETURN.
+        if (isPureSlip && hasImages && await reextractPureSlipBets()) return;
         console.log(`[AutoGrade] AI detected result: ${parsed.outcome} for ${parsed.subject?.join(', ')}`);
         // F17 instrumentation: vision classified this relay image as a settled result and
         // routes it to auto-grade — NO new bet is staged for this ingest. Record the terminal
@@ -1083,6 +1174,10 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
 
       // Untracked winner — send yellow embed to War Room
       if (parsed.type === 'untracked_win') {
+        // Onyx-vision fix: before diverting an OPEN pure-slip receipt to the War Room
+        // untracked-win embed, attempt authoritative bets-only re-extraction. If it
+        // recovers a bet, RETURN (staged as a tracked bet instead of a lost win).
+        if (isPureSlip && hasImages && await reextractPureSlipBets()) return;
         console.log(`[UntrackedWin] Detected: ${parsed.description}`);
         // F17 instrumentation: vision classified this as an untracked win (War Room embed
         // only, NO new tracked bet). Record the terminal DROP first so the ingest doesn't
@@ -1184,10 +1279,7 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
       if (parsed.is_bet === false) {
         const humanChannelIds = (process.env.HUMAN_SUBMISSION_CHANNEL_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
         const isHumanChannel = humanChannelIds.includes(message.channel.id);
-        // PR #2: pure-slip channels skip MANUAL_REVIEW_HOLD staging. Same comma-split + trim
-        // contract as HUMAN_SUBMISSION_CHANNEL_IDS above; empty/unset → [] → no bypass (unchanged).
-        const pureSlipChannelIds = (process.env.PURE_SLIP_CHANNEL_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
-        const isPureSlip = pureSlipChannelIds.includes(message.channel.id);
+        // pureSlipChannelIds / isPureSlip hoisted to the top of processAggregatedMessage.
         if (isHumanChannel && !isPureSlip) {
           // Phase A link-reader (shadow): attachShareLink is a no-op when
           // LINK_READER_MODE is unset/off (hold payload byte-identical aside
@@ -1281,10 +1373,7 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
       if (parsed.is_bet !== true && (!parsed.bets || parsed.bets.length === 0)) {
         const humanChannelIds = (process.env.HUMAN_SUBMISSION_CHANNEL_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
         const isHumanChannel = humanChannelIds.includes(message.channel.id);
-        // PR #2: pure-slip channels skip MANUAL_REVIEW_HOLD staging. Same comma-split + trim
-        // contract as HUMAN_SUBMISSION_CHANNEL_IDS above; empty/unset → [] → no bypass (unchanged).
-        const pureSlipChannelIds = (process.env.PURE_SLIP_CHANNEL_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
-        const isPureSlip = pureSlipChannelIds.includes(message.channel.id);
+        // pureSlipChannelIds / isPureSlip hoisted to the top of processAggregatedMessage.
         if (isHumanChannel && !isPureSlip) {
           // Phase A link-reader (shadow): no-op off; additive `share_link` in
           // shadow mode. Same off-mode-byte-identical contract as the

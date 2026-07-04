@@ -1,7 +1,7 @@
 const assert = require('assert');
 const path = require('path');
 
-function loadHandlerWithMocks({ parseBetText, parseBetSlipImage, createBetWithLegs, sendStagingEmbed, events }) {
+function loadHandlerWithMocks({ parseBetText, parseBetSlipImage, processImageForAI, createBetWithLegs, sendStagingEmbed, events }) {
   const aiPath = path.resolve(__dirname, '../services/ai.js');
   const dbPath = path.resolve(__dirname, '../services/database.js');
   const embedsPath = path.resolve(__dirname, '../utils/embeds.js');
@@ -17,6 +17,11 @@ function loadHandlerWithMocks({ parseBetText, parseBetSlipImage, createBetWithLe
     exports: {
       parseBetText,
       parseBetSlipImage,
+      // Onyx-vision fix: pure-slip re-extraction calls processImageForAI(url,
+      // {skipDedup}) → parseBetSlipImage(base64,...). Default stub returns a fake
+      // base64 so the real Sharp/fetch pipeline is bypassed; tests that exercise the
+      // re-extraction rely on this default while mocking parseBetSlipImage's bets.
+      processImageForAI: processImageForAI || (async () => ({ base64: 'ZmFrZQ==', mediaType: 'image/png' })),
       evaluateTweet: () => 'valid',
       validateParsedBet: () => ({ valid: true, issues: [] }),
     },
@@ -611,8 +616,115 @@ async function testVisionThrowRecordsError() {
   assert.strictEqual(writer.insertedCount(), 0, 'a thrown vision parse must not persist a bet');
 }
 
+// ── Onyx-vision fix: pure-slip authoritative re-extraction ──────────────────
+// In pure-slip capper channels the win-classifier (parseBetText) mislabels an
+// OPEN Onyx "Pick Receipt" (green ✓ on every placed pick) as type:'result' /
+// 'untracked_win' with bets:[] — the legs are discarded and the ingest diverts
+// (VISION_RESULT_RECAP / VISION_UNTRACKED_WIN) with no tracked bet. The fix, in a
+// PURE_SLIP channel with images, re-runs bets-only parseBetSlipImage and stages
+// the recovered bet through the TYPE 1 vision_slip path instead of diverting.
+
+// A. pure-slip + image + parseBetText→untracked_win(bets:[]) + parseBetSlipImage→1 bet
+//    ⇒ bet staged, NO untracked_win divert, exactly one reclassify marker.
+async function testPureSlipReclassifiesUntrackedWinToStagedBet() {
+  process.env.PICKS_CHANNEL_IDS = 'channel_1';
+  process.env.HUMAN_SUBMISSION_CHANNEL_IDS = 'channel_1';
+  process.env.PURE_SLIP_CHANNEL_IDS = 'channel_1';
+  process.env.DUBCLUB_SPLIT_CHANNEL_IDS = '';
+  global.fetch = async () => ({ ok: true, arrayBuffer: async () => Buffer.from('fake') });
+
+  const events = [];
+  const writer = dedupeWriter();
+  const staged = [];
+  let slipCalls = 0;
+  const { handleMessage } = loadHandlerWithMocks({
+    parseBetText: async () => ({ type: 'untracked_win', description: 'Onyx pick receipt', outcome: 'win', subject: ['Lakers'], bets: [] }),
+    parseBetSlipImage: async () => { slipCalls += 1; return { bets: [{ sport: 'NBA', bet_type: 'straight', description: 'Lakers -3.5', odds: -110, units: 1, legs: [] }] }; },
+    createBetWithLegs: writer,
+    sendStagingEmbed: async (...args) => staged.push(args),
+    events,
+  });
+
+  const msg = makeMessage({ messageId: 'onyx_untracked_1', withImage: true });
+  await handleMessage(msg);
+  await new Promise((resolve) => setTimeout(resolve, 4500));
+
+  assert.ok(slipCalls >= 1, 'pure-slip untracked_win must invoke parseBetSlipImage for authoritative re-extraction');
+  assert.ok(!events.some(e => e.fn === 'drop' && e.dropReason === 'VISION_UNTRACKED_WIN'), 'recovered pure-slip bet must NOT divert to VISION_UNTRACKED_WIN');
+  assert.strictEqual(countStage(events, 'PURE_SLIP_RECLASSIFIED_EXTRACT'), 1, 'exactly one PURE_SLIP_RECLASSIFIED_EXTRACT marker');
+  assert.strictEqual(writer.insertedCount(), 1, 're-extracted bet must be staged via createBetWithLegs');
+  assert.strictEqual(staged.length, 1, 're-extracted bet must send exactly one War Room staging embed');
+  assert.ok(events.some(e => e.stage === 'STAGED'), 're-extracted bet must emit a STAGED pipeline event');
+}
+
+// B. NON-pure-slip channel, same mocks ⇒ CURRENT behavior preserved: diverts to
+//    VISION_UNTRACKED_WIN, re-extraction never runs, no bet staged.
+async function testNonPureSlipUntrackedWinStillDiverts() {
+  process.env.PICKS_CHANNEL_IDS = 'channel_1';
+  process.env.HUMAN_SUBMISSION_CHANNEL_IDS = '';
+  process.env.PURE_SLIP_CHANNEL_IDS = '';
+  process.env.DUBCLUB_SPLIT_CHANNEL_IDS = '';
+  global.fetch = async () => ({ ok: true, arrayBuffer: async () => Buffer.from('fake') });
+
+  const events = [];
+  const writer = dedupeWriter();
+  const staged = [];
+  let slipCalls = 0;
+  const { handleMessage } = loadHandlerWithMocks({
+    parseBetText: async () => ({ type: 'untracked_win', description: 'Onyx pick receipt', outcome: 'win', subject: ['Lakers'], bets: [] }),
+    parseBetSlipImage: async () => { slipCalls += 1; return { bets: [{ sport: 'NBA', bet_type: 'straight', description: 'Lakers -3.5', odds: -110, units: 1, legs: [] }] }; },
+    createBetWithLegs: writer,
+    sendStagingEmbed: async (...args) => staged.push(args),
+    events,
+  });
+
+  const msg = makeMessage({ messageId: 'nonpure_untracked_1', withImage: true });
+  await handleMessage(msg);
+  await new Promise((resolve) => setTimeout(resolve, 4500));
+
+  const drop = events.find(e => e.fn === 'drop' && e.dropReason === 'VISION_UNTRACKED_WIN');
+  assert.ok(drop, 'non-pure-slip untracked_win must divert to VISION_UNTRACKED_WIN (unchanged)');
+  assert.strictEqual(slipCalls, 0, 'non-pure-slip channel must NOT run parseBetSlipImage re-extraction');
+  assert.strictEqual(countStage(events, 'PURE_SLIP_RECLASSIFIED_EXTRACT'), 0, 'non-pure-slip must not emit the reclassify marker');
+  assert.strictEqual(writer.insertedCount(), 0, 'non-pure-slip untracked_win must not stage a bet');
+  assert.strictEqual(staged.length, 0, 'non-pure-slip untracked_win must not send a staging embed');
+}
+
+// C. pure-slip + image + parseBetText→result(bets:[]) + parseBetSlipImage→1 bet
+//    ⇒ bet staged, NO VISION_RESULT_RECAP divert (so autoGradeFromRecap is skipped).
+async function testPureSlipReclassifiesResultToStagedBet() {
+  process.env.PICKS_CHANNEL_IDS = 'channel_1';
+  process.env.HUMAN_SUBMISSION_CHANNEL_IDS = 'channel_1';
+  process.env.PURE_SLIP_CHANNEL_IDS = 'channel_1';
+  process.env.DUBCLUB_SPLIT_CHANNEL_IDS = '';
+  global.fetch = async () => ({ ok: true, arrayBuffer: async () => Buffer.from('fake') });
+
+  const events = [];
+  const writer = dedupeWriter();
+  const staged = [];
+  const { handleMessage } = loadHandlerWithMocks({
+    parseBetText: async () => ({ type: 'result', outcome: 'win', subject: ['Lakers'], bets: [] }),
+    parseBetSlipImage: async () => ({ bets: [{ sport: 'NBA', bet_type: 'straight', description: 'Lakers -3.5', odds: -110, units: 1, legs: [] }] }),
+    createBetWithLegs: writer,
+    sendStagingEmbed: async (...args) => staged.push(args),
+    events,
+  });
+
+  const msg = makeMessage({ messageId: 'onyx_result_1', withImage: true });
+  await handleMessage(msg);
+  await new Promise((resolve) => setTimeout(resolve, 4500));
+
+  assert.ok(!events.some(e => e.fn === 'drop' && e.dropReason === 'VISION_RESULT_RECAP'), 'recovered pure-slip bet must NOT divert to VISION_RESULT_RECAP (no autograde)');
+  assert.strictEqual(countStage(events, 'PURE_SLIP_RECLASSIFIED_EXTRACT'), 1, 'exactly one PURE_SLIP_RECLASSIFIED_EXTRACT marker on the result path');
+  assert.strictEqual(writer.insertedCount(), 1, 're-extracted result bet must be staged');
+  assert.strictEqual(staged.length, 1, 're-extracted result bet must send one staging embed');
+}
+
 (async () => {
   await testGetImageAttachmentsTagsOrigin();
+  await testPureSlipReclassifiesUntrackedWinToStagedBet();
+  await testNonPureSlipUntrackedWinStillDiverts();
+  await testPureSlipReclassifiesResultToStagedBet();
   await testVisionResultRecapRecordsDrop();
   await testVisionUntrackedWinRecordsDrop();
   await testVisionTicketRecapRecordsDrop();

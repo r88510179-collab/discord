@@ -124,6 +124,16 @@ run('RECOVERY_ATTEMPT_FAILED is registered in STAGES', () => {
   );
 });
 
+// Onyx-vision fix: pure-slip re-extraction stages a recovered bet instead of
+// diverting to VISION_RESULT_RECAP/VISION_UNTRACKED_WIN, emitting this trace-only
+// marker. Registered so the warn-only write-boundary tripwire stays quiet.
+run('PURE_SLIP_RECLASSIFIED_EXTRACT is registered in STAGES', () => {
+  assert.ok(
+    pe.STAGES.includes('PURE_SLIP_RECLASSIFIED_EXTRACT'),
+    'PURE_SLIP_RECLASSIFIED_EXTRACT missing from STAGES',
+  );
+});
+
 // ── (b) drift: unknown value warns ONCE, does NOT throw, does NOT skip ──
 run('unknown stage → warns, does NOT throw, row STILL written', () => {
   const before = countRows();
