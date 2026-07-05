@@ -737,9 +737,36 @@ function assessParseConfidence(text, bet) {
   return { confidence, score, reasons };
 }
 
+// A natural-language multi-pick tweet (a LIST of picks) with none of the
+// parlay/ladder tokens slips past regexParseBet's guard and gets swallowed as
+// ONE straight whose description is the whole blob. Detect the list shape so we
+// defer to the LLM (which parses these as multi-leg). Conservative by design: a
+// single pick wrapped onto 2 lines (e.g. "Lakers -3.5\n-110 2u") is NOT a list.
+function looksLikeMultiPick(text) {
+  if (typeof text !== 'string') return false;
+  const lines = text.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
+  // Both signals need ≥3 non-empty lines (colon preamble = header + ≥2 body).
+  // Fewer than 3 can only be a single pick (possibly line-wrapped) → not a list.
+  if (lines.length < 3) return false;
+
+  // Signal 1 — colon-preamble list: first non-empty line ends with ':'
+  // ("So I just took:", "Today's plays:") AND ≥2 further non-empty lines follow.
+  if (/:\s*$/.test(lines[0])) return true;
+
+  // Signal 2 — multiple pick-like lines: ≥3 non-empty lines carrying a betting
+  // token (American odds, spread, ml/moneyline, over/under, or a result phrase).
+  const BET_TOKEN = /[+-]\d{2,4}|[+-]\d{1,2}(?:\.\d+)?|\b(?:ml|moneyline)\b|\b(?:over|under|o|u)\s*\d|\bto (?:score|advance|win|cover)\b/i;
+  const linesWithToken = lines.filter((l) => BET_TOKEN.test(l)).length;
+  return linesWithToken >= 3;
+}
+
 function regexParseBet(text) {
   // Parlays, ladders, and multi-leg bets are too complex for regex — send to AI
   if (/parlay|ladder|(\+.*\+.*\+)|(\d+\s*leg)|step\s*\d|tier/i.test(text)) return null;
+
+  // Natural-language multi-pick lists (no parlay/ladder token) — the LLM handles
+  // these as multi-leg; regex would swallow the whole blob as one straight.
+  if (looksLikeMultiPick(text)) return null;
 
   const oddsMatch = text.match(/([+-]\d{3,4})/);
   const odds = oddsMatch ? parseInt(oddsMatch[1]) : -110;
@@ -2578,4 +2605,4 @@ function normalizeEventDate(raw) {
   return null;
 }
 
-module.exports = { parseBetText, parseBetSlipImage, processImageForAI, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, reassignDollarStakeUnits, evaluateTweet, validateParsedBet, validateLegSportConsistency, validateLegShape, PITCHER_RECORD_PATTERN, isSportsbookBrand, reclassifySport, inferLegSport, descNamesNationalTeam, disambiguateAmbiguousTeam, matchesKboTeam, normalizeKboLeg, declaredSportIncludesKbo, isInSeason, normalizeEventDate, AMBIGUITY_THRESHOLD, tryVisionGemma, parseGemmaOutputWithCerebras, runGemmaVisionFallback, logVisionFailure, GEMMA_SLIP_PROMPT, gemmaHealth, isGemmaHealthy, recordGemmaResult, callLLM, callLLMResult, callGemini, callOpenAI, AdapterError, FALLBACK_ELIGIBLE, resolveOdds };
+module.exports = { parseBetText, parseBetSlipImage, processImageForAI, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, reassignDollarStakeUnits, evaluateTweet, validateParsedBet, validateLegSportConsistency, validateLegShape, PITCHER_RECORD_PATTERN, isSportsbookBrand, reclassifySport, inferLegSport, descNamesNationalTeam, disambiguateAmbiguousTeam, matchesKboTeam, normalizeKboLeg, declaredSportIncludesKbo, isInSeason, normalizeEventDate, AMBIGUITY_THRESHOLD, tryVisionGemma, parseGemmaOutputWithCerebras, runGemmaVisionFallback, logVisionFailure, GEMMA_SLIP_PROMPT, gemmaHealth, isGemmaHealthy, recordGemmaResult, callLLM, callLLMResult, callGemini, callOpenAI, AdapterError, FALLBACK_ELIGIBLE, resolveOdds, regexParseBet, looksLikeMultiPick };
