@@ -128,6 +128,12 @@ function lazyInferLegSport(desc) {
 function lazyNationalTeam(desc) {
   try { const fn = lazyAi().descNamesNationalTeam; return fn ? !!fn(desc) : false; } catch (_) { return false; }
 }
+// Single source of truth for the pitcher-record / stat-line shape lives in
+// services/ai.js (PITCHER_RECORD_PATTERN). Import it lazily (never redefine it) so
+// the record/promo guard here matches the twitter validator's exact regex.
+function lazyPitcherRecordPattern() {
+  try { return lazyAi().PITCHER_RECORD_PATTERN || null; } catch (_) { return null; }
+}
 
 // Per-pick sport, with a confidence flag. Order = strongest signal first:
 //   1. MMA finish/ITD/round marker → MMA (high).
@@ -150,12 +156,51 @@ function inferPickSport(text, fallbackSport, deps) {
   return { sport: fallbackSport || 'Unknown', confidence: 'low' };
 }
 
+// Record/promo/stat-line markers — a capper's "record" line, NOT a bet. Its
+// units-won token ("+41.4u") is a "Nu"-shaped stake to parseUnits, so without this
+// guard the segment→pick step counts "Last 52 Free Plays 38-14 (73%) +41.4u" as a
+// 41.4u pick and (under cutover) emits it as a fake straight.
+const WL_RECORD_RE = /\b\d+-\d+(?:-\d+)?\b/;  // W-L(-T) record token, e.g. "38-14"
+const PLAYS_RE = /\bplays?\b/i;               // capper record vocab ("Free Plays", "N plays")
+
+// True when a segment is a record/promo/stat line rather than a bet. Pure: relies
+// only on the injected-once PITCHER_RECORD_PATTERN (from ai.js) + local shape REs.
+//
+// TIGHTNESS is the governing constraint here (prompt mandate: "must not exclude real
+// picks"). Two unambiguous record shapes classify as non-picks:
+//   1. The ai.js validator's exact "N-N (NN%)" pattern (PITCHER_RECORD_PATTERN) —
+//      catches the reported FP ("… 38-14 (73%) …") with the same regex the twitter
+//      path already trusts; a real bet never combines N-N with a parenthesized %.
+//   2. A record recap that lacks that parenthesised % ("Free Plays 38-14",
+//      "Last 30 plays 20-10") — a W-L token BESIDE "plays" record vocabulary.
+// Requiring BOTH a W-L token AND "plays" (not a bare W-L token, and not a bare '%')
+// is deliberate: a correct-score "2-1", a set score "3-2 sets", a "5-2 in last 7"
+// trend line, a date "7-5", and any "%"-annotated prop ("Jokic 25-30 pts 65% to hit",
+// "Sinner 3-2 sets 68% hold") all carry a W-L-shaped token but no "plays" vocab, so
+// they STAY picks. This is intentionally NARROW: exotic record phrasings without the
+// "(NN%)" shape or "plays" vocab ("38-14 on the year", "ROI 12%", spelled-out records)
+// are left as picks rather than risk dropping a real one — out of scope for this
+// filter, whose sole job is the reported FP class. (This is why the prompt's
+// suggested standalone "free plays"/"last \\d+"/"W-L-token+%" markers were tightened:
+// each provably dropped a real pick — verified via adversarial review — while the
+// exact FP is still caught by both branches above.)
+function isNonPickSegment(text) {
+  const s = String(text == null ? '' : text);
+  if (!s) return false;
+  const pitcherRecord = lazyPitcherRecordPattern();
+  if (pitcherRecord && pitcherRecord.test(s)) return true;   // "N-N (NN%)" — the exact FP
+  if (WL_RECORD_RE.test(s) && PLAYS_RE.test(s)) return true; // record recap: W-L token + "plays"
+  return false;
+}
+
 // Parse ONE segment into a pick, or null. A segment is a sheet pick only when it
-// carries its OWN stake token (the per-pick-stake discriminator) and a usable
-// description; that gate keeps genuine single-stake parlays from being re-split.
+// is NOT a record/promo/stat line AND carries its OWN stake token (the per-pick-
+// stake discriminator) and a usable description; that gate keeps genuine
+// single-stake parlays from being re-split and record lines from becoming picks.
 function parsePick(segment, fallbackSport, deps) {
   const raw = String(segment == null ? '' : segment).trim();
   if (raw.length < 3) return null;
+  if (isNonPickSegment(raw)) return null;
   const units = parseUnits(raw);
   if (units == null) return null;
   const description = stripStake(raw);
@@ -270,6 +315,7 @@ module.exports = {
   applySlateResplit,
   detectSheet,
   parsePick,
+  isNonPickSegment,
   inferPickSport,
   splitSegments,
   parseUnits,

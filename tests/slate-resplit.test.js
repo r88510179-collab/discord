@@ -76,6 +76,16 @@ function eq(label, expected, actual) {
 const TWEET_A = 'Argentina ML (-185) 5u | Spain -2.5 (-110) 5u | Iran/Belgium 1H "U" 1.5 (-205) 5u | Uruguay/Verde 1H "O" 0.5 (-205) 5u | Egypt/NZ 1H "O" 0.5 (-225) 5u | Japan ML (-165) 5u | Japan/Tunisia 1H "O" 0.5 (-225) 3u | Manel Kape ML (-155) 10u | Navajo Stirling ITD (-105) 5u | Christian Rodriguez ML (-215) 10u | Murtalazi Magomedov ITD (-115) 3u | Vinicius Oliveira ML live (-145) 5u';
 const TWEET_B = 'Spain -2.5 (-110) 5u | Iran/Belgium 1H "U" 1.5 (-205) 5u | Uruguay/Verde 1H "O" 0.5 (-205) 5u | Egypt/NZ 1H "O" 0.5 (-225) 5u';
 
+// A real slate whose header is a capper record/promo line. The units-won token
+// ("+41.4u") is a "Nu"-shaped stake to parseUnits, so pre-guard the record line was
+// counted as a fake 41.4u straight (shadow pickCount 8, wouldSplit true) and would
+// have been emitted as a bogus split bet under cutover. The 7 real picks
+// (Cape Verde/Colombia/Egypt/Switzerland/Croatia/Argentina/Morocco) each carry 5u.
+const RECORD_LINE = 'Last 52 Free Plays 38-14 (73%) +41.4u';
+const TWEET_C = RECORD_LINE +
+  ' | Cape Verde +2.5 -150 5u | Colombia ML (-140) 5u | Egypt/Australia O 1.5 (-180) 5u' +
+  ' | Switzerland ML (+100) 5u | Croatia -1.5 (-120) 5u | Argentina -1.5 (-195) 5u | Morocco ML (-130) 5u';
+
 // A vision "parlay" carrying the slate's dominant sport (Soccer), N legs.
 function parlay(sport, legCount) {
   return { type: 'parlay', bet_type: 'parlay', sport, legs: Array.from({ length: legCount }, (_, i) => ({ description: `leg ${i}` })) };
@@ -235,6 +245,89 @@ console.log('G. negatives — precision guards');
   // A "+"-joined parlay at one stake stays one segment (we split on | / newline).
   const plusParlay = slate.detectSheet({ pick: parlay('NBA', 2), rawText: 'Lakers -3.5 + Celtics ML 5u', deps: realDeps });
   ok('plus-joined parlay → not a sheet', plusParlay.isSheet === false);
+}
+
+// ── H. Record/promo-line filter — isNonPickSegment (PR-A) ────────────────────
+// SLATE_RESPLIT_MODE=shadow caught a corrupting FP: a capper record/promo line
+// ("Last 52 Free Plays 38-14 (73%) +41.4u") counted as a pick with units 41.4 —
+// under cutover it would split into a fake 41.4u straight. isNonPickSegment drops it
+// via the same PITCHER_RECORD_PATTERN ("N-N (NN%)") ai.js already uses on the twitter
+// validator, plus a tight "W-L token + 'plays' vocab" recap branch. Governing
+// constraint: must NOT exclude real picks — the tightness negatives below are the
+// adversarial-review cases that a looser (bare-% / bare-last-N) guard wrongly dropped.
+console.log('H. record/promo-line filter — isNonPickSegment');
+
+// ai.js exports the single-source-of-truth regex (imported, never redefined).
+ok('ai.js exports PITCHER_RECORD_PATTERN', ai.PITCHER_RECORD_PATTERN instanceof RegExp);
+ok('PITCHER_RECORD_PATTERN matches "38-14 (73%)"', ai.PITCHER_RECORD_PATTERN.test('38-14 (73%)'));
+
+// Positives — record/stat lines are NOT bets.
+ok('record line (bare) → non-pick', slate.isNonPickSegment('Last 52 Free Plays 38-14 (73%)') === true);
+ok('record line (+41.4u stake) → non-pick', slate.isNonPickSegment(RECORD_LINE) === true);
+ok('pitcher-record "C. Sanchez 5-1 (83.3%)" → non-pick', slate.isNonPickSegment('C. Sanchez 5-1 (83.3%)') === true);
+ok('"Free Plays 38-14" (no parens %) → non-pick (W-L token + "plays")', slate.isNonPickSegment('Free Plays 38-14') === true);
+ok('"Last 30 plays 20-10" → non-pick (W-L token + "plays")', slate.isNonPickSegment('Last 30 plays 20-10') === true);
+
+// Negatives — real picks are NEVER excluded (tightness proof).
+ok('"Argentina -1.5 (-195)" → pick', slate.isNonPickSegment('Argentina -1.5 (-195)') === false);
+ok('"Egypt/Australia O 1.5 (-180)" → pick', slate.isNonPickSegment('Egypt/Australia O 1.5 (-180)') === false);
+ok('"To Advance: Morocco" → pick', slate.isNonPickSegment('To Advance: Morocco') === false);
+ok('"Switzerland ML (+100)" → pick', slate.isNonPickSegment('Switzerland ML (+100)') === false);
+ok('"Cape Verde +2.5 -150" → pick', slate.isNonPickSegment('Cape Verde +2.5 -150') === false);
+// A W-L-shaped token with NO "plays" vocab (a real correct-score / set score / date)
+// stays a pick — the "plays"-gating keeps the guard tight.
+ok('"Argentina 2-1 correct score" → pick (W-L token, no "plays")', slate.isNonPickSegment('Argentina 2-1 correct score') === false);
+ok('"Djokovic to win 2-0 sets" → pick (set score)', slate.isNonPickSegment('Djokovic to win 2-0 sets') === false);
+ok('"Lakers ML 7-5-2026" → pick (date token)', slate.isNonPickSegment('Lakers ML 7-5-2026') === false);
+// Adversarial-review tightness cases — a "%" annotation is NOT a record signal:
+// a W-L-shaped token beside a bare "%" must stay a pick (these were dropped by an
+// earlier bare-"%"/bare-"last N" guard; the "plays"-only recap branch keeps them).
+ok('"Sinner 3-2 sets, 68% hold rate 5u" → pick (set score + %)', slate.isNonPickSegment('Sinner 3-2 sets, 68% hold rate 5u') === false);
+ok('"Correct score 2-1, 55% implied 5u" → pick (correct score + %)', slate.isNonPickSegment('Correct score 2-1, 55% implied 5u') === false);
+ok('"Jokic 25-30 pts 65% to hit 3u" → pick (prop range + %)', slate.isNonPickSegment('Jokic 25-30 pts 65% to hit 3u') === false);
+ok('"Goal in last 10 mins, 65% possession 5u" → pick (market + %)', slate.isNonPickSegment('Goal in last 10 mins, team at 65% possession 5u') === false);
+ok('"Yankees ML, 5-2 in last 7 5u" → pick (trend annotation)', slate.isNonPickSegment('Yankees ML, they are 5-2 in last 7 5u') === false);
+// A legit pick LABELLED "Free Play" (no W-L token) and a "last N mins" market stay picks.
+ok('"Free Play: Lakers -3.5 (-110) 5u" → pick (labelled free play, no W-L token)', slate.isNonPickSegment('Free Play: Lakers -3.5 (-110) 5u') === false);
+ok('"Goal in the last 10 mins 5u" → pick ("last N" market)', slate.isNonPickSegment('Goal in the last 10 mins 5u') === false);
+ok('empty/nullish → not a non-pick', slate.isNonPickSegment('') === false && slate.isNonPickSegment(null) === false);
+
+// The FP segment never parses to a pick (would have been units 41.4 pre-guard).
+eq('record line → parsePick null', null, slate.parsePick(RECORD_LINE, 'Soccer', realDeps));
+
+// In the full slate the record line is (a) NOT counted and (b) real picks still split.
+{
+  const det = slate.detectSheet({ pick: parlay('Soccer', 8), rawText: TWEET_C, deps: realDeps });
+  ok('Tweet C is a sheet', det.isSheet === true);
+  eq('Tweet C pick count excludes record line', 7, det.picks.length);
+  ok('Tweet C emits no record-line pick', !det.picks.some((p) => /Free Plays|38-14/.test(p.description || '')));
+  ok('Tweet C no fabricated 41.4u pick', !det.picks.some((p) => p.units === 41.4));
+  // Every real leg still splits with its 5u stake.
+  ok('Cape Verde stays a pick', pickBy(det.picks, 'Cape Verde') != null);
+  eq('Cape Verde units → 5', 5, pickBy(det.picks, 'Cape Verde').units);
+  ok('all 7 real picks are 5u', det.picks.every((p) => p.units === 5));
+  eq('Croatia -1.5 splits', 5, pickBy(det.picks, 'Croatia').units);
+  eq('Switzerland ML splits', 5, pickBy(det.picks, 'Switzerland').units);
+}
+
+// (a) shadow payload pick accounting is accurate — record line not counted.
+{
+  const events = [];
+  const sh = slate.applySlateResplit({ pick: parlay('Soccer', 8), rawText: TWEET_C, mode: 'shadow', deps: realDeps, recordStageFn: (e) => events.push(e), ingestId: 'twit_c', sourceRef: 'c' });
+  ok('shadow (Tweet C) → NEVER acts (isSheet:false)', sh.isSheet === false);
+  eq('shadow (Tweet C) → one event', 1, events.length);
+  eq('shadow pickCount excludes record line', 7, events[0].payload.pickCount);
+  ok('shadow wouldSplit true (7 real picks)', events[0].payload.wouldSplit === true);
+  ok('shadow sample has no record line', !events[0].payload.sample.some((s) => /Free Plays|38-14/.test(s.d || '')));
+}
+
+// (b) cutover emits the 7 real straights — never the record line.
+{
+  const events = [];
+  const cut = slate.applySlateResplit({ pick: parlay('Soccer', 8), rawText: TWEET_C, mode: 'cutover', deps: realDeps, recordStageFn: (e) => events.push(e), ingestId: 'twit_c', sourceRef: 'c' });
+  ok('cutover (Tweet C) → acts (isSheet:true)', cut.isSheet === true);
+  eq('cutover (Tweet C) → 7 straights', 7, cut.picks.length);
+  ok('cutover emits no record-line straight', !cut.picks.some((p) => /Free Plays|38-14/.test(p.description || '')));
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────
