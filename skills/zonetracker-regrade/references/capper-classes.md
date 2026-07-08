@@ -40,3 +40,15 @@ Add the new entry to this table with the evidence that determined classification
 
 - **Don't assume a capper is `pregame_picks` just because they sound like an active handicapper.** bobby__tracker has handicapper-style names but is actually a recap account.
 - **Don't treat `mixed` as `pregame_picks` when the timing is ambiguous.** A 20+ hour gap between `created_at` and the "next game" is usually a recap, not a pre-game pick posted days early.
+
+## bobby__tracker — multi-name parlay syntax convention
+
+bobby__tracker (recap_tracker class) routinely posts multi-leg parlays as comma-separated or space-separated player surnames, often with "vs" or "x" as a separator between the first two names. The convention does NOT mean head-to-head; it means parlay legs.
+
+**Observed patterns:**
+- `Yagshimuradov vs McKee` — 2-leg ML parlay (B13 `e101c301`, confirmed via odds-field disambiguation)
+- `Fonseca x Darderi, Shelton, Bergs` — likely 4-leg parlay (B11 `7ad74564`, unconfirmed because odds null)
+
+**Grading approach:** apply the odds-field disambiguation supplement (see methodology.md). When odds populated and math implies parlay, grade as parlay. When odds null, mark unknown — do not assume parlay structure from capper convention alone, because misclassifying a single-side bet as a multi-leg parlay would produce false LOSS verdicts when one of the named players loses.
+
+**Why this convention exists:** bobby__tracker posts after events as a recap-style tracker, so the listed names are typically the cap's outright ML picks. The "vs" / "x" between the first two names appears to be stylistic shorthand carried over from h2h-style writing, not a structural indicator.

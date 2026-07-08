@@ -12,7 +12,8 @@ The final graded batch is a **flat JSON array** (no wrapper object, no metadata,
   "grade_reason": "string (1–3 sentences, factual, no hedging)",
   "evidence_url": "string (from the whitelist) | null",
   "evidence_source": "espn_mlb | espn_nba | espn_nhl | espn_soccer | nba_com | mlb_com | nhl_com | atp_official | cbssports_nba_pbp | ... | null",
-  "evidence_quote": "string (verbatim from evidence_url) | null"
+  "evidence_quote": "string (verbatim from evidence_url) | null",
+  "merge_metadata": "object | null (only set on Tier 2 result-disagreement merges)"
 }
 ```
 
@@ -83,6 +84,42 @@ A verbatim copy-paste from the `evidence_url`. Between 5 and 200 characters. No 
 For `unknown`: `null`.
 
 **Anti-pattern**: do not write "Player X scored 19 points" as the quote if the source said "James finished with 19 points". Use the exact source wording.
+
+### `merge_metadata`
+Object or `null`. Optional field — only populated when a Tier 2 merge resolved a result-level disagreement between graders A and B (one said `win`, the other said `loss` or `unknown`, etc.). For non-disagreement bets (graders agreed on result), this field is `null` or omitted entirely.
+
+Schema (when present):
+
+```
+{
+  "a_call": "win" | "loss" | "unknown",
+  "a_profit_units": <number or null>,
+  "b_call": "win" | "loss" | "unknown",
+  "b_profit_units": <number or null>,
+  "basis": "<one-sentence reason for choosing the final result>"
+}
+```
+
+**Purpose**: preserves the A vs B intermediate calls and the resolution rationale, so retrospectives can build a grader-conflict ledger without re-pulling the upstream pass JSONs. Without this field, the merge resolution rationale is only present in `grade_reason` narrative text and cannot be reliably parsed.
+
+**When to populate**:
+- Populate ONLY when graders A and B disagreed on `result` (one says `win`, the other says `loss` or `unknown`, etc.).
+- DO NOT populate when both graders agreed on result but had a `profit_units` numeric difference (e.g. the recurring B win-profit-math bug). For pure `profit_units` corrections, fix the value and rewrite `grade_reason` to match — no metadata needed.
+- DO NOT populate for unanimous bets even if there was internal grader-team discussion. Only persist disagreements that required a Tier 2 decision.
+
+**Worked example** — B17 `e3550efcd198` (Ohtani):
+
+```json
+"merge_metadata": {
+  "a_call": "win",
+  "a_profit_units": 4.56,
+  "b_call": "loss",
+  "b_profit_units": -1,
+  "basis": "Verified Ohtani 1-for-4, 2 BB, no HR on 4/20 LAD-COL. A's evidence URL was an NBA recap with no Ohtani support — anti-pattern #2 (hallucinated/wrong-source evidence)."
+}
+```
+
+When `merge_metadata` is present, `grade_reason` should still be a self-contained final verdict — it does not need to reference the `merge_metadata`, and consumers reading just `grade_reason` should see a complete reason for the final result.
 
 ## File naming
 

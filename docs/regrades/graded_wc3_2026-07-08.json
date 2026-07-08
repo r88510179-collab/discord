@@ -1,0 +1,29 @@
+[
+  {
+    "bet_id": "e8ba2a9cd6fe79acaf08e4bab7e17405",
+    "result": "loss",
+    "profit_units": -1.0,
+    "grade_reason": "Leg 5 'USA To Qualify For The Next Round' failed: USA eliminated by Belgium 1-4 in R16 on Jul 6, 2026 (event_date match). Failed-leg-kills-parlay; other 4 legs moot.",
+    "evidence_url": "https://www.espn.com/soccer/match/_/gameId/760507/belgium-united-states",
+    "evidence_source": "ESPN",
+    "evidence_quote": "USA 1-4 Belgium (Jul 6, 2026) Final Score"
+  },
+  {
+    "bet_id": "e273d302b6163304ae98552ce328fb1f",
+    "result": "loss",
+    "profit_units": -6.25,
+    "grade_reason": "Legs 1+2 failed on HALF-TIME evidence: HT was USA 1-2 Belgium (goals 9', 31', 33' per PBP), so 1H BTTS:No = LOSS (both scored in 1H) and 1H ML:Draw = LOSS. Two confirmed failed legs kill the parlay; SOT legs moot. NOTE: bot's stored leg evidence graded these 1H markets on FT data — verdict right by luck, reasoning wrong.",
+    "evidence_url": "https://www.foxsports.com/soccer/fifa-world-cup-men-united-states-vs-belgium-jul-06-2026-game-boxscore-607924",
+    "evidence_source": "FOX Sports PBP",
+    "evidence_quote": "USA 1 BEL 2 45+6' Corner taken by C. Pulisic."
+  },
+  {
+    "bet_id": "29060e2d374bfedb09727dd65ee3e025",
+    "result": "loss",
+    "profit_units": -1.0,
+    "grade_reason": "Leg 1 'Portugal ML' failed: Portugal 0-1 Spain, R16, Jul 6, 2026 (Merino 90+1'). Only Portugal match in window; Yamal leg confirms Spain fixture. Failed-leg-kills-parlay; Yamal O1.5 shots moot. Note: created_at 21:09 UTC is in-play (kickoff 19:00 UTC) — live bet, same target match.",
+    "evidence_url": "https://www.espn.com/soccer/match/_/gameId/760506/spain-portugal",
+    "evidence_source": "ESPN",
+    "evidence_quote": "Portugal 0-1 Spain (Jul 6, 2026) Final Score"
+  }
+]
