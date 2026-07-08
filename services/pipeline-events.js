@@ -114,6 +114,93 @@ const DROP_REASONS = [
   'GRADE_PARLAY_LEGS_PENDING',      // parlay has unresolved legs, rescheduled for recheck
 ];
 
+// ── Stage 2 idempotency (PIPELINE_IDEM_MODE) ────────────────
+// Grading-side DROP rows can be written twice for the same logical
+// event when the grader retries within one attempt (same bet, same
+// grading_attempts, same stage/drop_reason), inflating drop
+// analytics. A deterministic key makes such duplicates detectable
+// (shadow) or rejectable (enforce, via migration 032's partial
+// unique index). Repeats across attempts carry a different
+// grading_attempts value → different key → always written.
+//
+// Strict string comparison, same tri-state idiom as OCR_FIRST_MODE /
+// EVENT_AWARE_RECHECK. Read PER CALL (the eventAwareRecheckMode
+// variant of the pattern, not OCR wiring's read-at-load) so ops can
+// flip the flag without a restart and tests can toggle it per case.
+// unset / anything-else → 'off' = no key computed, byte-identical
+// current behavior.
+function resolvePipelineIdemMode(raw = process.env.PIPELINE_IDEM_MODE) {
+  if (raw === 'shadow') return 'shadow';
+  if (raw === 'enforce') return 'enforce';
+  return 'off';
+}
+
+// Pure, deterministic key derivation. Components:
+//   betId       — parlay legs grade under synthetic `<parent>-leg<N>`
+//                 ids (services/grading.js gradeParlay), so two legs
+//                 of one parlay failing with the same reason in the
+//                 same attempt stay DISTINCT keys.
+//   attempts    — bets.grading_attempts read at write time (caller's
+//                 job — services/bets.js). claimBetForGrading
+//                 increments it once per grading attempt, so a
+//                 legitimate repeat on a LATER attempt (e.g.
+//                 GRADE_TOO_RECENT on attempt 3 and again on attempt
+//                 4) gets a fresh key and survives.
+//   stage / eventType / dropReason — the same bet+attempt dropping at
+//                 a different stage or for a different reason is a
+//                 different logical event.
+// Returns null (→ no dedup, write as today) when any identifying
+// component is missing — e.g. betId-NULL rows or a bet with no
+// readable grading_attempts.
+function deriveIdempotencyKey({ betId, attempts, stage, eventType, dropReason } = {}) {
+  if (betId == null || String(betId).length === 0) return null;
+  if (attempts == null || !Number.isFinite(Number(attempts))) return null;
+  if (!stage || !eventType) return null;
+  return [
+    'gradv1',
+    String(betId),
+    String(Number(attempts)),
+    String(stage),
+    String(eventType),
+    dropReason ? String(dropReason) : '',
+  ].join('|');
+}
+
+// Shadow-mode duplicate probe: in shadow the idempotency_key COLUMN
+// stays NULL (populating it would let migration 032's unique index
+// reject the very duplicates shadow exists to measure), so the key
+// rides the JSON payload ($.idem_key) and the probe json_extracts it.
+// Bounded to recent rows of the same event_type so it rides
+// idx_pipeline_events_event_type_created (mig 031) instead of a full
+// table scan on the bot's event loop. 7 days matches the sweep
+// horizon — a duplicate older than that is out of any retry window.
+const IDEM_SHADOW_LOOKBACK_SECONDS = 7 * 24 * 3600;
+let _shadowDupStmt = null;
+function shadowDuplicateExists(eventType, key) {
+  try {
+    if (!_shadowDupStmt) {
+      // json_valid guards json_extract: safeJson slices payloads at
+      // 4000 chars, so a rare oversized payload is TRUNCATED (malformed
+      // JSON) and json_extract would raise on it — killing the probe for
+      // every row in the window, not just the broken one.
+      _shadowDupStmt = db.prepare(`
+        SELECT id FROM pipeline_events
+         WHERE event_type = ?
+           AND created_at >= ?
+           AND json_valid(payload)
+           AND json_extract(payload, '$.idem_key') = ?
+         LIMIT 1
+      `);
+    }
+    const cutoff = Math.floor(Date.now() / 1000) - IDEM_SHADOW_LOOKBACK_SECONDS;
+    return !!_shadowDupStmt.get(String(eventType), cutoff, String(key));
+  } catch (err) {
+    // Probe failure must never affect the write — treat as "no duplicate".
+    console.error(`[PipelineEvents] idem shadow probe error: ${err.message}`);
+    return false;
+  }
+}
+
 // Lazy-prepare the insert — avoids a stmt reference before the
 // migrator has finished running on cold start.
 //
@@ -128,13 +215,16 @@ const DROP_REASONS = [
 //   datetime(created_at, 'unixepoch')
 // — bare `datetime(created_at)` returns NULL because SQLite reads
 // the integer as a Julian-day number out of range.
+//
+// idempotency_key (migration 032) is bound NULL everywhere except a
+// PIPELINE_IDEM_MODE=enforce grading-side DROP write.
 let _insertStmt = null;
 function getInsertStmt() {
   if (_insertStmt) return _insertStmt;
   _insertStmt = db.prepare(`
     INSERT INTO pipeline_events
-      (ingest_id, bet_id, source_type, source_ref, stage, event_type, drop_reason, payload, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (ingest_id, bet_id, source_type, source_ref, stage, event_type, drop_reason, payload, created_at, idempotency_key)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   return _insertStmt;
 }
@@ -183,7 +273,7 @@ function warnUnknownEnums({ sourceType, stage, eventType, dropReason }, payload)
   }
 }
 
-function writeRow({ ingestId, betId, sourceType, sourceRef, stage, eventType, dropReason, payload }) {
+function writeRow({ ingestId, betId, sourceType, sourceRef, stage, eventType, dropReason, payload, idempotencyKey }) {
   try {
     // Grading-side writes don't have an ingest_id (bets enter grading
     // long after the original ingest flow completed). Ingest-side
@@ -195,18 +285,67 @@ function writeRow({ ingestId, betId, sourceType, sourceRef, stage, eventType, dr
     try {
       warnUnknownEnums({ sourceType, stage, eventType, dropReason }, payload);
     } catch (_) { /* validation must never affect the write */ }
+
+    // ── Stage 2 idempotency (PIPELINE_IDEM_MODE) ────────────────
+    // Callers that computed a key (services/bets.js — grading-side
+    // DROPs only) pass it here; everyone else leaves it undefined and
+    // this block is inert. Mode is re-read per write so a flag flip
+    // between key computation and write degrades safely (worst case:
+    // one un-deduped row, exactly today's behavior).
+    let keyColumn = null;
+    let effectivePayload = payload;
+    const idemMode = idempotencyKey ? resolvePipelineIdemMode() : 'off';
+    if (idemMode === 'shadow' || idemMode === 'enforce') {
+      // idem fields go FIRST: safeJson slices the serialized payload at
+      // 4000 chars, so trailing keys are the ones a huge payload would
+      // truncate away — and the shadow probe needs $.idem_key intact.
+      // (No grading call site passes a string payload, but degrade to
+      // {text: …} rather than dropping it if one ever does.)
+      const base = payload == null
+        ? {}
+        : (typeof payload === 'object' ? payload : { text: String(payload).slice(0, 3500) });
+      if (idemMode === 'shadow') {
+        // Column stays NULL in shadow — the key rides the payload so the
+        // unique index cannot reject the duplicates we are measuring.
+        const wouldReject = shadowDuplicateExists(eventType, idempotencyKey);
+        effectivePayload = wouldReject
+          ? { idem_key: idempotencyKey, idem_would_reject: true, ...base }
+          : { idem_key: idempotencyKey, ...base };
+        if (wouldReject) {
+          console.log(`[PipelineEvents] idem shadow would-reject: key=${idempotencyKey} (row written anyway)`);
+        }
+      } else {
+        keyColumn = String(idempotencyKey);
+        // Mirror the key into the payload so shadow-era and enforce-era
+        // rows answer the same json_extract query.
+        effectivePayload = { idem_key: idempotencyKey, ...base };
+      }
+    }
+
     const stmt = getInsertStmt();
-    stmt.run(
-      ingestId != null ? String(ingestId) : null,
-      betId ? String(betId) : null,
-      String(sourceType || 'manual'),
-      sourceRef != null ? String(sourceRef) : null,
-      String(stage),
-      String(eventType),
-      dropReason ? String(dropReason) : null,
-      safeJson(payload),
-      Math.floor(Date.now() / 1000),
-    );
+    try {
+      stmt.run(
+        ingestId != null ? String(ingestId) : null,
+        betId ? String(betId) : null,
+        String(sourceType || 'manual'),
+        sourceRef != null ? String(sourceRef) : null,
+        String(stage),
+        String(eventType),
+        dropReason ? String(dropReason) : null,
+        safeJson(effectivePayload),
+        Math.floor(Date.now() / 1000),
+        keyColumn,
+      );
+    } catch (err) {
+      // enforce: a duplicate insert trips migration 032's partial
+      // unique index — that is the designed rejection, logged and
+      // swallowed, NEVER thrown (fire-and-forget contract).
+      if (keyColumn && /UNIQUE constraint failed: pipeline_events\.idempotency_key/.test(err.message || '')) {
+        console.log(`[PipelineEvents] idem enforce rejected duplicate: key=${keyColumn}`);
+        return;
+      }
+      throw err; // any other error → the existing outer catch/log below
+    }
   } catch (err) {
     console.error(`[PipelineEvents] write error: ${err.message}`);
   }
@@ -298,6 +437,8 @@ module.exports = {
   recordError,
   makeIngestId,
   writeRow,
+  resolvePipelineIdemMode,
+  deriveIdempotencyKey,
   SOURCE_TYPES,
   STAGES,
   EVENT_TYPES,

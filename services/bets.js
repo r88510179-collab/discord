@@ -15,8 +15,12 @@
 // Enum lists (STAGES/EVENT_TYPES/DROP_REASONS) are re-exported
 // from pipeline-events so callers have one import surface.
 //
-// Stage 2 (separate deploy): idempotency keys + reaper +
-// conversion of the remaining grading call sites.
+// Stage 2 — idempotency keys (this module + pipeline-events.js):
+// DROP writes carry a deterministic key derived from
+// (bet_id, grading_attempts at write time, stage, event_type,
+// drop_reason) behind PIPELINE_IDEM_MODE (off|shadow|enforce,
+// unset → off). Remaining Stage 2 items (reaper, call-site
+// conversion) are still separate deploys.
 // ═══════════════════════════════════════════════════════════
 
 const { db } = require('./database');
@@ -34,6 +38,56 @@ function getDropStmt() {
      WHERE id = ?
   `);
   return _dropStmt;
+}
+
+// ── Stage 2 idempotency: grading_attempts read at write time ──
+// bets PK is `id` (not `bet_id`). Parlay legs grade under synthetic
+// `<parent>-leg<N>` ids (services/grading.js gradeParlay) that have
+// no bets row — the PARENT's grading_attempts is the attempt counter
+// for the whole grading pass (claimBetForGrading increments it once
+// per claim), so strip the suffix and read the parent. The FULL leg
+// id still goes into the key, keeping sibling legs distinct. Returns
+// null when no row is found either way → key skipped → the write
+// behaves exactly as before (no dedup). Never throws.
+let _attemptsStmt = null;
+function readGradingAttemptsForKey(betId) {
+  try {
+    if (!_attemptsStmt) {
+      _attemptsStmt = db.prepare('SELECT grading_attempts FROM bets WHERE id = ?');
+    }
+    let row = _attemptsStmt.get(String(betId));
+    if (!row) {
+      const legMatch = String(betId).match(/^(.+)-leg\d+$/);
+      if (legMatch) row = _attemptsStmt.get(legMatch[1]);
+    }
+    if (!row) return null;
+    return row.grading_attempts == null ? 0 : Number(row.grading_attempts);
+  } catch (err) {
+    console.error(`[BetService] grading_attempts read error (bet=${String(betId).slice(0, 8)}): ${err.message}`);
+    return null;
+  }
+}
+
+// Compute the idempotency key for a grading-side write, or null.
+// DROP events ONLY (deliberate — see the call-site survey in PR):
+// non-DROP grading-side writes are per-decision telemetry where
+// same-attempt repeats are the signal, not noise — event_aware_shadow
+// fires once per cron poll on the PRE-claim path (grading_attempts
+// unchanged between polls), so keying it would collapse the
+// poll-frequency measurement to one row per attempt. Drop analytics
+// (GET /api/admin/drops) reads event_type='DROP' rows, which is
+// exactly the inflated population this dedups. Never throws.
+function computeGradingIdemKey({ betId, stage, eventType, dropReason }) {
+  try {
+    if (eventType !== 'DROP') return null;
+    if (pipelineEvents.resolvePipelineIdemMode() === 'off') return null; // off: key not computed at all
+    const attempts = readGradingAttemptsForKey(betId);
+    if (attempts == null) return null;
+    return pipelineEvents.deriveIdempotencyKey({ betId, attempts, stage, eventType, dropReason });
+  } catch (err) {
+    console.error(`[BetService] idem key computation error (bet=${String(betId).slice(0, 8)}): ${err.message}`);
+    return null;
+  }
 }
 
 function isKnownStage(stage) {
@@ -91,6 +145,16 @@ function transitionTo({ betId, toStage, eventType, dropReason, payload, ingestId
       eventType: effectiveEventType,
       dropReason: dropReason || null,
       payload,
+      // Stage 2 idempotency: non-null only for a DROP with a readable
+      // grading_attempts while PIPELINE_IDEM_MODE != off. writeRow owns
+      // the mode-dependent behavior (shadow: payload marker, column
+      // NULL; enforce: column populated, duplicate silently rejected).
+      idempotencyKey: computeGradingIdemKey({
+        betId,
+        stage: effectiveStage,
+        eventType: effectiveEventType,
+        dropReason: dropReason || null,
+      }),
     });
   } catch (err) {
     console.error(`[BetService] pipeline write error (bet=${String(betId).slice(0, 8)}): ${err.message}`);
@@ -140,6 +204,9 @@ module.exports = {
   transitionTo,
   recordDrop,
   getDropReason,
+  // Stage 2 idempotency — exported for unit tests.
+  computeGradingIdemKey,
+  readGradingAttemptsForKey,
   STAGES,
   EVENT_TYPES,
   DROP_REASONS,

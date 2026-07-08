@@ -572,8 +572,16 @@ These hooks add enforcement teeth to Phase 3 rules 2 and 5 from the main spec.
 
 Scope: follow-on to Stage 1 BetService that shipped v297. Each item is independently deployable.
 
-### Idempotency keys
-Prevent double-writes when the grader retries a bet through the pipeline. Add idempotency key column to `bets` or a separate `grading_attempts` table; every `recordDrop` call passes a key derived from `(bet_id, grading_attempt, stage)`. Duplicates are rejected at insert time.
+### Idempotency keys — code landed shadow-first (PR: `claude/betservice-stage2-idempotency-47aa89`; NOT shipped)
+Prevent double-writes when the grader retries a bet through the pipeline. Landed as migration **032** (`pipeline_events.idempotency_key` nullable TEXT + partial unique index `WHERE idempotency_key IS NOT NULL` — additive-only) behind `PIPELINE_IDEM_MODE` (`off`|`shadow`|`enforce`, unset → `off` = byte-identical no-op). Key is `(bet_id, grading_attempts at write time, stage, event_type, drop_reason || '')`, derived in `services/bets.js computeGradingIdemKey` → `services/pipeline-events.js deriveIdempotencyKey`, **DROP events only** (non-DROP grading telemetry like `event_aware_shadow` is per-poll measurement where same-attempt repeats are the signal). The original sketch here said "column on `bets` or a `grading_attempts` table, every recordDrop passes a `(bet_id, grading_attempt, stage)` key" — the landed shape keys `pipeline_events` itself (the table being inflated) and adds `event_type`/`drop_reason` so distinct failure reasons within one attempt stay distinct. Parlay legs (`<parent>-leg<N>` synthetic ids) key off the parent's `grading_attempts` with the full leg id in the key.
+
+**Rollout (operator-run, in order — merged ≠ deployed ≠ enabled):**
+1. Deploy with the flag unset (`off`) — no-op; migration 032 applies on boot.
+2. `fly secrets set PIPELINE_IDEM_MODE=shadow` — log the flip in `docs/FLAG-FLIPS.md`.
+3. Review the would-reject rate after ≥1 week of shadow:
+   `SELECT drop_reason, COUNT(*) dupes FROM pipeline_events WHERE event_type='DROP' AND json_extract(payload,'$.idem_would_reject')=1 AND created_at >= strftime('%s','now')-86400*7 GROUP BY drop_reason ORDER BY dupes DESC;`
+   (denominator: same query without the `idem_would_reject` filter but with `json_extract(payload,'$.idem_key') IS NOT NULL`).
+4. Enforce decision: rate looks like pure retry-duplication → `fly secrets set PIPELINE_IDEM_MODE=enforce` (log in FLAG-FLIPS.md); anything surprising → key shape gets revisited first.
 
 ### Reaper (cron)
 Converts long-stuck bets into explicit `GRADE_BACKOFF_EXHAUSTED` drops. Runs hourly. Reads bets with `grading_state='backoff'` and `grading_attempts > N` and `event_date` older than 48h — marks them with the enum, stops retry loop. Cleans up the "stuck in backoff forever" class of parlays seen pre-v293.
