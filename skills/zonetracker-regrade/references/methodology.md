@@ -115,117 +115,16 @@ When producing the final summary, always include:
 
 This lets the user sanity-check that the grading process itself is stable across batches. A sudden grade-rate drop signals the methodology or evidence sources degraded.
 
-## Odds-field disambiguation of multi-name records (supplement to ambiguous-multi-side rule)
+## Period-specific markets (added 2026-07-08, WC-3 mini-batch)
 
-The base rule (above): when a record contains multiple proper names without explicit structure markers (no leg separators, no "ML"/"+/-" per name, no "vs" with only one name on each side), mark `unknown` because the bet structure is ambiguous (parlay vs separate singles vs head-to-head).
+A 1st-half / 1st-period / quarter-specific market can ONLY be graded on evidence that states the score or stat at that period boundary (half-time score, period-by-period line score, PBP timestamps). Full-time evidence is invalid for period markets even when the verdict happens to coincide.
 
-**Supplement:** if the raw bet row has a populated `odds` field AND the odds value is consistent with parlay math but NOT with any single-bet interpretation, treat as a parlay and grade per failed-leg rule.
+Applied example: "1st Half Both Teams To Score: No (Belgium @ United States)". The production grader graded it LOSS citing the FT score (1-4). The verdict was correct only by luck — HT was 1-2 (goals at 9', 31', 33' per FOX PBP), which independently confirms both teams scored in the 1st half. Had all goals come after the break, the FT-based grade would have been wrong. Always pull HT/period evidence: FOX Sports PBP timestamps, ESPN commentary goal times, or FIFA match-centre timelines.
 
-How to test: for a 2-name record with combined odds of -X, ask whether -X is plausible as a single ML on either named entity. If both entities are heavy favorites (e.g., -200 each) and the record's odds are in the -150 to -400 range, that's parlay math. If the record's odds are around -110 / +110, that's likely a single-side ML and the structure is still ambiguous (which side?).
+When grading production output, flag any leg whose stored evidence cites FT data for a period market as a grader defect even if the verdict is correct.
 
-**Edge case — odds are null:** the supplement does NOT apply. Record stays `unknown` per the base rule. Null odds means the parser couldn't extract a stake-relevant signal, and we don't infer structure from absent data.
+## In-play (live) bets (added 2026-07-08, WC-3 mini-batch)
 
-### Worked example — B13 `e101c301` (Yagshimuradov vs McKee)
-- Description: `"Yagshimuradov vs McKee"` (no leg separator, no per-name market markers)
-- Capper: bobby__tracker (recap_tracker)
-- Sport: MMA. odds: -185. units: 10.
+If `created_at` (converted to the venue-relevant timezone) falls AFTER a candidate match's kickoff but before full time, the bet is a live bet and its target is the IN-PROGRESS match — not the next future match. Forward-anchoring rules do not skip past a match that was underway at post time.
 
-Interpretation test: at PFL Belfast 2026-04-16, Yagshimuradov fought Pedro and McKee fought Lohore — they were not opponents. So "vs" can't mean head-to-head. -185 combined parlay odds is plausible for two MMA favorites both winning by U Dec; -185 is implausible as a single ML on either fighter alone (both were closer-to-pick'em than -185 would suggest). Conclusion: parlay. Both legs hit → WIN, 10u at -185 = 5.4054u.
-
-### Counter-example — B11 `7ad74564` (Fonseca x Darderi, Shelton, Bergs)
-- Description: 4 surnames, "x" between first two, comma-separated rest
-- Capper: bobby__tracker (recap_tracker)
-- Sport: ATP. odds: null. units: null.
-
-The supplement does not apply (null odds). Stays `unknown` per base rule. Even though the capper class is the same as e101c301, structural ambiguity cannot be resolved without odds-field anchoring.
-
-## Mixed-class capper anchoring with clear timing windows
-
-The base rule (above): mixed-class cappers (those who post both pregame picks AND recap commentary) without an explicit signal default to `unknown`.
-
-**Refinement:** when raw `created_at` lands the post within 12 hours pregame of a same-day game in the bet's named sport, anchor to that game. The default-to-unknown rule applies only when timing is itself ambiguous (post lands hours post-game, or no relevant game on the apparent target day).
-
-How to test:
-1. Look up raw `created_at` from the DB (do NOT decode tweet IDs — see anti-pattern below).
-2. Identify the bet's sport and any game on that day (per the `created_at` date in ET).
-3. If post timestamp is 0–12h before game start → pregame anchor, grade against that game.
-4. If post is post-game OR no same-day game exists → default unknown unless other signal.
-
-### Worked example — B15 `6f371722` (Mariners ML, guess_pray_bets)
-- raw `created_at`: 2026-04-18 17:31:15 UTC = 13:31 ET 4/18
-- Mariners @ Rangers played that evening; first pitch ~7 PM ET → ~5.5h pregame
-- guess_pray_bets is mixed-class but timing is unambiguous same-day pregame
-- Anchor to 4/18 game → Mariners won 7-3 → WIN, 5u at -110 = +4.5455u
-
-### Counter-example — would still be unknown
-If a mixed-class capper posts "Mariners ML" at 02:00 ET on a day with no Mariners game (or with a Mariners game already concluded the prior night), default to `unknown`. Timing alone doesn't rescue an absent game.
-
-## Tightened rules from B16–B18 retrospective
-
-Three rules locked in after recurring failures across batches 16, 17, and 18. These supersede any softer phrasing earlier in the document.
-
-### 1. Loss profit_units is always −wager
-
-When a bet loses, `profit_units = -units` — the negative of the staked units from the input row. Loss math does not depend on the odds. Win math does, but loss math does not.
-
-Correctness check before submitting any LOSS entry: `abs(profit_units) == abs(row.units)`. If the magnitude differs from the staked units (e.g. `-0.9091` for a 1u bet, `-1.5` for a 1u bet at -150, `-0.667` for a 1u bet at -150), the entry is wrong.
-
-#### Worked example — 1u loss at -110
-- input: `units: 1`, `odds: -110`, leg verifiably failed
-- correct: `profit_units: -1`
-- common bug: `profit_units: -0.9091` (computed as `-(1 × (100/110))` — that's the win-profit formula, applied to a loss)
-- correct check: `abs(-1) == abs(1)` ✓; `abs(-0.9091) == abs(1)` ✗
-
-#### Worked example — 1u loss at -150
-- input: `units: 1`, `odds: -150`
-- correct: `profit_units: -1`
-- common bug variants: `-1.5` (treating -150 as a win-side multiplier), `-0.6667` (decimal-payout math)
-
-Motivation: across B16/B17/B18, the secondary grader emitted six losses with `profit_units` set via `-(wager × decimal_payout - 1)` instead of `-wager` — six bets, all six values `-0.9091` on -110 odds. The defect is small per-bet but compounds into capper P&L drift across a quarter.
-
-### 2. Recap_tracker anchoring is hours-precision, not date-precision
-
-For `recap_tracker` cappers (see `capper-classes.md`), "anchor to the last completed event before `created_at`" is evaluated at hours-precision in the capper's relevant local timezone — not date-precision. The comparison is `event_end_time < created_at`, not `event_date <= post_date`. If a same-day event finishes before the post is made, that event is the anchor — even when an earlier-day event in the same series exists.
-
-Operational test:
-1. Convert `created_at` to the relevant local timezone for the sport (e.g. Madrid for ATP Madrid, ET for MLB/NBA).
-2. List all completed events in the named player/team's series whose end time is strictly earlier than the post timestamp.
-3. Take the most recent such event. Do NOT walk back further "for safety" — that discards public information that was available at post time.
-
-#### Worked example — B18 `fb5911b62fe8` (bobby__tracker, ATP Madrid)
-- raw `created_at`: 2026-04-21 20:40:18 UTC = 22:40 Madrid local
-- description: "Garin x Kjaer MLP + Bonzi ML" (3-leg parlay, recap_tracker convention)
-- Madrid Q-Finals played that afternoon; Garin's Q-Final ended ~18:00 Madrid local
-- Garin lost his Q-Final to Damm 6-2, 4-6, 6-7
-- date-precision anchor: walks back to 4/20 Q1 (Garin won) → grades parlay WIN — wrong
-- hours-precision anchor: stays on 4/21 Q-Final (Garin LOSS) → failed-leg kills parlay → LOSS — correct
-- Q-Final results were public at 22:40 Madrid; treating the post as if they weren't would be choosing to ignore evidence
-
-### 3. Evidence-quote must mention the players/events claimed in grade_reason
-
-Every proper noun (player surname, team name) and every specific event reference in `grade_reason` must appear literally in `evidence_quote`. Case-insensitive substring match is sufficient. If a name in the reason is absent from the quote, the grade is invalid — return `result: unknown` with reason "evidence_quote does not support grade_reason claim" and pull a real source. Do not push the WIN/LOSS through.
-
-This is a structural validator. It does not catch every form of bad evidence, but it catches the specific failure mode where a confident reason is paired with an unrelated quote — because the URL was wrong, the quote was copy-pasted from a different bet, or the reason was fabricated without checking the source.
-
-#### Worked example — B17 `e3550efcd198`
-- graded WIN with `grade_reason` containing "Ohtani homered"
-- `evidence_url`: an NBA recap article (wrong sport)
-- `evidence_quote`: text about Jokic's triple-double — "Ohtani" did not appear
-- validator check: `"ohtani" in evidence_quote.lower()` → False → grade invalid
-- actual outcome: Ohtani did not homer that day; bet was a parlay (Ohtani HR + Jokic TD); LOSS at 1u, -110 → `-1.0u`
-- as graded: WIN at +5.5556u (1u at +556 odds) → +6.56u P&L error from one validator failure
-
-### 4. grade_reason text and profit_units value must agree
-
-When `profit_units` is corrected at merge time (e.g. from B's win-profit-math `-0.9091` to the schema-correct `-1`), the `grade_reason` text must also be rewritten so any embedded math expression matches the final value. A 1u loss at -110 cannot end "...1u at -110 = -0.9091u." after `profit_units` is corrected to `-1`.
-
-Validator: post-merge consistency check greps `grade_reason` for any "= <number>u" pattern and verifies the number matches `profit_units`. If they disagree, fail the merge and require a reason rewrite before commit.
-
-#### Worked example — 1u loss at -110
-
-- pre-merge: `profit_units: -0.9091`, reason ends "...1u at -110 = -0.9091u."
-- post-merge per rule 1: `profit_units` corrected to `-1`
-- mismatch bug: text still reads "...1u at -110 = -0.9091u." while value is `-1` ✗
-- correct rewrite: text reads "...1u stake = -1u loss." (or equivalent) ✓
-
-Motivation: B18 emitted three bets (`45a9e7406601`, `a9f57aa4814c`, `3ca460b2c1fc`) where numeric `profit_units` was corrected at merge but `grade_reason` was not rewritten. Surfaced in the B16–B18 retrospective. Mismatched text-vs-value pairs confuse downstream readers and erode trust in the data.
+Applied example: bet `29060e2d` "Portugal ML" posted 2026-07-06 21:09 UTC; Portugal-Spain kicked off 19:00 UTC the same day. Target is that match (live +400 line while 0-0), not a hypothetical later Portugal fixture.
