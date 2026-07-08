@@ -3463,18 +3463,28 @@ function classifyPendingDropReason(evidence) {
     return 'GRADE_AI_NO_PROVIDERS';
   } else if (/^AI returned PENDING with no explanation/i.test(ev)) {
     return 'GRADE_AI_PENDING_NO_DATA';
-  } else if (/^No (final score|match details|results)\b/i.test(ev)) {
-    // Free-form LLM no-data phrasings (live 2026-07-08 samples: "No final
-    // score or sports event results for Norway in soccer on 2026-06-30 found",
-    // "No final score or match details found for Brazil's game on 2026-06-29
-    // in search"). NOT code-templated, so the pattern is deliberately
-    // CONSERVATIVE — anchored on the three observed stems only. Tradeoff: a
-    // false positive routes a genuinely unexplained PENDING into NO_DATA
-    // (acceptable — same no-data triage bucket); a broad match that swallows
-    // future distinct evidence families is not. NOTE the chain order: the
-    // code-templated "No final score found…" prefix is matched FIRST above and
-    // keeps its GRADE_NO_SEARCH_HITS mapping — this branch only sees the
-    // LLM variants ("No final score or …").
+  } else if (/^No (final score|match details|results)\b/i.test(ev)
+      || /^No(?:\s+[A-Za-z'’/-]+){1,7}\s+(?:found|results)\b/i.test(ev)) {
+    // Free-form LLM no-data phrasings. NOT code-templated, so both forms are
+    // deliberately CONSERVATIVE, and both anchored:
+    //   1. the three stems observed 2026-07-08 batch 1 ("No final score…" /
+    //      "No match details…" / "No results…");
+    //   2. bounded-gap form (batch 2, live samples "No soccer match scores or
+    //      stats found for Ecuador/Mexico…", "No final score or game
+    //      statistics found for Lamine Yamal on 2026-07-05…", "No soccer game
+    //      data or Messi statistics found in search results"): leading "No" +
+    //      1–7 LETTER-ONLY gap words + a found/results terminator. Digits and
+    //      punctuation in the gap block the match, so a string carrying an
+    //      actual score ("No 2-1 scoreline found…", "No goals for Messi,
+    //      match found…") structurally cannot match.
+    // Tradeoff: a false positive routes a genuinely unexplained PENDING into
+    // NO_DATA (acceptable — same no-data triage bucket); a broad match that
+    // swallows future distinct evidence families is not — which is why this
+    // branch sits BEFORE OFF_DATE_EVIDENCE in the chain and must never match
+    // a prefixed family (pinned by tests/grace-window-void-deferral.test.js
+    // 4m). NOTE the chain order above: the code-templated "No final score
+    // found…" prefix is matched FIRST and keeps its GRADE_NO_SEARCH_HITS
+    // mapping — this branch only sees the LLM variants ("No final score or …").
     return 'GRADE_AI_PENDING_NO_DATA';
   } else if (/^UNVERIFIED_QUOTE:/i.test(ev)) {
     // Gate 3 enforce (QUOTE_BOUND_GRADING) forced PENDING — the model's

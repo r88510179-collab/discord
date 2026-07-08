@@ -288,6 +288,33 @@ function checkVoided(section, id, expectDeferEvent = 0) {
     check('4k: pin — unknown evidence still falls to the catch-all (stems are anchored, not substring)',
       classifyPendingDropReason('some novel evidence string') === 'GRADE_PENDING_UNCLASSIFIED'
       && classifyPendingDropReason('Search found no final score anywhere') === 'GRADE_PENDING_UNCLASSIFIED');
+
+    // Widened bounded-gap form (2026-07-08 batch 2): three more live LLM
+    // no-data phrasings, verbatim from production, whose leading words fall
+    // outside the original three stems. Pattern: anchored "No" + 1-7
+    // letter-only gap words + a found/results terminator.
+    const noData3 = 'No soccer match scores or stats found for Ecuador/Mexico in provided s…';
+    const noData4 = 'No final score or game statistics found for Lamine Yamal on 2026-07-05…';
+    const noData5 = 'No soccer game data or Messi statistics found in search results';
+    check('4l: live sample 3 (soccer match scores/stats) → GRADE_AI_PENDING_NO_DATA',
+      classifyPendingDropReason(noData3) === 'GRADE_AI_PENDING_NO_DATA');
+    check('4l: live sample 4 (game statistics for player) → GRADE_AI_PENDING_NO_DATA',
+      classifyPendingDropReason(noData4) === 'GRADE_AI_PENDING_NO_DATA');
+    check('4l: live sample 5 (game data or player statistics) → GRADE_AI_PENDING_NO_DATA',
+      classifyPendingDropReason(noData5) === 'GRADE_AI_PENDING_NO_DATA');
+
+    // Negatives for the widened form. CHAIN-ORDER CRITICAL: the no-data branch
+    // sits BEFORE the OFF_DATE_EVIDENCE branch — if the widened regex ever
+    // matched a Gate 4 string, it would swallow GRADE_DATE_UNVERIFIED silently.
+    check('4m: negative — OFF_DATE_EVIDENCE string is NOT swallowed by the widened no-data regex',
+      classifyPendingDropReason('OFF_DATE_EVIDENCE: evidence dated 2026-07-01 outside 2026-07-07±1d — forced PENDING (model claimed WIN)') === 'GRADE_DATE_UNVERIFIED');
+    check('4m: negative — strings carrying an actual score/verdict do NOT match (→ catch-all)',
+      classifyPendingDropReason('Final score: Ecuador 2-1 Mexico on 2026-07-05 — bet result WIN') === 'GRADE_PENDING_UNCLASSIFIED'
+      && classifyPendingDropReason('Norway found the net twice in a 2-1 win over Ecuador') === 'GRADE_PENDING_UNCLASSIFIED'
+      && classifyPendingDropReason('No. 10 Messi scored twice — final score 3-1 found in highlights') === 'GRADE_PENDING_UNCLASSIFIED');
+    check('4m: negative — digits/punctuation in the gap block the match (score cannot hide inside)',
+      classifyPendingDropReason('No 2-1 scoreline found for this match') === 'GRADE_PENDING_UNCLASSIFIED'
+      && classifyPendingDropReason('No goals for Messi, match found, final score 2-1') === 'GRADE_PENDING_UNCLASSIFIED');
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);
