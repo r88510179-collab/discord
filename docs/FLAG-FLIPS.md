@@ -66,3 +66,6 @@ no-exit backlog), then `enforce` after eyeballing volume against the review queu
 Enforce parks exhausted bets in review_status='needs_review' (result stays pending, no
 grade/profit) with one GRADE_EXHAUSTED_{ADAPTER|NO_SOURCE}_REVIEW drop each — void becomes
 operator-only on those paths (WC-3 policy). #191 grace + #193 deferral run first, unchanged.
+
+## 2026-07-08 — REAPER_MODE: (unset) → shadow
+PR #194. Shadow measures would-route population (reaper_shadow events; dedupe zombie_sweep rows by bet — they re-emit per cycle) across the 3 exhaustion writers + quarantine zombie sweep. Enforce decision after volume review. Note: the event_settling sweep-hold (EVENT_AWARE_RECHECK unblock) is gated on REAPER_MODE=enforce — the EVENT_AWARE enforce flip chain is now: REAPER shadow review → REAPER enforce → EVENT_AWARE enforce.
