@@ -1021,12 +1021,20 @@ function applyBackoff(betId, attempts, reason) {
   const ladder = ['+15 minutes', '+1 hour', '+4 hours', '+12 hours', '+24 hours'];
   const offset = ladder[Math.min(Math.max(attempts - 1, 0), ladder.length - 1)];
   const quarantined = attempts >= 20;
+  // `AND result = 'pending'` (terminal-state invariant, write-side dual of the
+  // claim gate at claimBetForGrading): runAutoGrade claims a bet, awaits the AI,
+  // and a concurrent handler (manual /grade, celebration/recap auto-grade) can
+  // terminally grade it mid-await (result terminal, grading_state='done').
+  // Without this gate the loop's subsequent applyBackoff would stamp
+  // 'backoff'/'quarantined' over the terminal row — re-creating the 2026-07-08
+  // drift class. Same interleaving shape as the #118 grader-vs-revert race; a
+  // 0-change no-op leaves the terminal grade untouched.
   db.prepare(`UPDATE bets
     SET grading_state = ?,
         grading_next_attempt_at = datetime('now', ?),
         grading_last_failure_reason = ?,
         grading_lock_until = NULL
-    WHERE id = ?`).run(quarantined ? 'quarantined' : 'backoff', offset, String(reason).slice(0, 200), betId);
+    WHERE id = ? AND result = 'pending'`).run(quarantined ? 'quarantined' : 'backoff', offset, String(reason).slice(0, 200), betId);
   if (quarantined) {
     console.warn(`[AutoGrade:QUARANTINED bet=${(betId || '').slice(0, 8)} attempts=${attempts} reason=${String(reason).slice(0, 80)}]`);
   }

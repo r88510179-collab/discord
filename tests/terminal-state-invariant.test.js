@@ -193,7 +193,49 @@ console.log('5. countTerminalStateDrift (startup visibility)');
   // A clean terminal row (done) is NOT drift.
   gradeBet(seedBet({}), 'loss', -1, 'LOSS', 'clean terminal');
   check('5c: done rows are not counted', countTerminalStateDrift().total === after.total);
-  db.prepare('DELETE FROM bets WHERE id = ?').run(qId);
+  // 'archived' is terminal per mig 016 policy ('done' ↔ won/lost/pushed/voided/
+  // ARCHIVED): a drifted row flipped by the legacy !reset_season archive must not
+  // silently LEAVE the count (the tripwire's "growing count = regression" reading
+  // breaks if archiving shrinks it without healing anything).
+  const aId = seedBet({
+    result: 'archived', profit_units: -1, grade: 'LOSS', graded_at: '2026-07-02 00:00:00',
+    grading_state: 'ready',
+  });
+  check('5d: archived drift rows stay counted', countTerminalStateDrift().total === after.total + 1);
+  db.prepare('DELETE FROM bets WHERE id IN (?, ?)').run(qId, aId);
+}
+
+// ── 7. applyBackoff cannot clobber a terminal row's state ───────────────────
+// The write-side dual of the queue filter: runAutoGrade claims a pending bet,
+// awaits the AI, and a concurrent handler (manual /grade, celebration/recap
+// auto-grade) terminally grades it mid-await (grading_state='done'). The loop
+// then calls applyBackoff on the PENDING/throw outcome — without a result gate
+// that write would stamp 'backoff'/'quarantined' over the terminal row,
+// re-creating the exact drift class this PR closes (same interleaving shape as
+// the #118 grader-vs-revert race).
+console.log('7. applyBackoff terminal-row guard');
+{
+  const { applyBackoff } = grading;
+  const doneId = seedBet({
+    result: 'win', profit_units: 0.91, grade: 'WIN', graded_at: '2026-07-02 00:00:00',
+    grading_state: 'done', grading_attempts: 3,
+  });
+  applyBackoff(doneId, 3, 'ai_pending_after_concurrent_grade');
+  const d = rowOf(doneId);
+  check("7a: terminal row keeps grading_state='done' (no clobber)", d.grading_state === 'done');
+  check('7b: terminal row gets no next attempt', d.grading_next_attempt_at == null);
+
+  // Control: a pending row still backs off normally.
+  const pendId = seedBet({ grading_attempts: 3 });
+  applyBackoff(pendId, 3, 'transient');
+  const p = rowOf(pendId);
+  check("7c: pending row still transitions to 'backoff'", p.grading_state === 'backoff');
+  check('7d: pending row gets a next attempt', p.grading_next_attempt_at != null);
+
+  // Control: quarantine threshold still works on a pending row.
+  const qId2 = seedBet({ grading_attempts: 20 });
+  applyBackoff(qId2, 20, 'exhausted');
+  check("7e: pending row still quarantines at attempts>=20", rowOf(qId2).grading_state === 'quarantined');
 }
 
 // ── 6. PENDING drop-reason classifier — Gate 3 forced-PENDING ───────────────

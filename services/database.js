@@ -741,12 +741,18 @@ const GRADER_HIDDEN_REVIEW_STATUSES = ['needs_review', 'manual_review_unmodeled_
 // already exclude terminal results, so violating rows are silently invisible
 // — this counter makes that skip observable: one log line on the first queue
 // pull per process. A growing count means some write path regressed the
-// invariant. 'graded' is a legacy-but-terminal state; NULL never occurs on
-// graded rows and is excluded by the explicit IN list either way.
+// invariant. 'archived' is in the result list because mig 016's policy makes it
+// terminal too ('done' ↔ won/lost/pushed/voided/ARCHIVED) and the legacy
+// !reset_season archive rewrites win/loss/push→archived without touching
+// grading_state — a drifted row must not silently LEAVE the count by being
+// archived. grading_state='graded' rows are legacy prod data with no current
+// writer (CODEMAP §Enums, live-verified) and are treated as terminal (not
+// counted); NULL never occurs (column DEFAULT 'done') and the explicit IN list
+// excludes it either way.
 function countTerminalStateDrift() {
   const rows = db.prepare(`
     SELECT grading_state AS state, COUNT(*) AS c FROM bets
-    WHERE result IN ('win','loss','push','void')
+    WHERE result IN ('win','loss','push','void','archived')
       AND grading_state IN ('ready','backoff','quarantined')
     GROUP BY grading_state
   `).all();
