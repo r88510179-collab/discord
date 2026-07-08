@@ -49,3 +49,6 @@ today. The ceiling is the terminal guarantee — the cap's pending-legs-parlay p
 un-sweepable (the sweeper's own terminal write is denied `pending_legs` by the same gate), so an
 unbounded deferral would create immortal bets. Net effect of enforce: ~4 extra daily re-picks for
 the adapter/per-leg grader before the same void (see BACKLOG WC-3 section).
+
+## 2026-07-08 — RETRY_CAP_ADAPTER_EXEMPT: (unset) → shadow
+PR #193. Shadow measures would-defer population (retry_cap_adapter_shadow events) for adapter-covered bets at the retry cap. Ceiling 19 (< quarantine 20). Enforce decision after reviewing shadow volume.
