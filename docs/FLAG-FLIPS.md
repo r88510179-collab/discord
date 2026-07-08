@@ -42,6 +42,10 @@ PR #189 (v-next). Shadow measures grading-side DROP duplicate rate (expected sou
 New flag (retry-cap adapter exemption PR — WC-3 residual). Unset/off is byte-identical to today: an
 adapter-covered sport at RETRY_CAP=15 still terminally cap-voids. Flip plan: `shadow` first
 (`SELECT payload FROM pipeline_events WHERE event_type='retry_cap_adapter_shadow'` shows the
-would-defer population), then `enforce` after eyeballing — enforce requeues adapter-covered cap
-voids +24h instead (7-day sweeper stays the backstop). Sign-off point: sweeper-exempt PROPS in
-adapter sports ride indefinitely at 1 attempt/day under enforce (see BACKLOG WC-3 section).
+would-defer population — emitted only when the void actually lands, so it exactly matches what
+enforce would defer), then `enforce` after eyeballing. Enforce requeues adapter-covered cap voids
++24h, BOUNDED by an attempts ceiling (19 = RETRY_CAP+4): at the ceiling the cap void fires as
+today. The ceiling is the terminal guarantee — the cap's pending-legs-parlay population is
+un-sweepable (the sweeper's own terminal write is denied `pending_legs` by the same gate), so an
+unbounded deferral would create immortal bets. Net effect of enforce: ~4 extra daily re-picks for
+the adapter/per-leg grader before the same void (see BACKLOG WC-3 section).

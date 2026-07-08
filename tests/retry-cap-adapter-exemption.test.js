@@ -12,15 +12,24 @@
 // cap-voids terminally today.
 //
 // Fix under test (mode-gated, default off): at the cap, AFTER the #191 grace
-// deferral, RETRY_CAP_ADAPTER_EXEMPT gates a hasDeterministicAdapter check —
-//   enforce → the void is skipped; the bet is requeued +24h (bounded churn:
-//             ~1 re-pick/day; the untouched 7-day sweeper stays the terminal
-//             backstop — the exact contract of shouldAutoVoidNoData's
-//             exemption) with one GRADE_VOID_DEFERRED_ADAPTER row (the bet is
-//             NOT dropped). Requeue carries `AND result='pending' AND
-//             ${GRADER_ELIGIBLE_WHERE}` — parked/settled bets untouched.
+// deferral, RETRY_CAP_ADAPTER_EXEMPT gates a hasDeterministicAdapter check,
+// BOUNDED by an attempts ceiling (RETRY_CAP + RETRY_CAP_EXEMPT_EXTRA = 15+4=19).
+// The ceiling is load-bearing: the cap's population is exclusively pending-legs
+// parlays, and the 7-Day Sweeper CANNOT settle that population (its own
+// terminal write goes through the same canFinalizeBet gate, gets denied
+// pending_legs, and lands back in this fn) — so an unbounded deferral would
+// make a never-resolving adapter parlay immortal. The cap void itself stays
+// the terminal guarantee, postponed by ~RETRY_CAP_EXEMPT_EXTRA daily re-picks.
+// 19 is deliberately BELOW applyBackoff's quarantine threshold (20).
+//   enforce → below the ceiling: void skipped, requeued +24h with one
+//             GRADE_VOID_DEFERRED_ADAPTER row (bet NOT dropped; requeue
+//             carries `AND result='pending' AND ${GRADER_ELIGIBLE_WHERE}` —
+//             parked/settled bets untouched). At/above the ceiling: voids
+//             exactly as pre-flag.
 //   shadow  → one 'retry_cap_adapter_shadow' event_type row (would_defer),
-//             then the void proceeds UNCHANGED (behavior-identical to off).
+//             emitted INSIDE the voidTx gated on the void landing so the
+//             measured population is EXACTLY the set enforce would defer;
+//             the void itself proceeds UNCHANGED (behavior-identical to off).
 //   off/unset → byte-identical to pre-flag behavior (deploy-safe).
 // Non-adapter sports void exactly as before in every mode. #190 terminal-
 // state invariant (grading_state='done' in the same void statement) and #191
@@ -117,6 +126,8 @@ function checkAdapterDeferred(section, id) {
   check(`${section}: lock cleared`, b.grading_lock_until == null);
   check(`${section}: failure reason stamped _cap_adapter_deferred`,
     /_cap_adapter_deferred$/.test(b.grading_last_failure_reason || ''));
+  check(`${section}: grading_attempts COLUMN unchanged (>=15 — the ceiling counts real claims, a defer must not reset it)`,
+    b.grading_attempts >= 15);
   const drops = dropRowsFor(id, 'GRADE_VOID_DEFERRED_ADAPTER');
   check(`${section}: exactly one GRADE_VOID_DEFERRED_ADAPTER event`, drops.length === 1);
   const payload = drops.length ? JSON.parse(drops[0].payload || '{}') : {};
@@ -124,6 +135,7 @@ function checkAdapterDeferred(section, id) {
     payload.void_path === 'retry_cap' && payload.sport === b.sport && payload.attempts >= 15);
   check(`${section}: no GRADE_BACKOFF_EXHAUSTED (void never happened)`,
     dropRowsFor(id, 'GRADE_BACKOFF_EXHAUSTED').length === 0);
+  check(`${section}: no shadow row under enforce`, shadowRowsFor(id).length === 0);
 }
 
 // Shared assertions for one landed (non-deferred) cap void.
@@ -228,6 +240,28 @@ console.log('2. enforce — adapter-covered cap void deferred +24h');
   const b8 = rowOf(id8);
   check('2h: below cap — still pending, normal requeue', b8.result === 'pending' && b8.grading_next_attempt_at != null);
   check('2h: below cap — no adapter event', dropRowsFor(id8, 'GRADE_VOID_DEFERRED_ADAPTER').length === 0);
+
+  // (i) Ceiling boundary — last deferrable attempt count (18 < 19) defers…
+  const id9 = seedBet({ sport: 'Soccer', grading_attempts: 18 });
+  scheduleRecheckAfterDenial(id9, 'pending_legs', 30);
+  checkAdapterDeferred('2i (Soccer, attempts=18 — last below ceiling)', id9);
+
+  // (j) …and AT the ceiling (19 = RETRY_CAP + RETRY_CAP_EXEMPT_EXTRA) the cap
+  // void fires exactly as pre-flag — the terminal guarantee. The cap's
+  // population (pending-legs parlays) is un-sweepable (sweepExpiredBet's own
+  // terminal write is denied pending_legs and lands back here), so WITHOUT
+  // this ceiling an adapter-covered never-resolving parlay would be immortal.
+  const id10 = seedBet({ sport: 'Soccer', grading_attempts: 19 });
+  scheduleRecheckAfterDenial(id10, 'pending_legs', 30);
+  checkVoided('2j (Soccer, attempts=19 — ceiling reached, terminal void)', id10);
+
+  // (k) Ceiling void still honors an ACTIVE grace window (#191 checked first,
+  // independent of the ceiling).
+  const id11 = seedBet({ sport: 'Soccer', grading_attempts: 19 });
+  setExemptSql(id11, '+2 days');
+  scheduleRecheckAfterDenial(id11, 'pending_legs', 30);
+  check('2k: at ceiling + active window — grace deferral still wins',
+    rowOf(id11).result === 'pending' && dropRowsFor(id11, 'GRADE_VOID_DEFERRED_EXEMPT').length === 1);
 }
 
 // ── 3. shadow — measured, never gates: void unchanged + one would-defer row ─
@@ -249,6 +283,21 @@ console.log('3. shadow — void proceeds unchanged, one measurement row');
   scheduleRecheckAfterDenial(id2, 'pending_legs', 30);
   checkVoided('3b (Boxing voids under shadow)', id2);
   check('3b: no shadow row for a non-adapter sport', shadowRowsFor(id2).length === 0);
+
+  // At the ceiling: enforce would NOT defer, so shadow must not count it.
+  const id3 = seedBet({ sport: 'Soccer', grading_attempts: 19 });
+  scheduleRecheckAfterDenial(id3, 'pending_legs', 30);
+  checkVoided('3c (Soccer at ceiling voids under shadow)', id3);
+  check('3c: no shadow row at the ceiling (enforce would void too)', shadowRowsFor(id3).length === 0);
+
+  // Review-parked in shadow: the void no-ops (#118) → the shadow row must not
+  // emit either (it is gated on the void landing, mirroring enforce's no-op).
+  const id4 = seedBet({ sport: 'Soccer', review_status: 'needs_review' });
+  scheduleRecheckAfterDenial(id4, 'pending_legs', 30);
+  const b4 = rowOf(id4);
+  check('3d: review-parked — untouched under shadow', b4.result === 'pending' && b4.grading_next_attempt_at == null);
+  check('3d: review-parked — no shadow row (would_defer population matches enforce exactly)',
+    shadowRowsFor(id4).length === 0);
 }
 
 delete process.env.RETRY_CAP_ADAPTER_EXEMPT;
