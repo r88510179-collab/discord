@@ -37,3 +37,11 @@ image, this session (2026-07-04):
 
 ## 2026-07-08 — PIPELINE_IDEM_MODE: (unset) → shadow
 PR #189 (v-next). Shadow measures grading-side DROP duplicate rate (expected source: deferRecapMatchToReview re-parks). Review query in PR #189 body. Enforce decision after ~1wk of shadow data.
+
+## 2026-07-08 — RETRY_CAP_ADAPTER_EXEMPT: introduced, NOT yet set (unset = off)
+New flag (retry-cap adapter exemption PR — WC-3 residual). Unset/off is byte-identical to today: an
+adapter-covered sport at RETRY_CAP=15 still terminally cap-voids. Flip plan: `shadow` first
+(`SELECT payload FROM pipeline_events WHERE event_type='retry_cap_adapter_shadow'` shows the
+would-defer population), then `enforce` after eyeballing — enforce requeues adapter-covered cap
+voids +24h instead (7-day sweeper stays the backstop). Sign-off point: sweeper-exempt PROPS in
+adapter sports ride indefinitely at 1 attempt/day under enforce (see BACKLOG WC-3 section).
