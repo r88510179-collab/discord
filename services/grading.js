@@ -1071,6 +1071,7 @@ const DATEONLY_SETTLE_MS = 6 * 3600e3;   // applied after end-of-UTC-day for a d
 const POST_EVENT_RECHECK_MS = 45 * 60e3; // event already final/settling — short recheck
 const DEFAULT_RECHECK_MS = 30 * 60e3;    // preserves today's flat +30 (no/unparseable/far-future date)
 const MAX_DEFER_MS = 168 * 3600e3;       // 7d — guards typo'd years; legit multi-day futures still defer
+const POST_EVENT_SWEEP_SETTLE_MS = 48 * 3600e3; // sweep holds off this long past readyAt (evaluateSweep, enforce only)
 
 // End-of-day (23:59:59.999) in UTC for the instant t — anchor for date-only events.
 function endOfUtcDay(t) {
@@ -1104,9 +1105,11 @@ function nextAttemptForEvent(eventDateRaw, now = Date.now()) {
     return { phase: 'unknown', defer: false, nextAttemptAt: new Date(now + DEFAULT_RECHECK_MS), reason: 'suspect_far_future' };
   }
   if (msUntil > 0) {
-    return { phase: 'pre_event', defer: true, nextAttemptAt: new Date(readyAt), reason: 'event_not_final' };
+    return { phase: 'pre_event', defer: true, nextAttemptAt: new Date(readyAt), reason: 'event_not_final', readyAt };
   }
-  return { phase: 'post_event', defer: false, nextAttemptAt: new Date(now + POST_EVENT_RECHECK_MS), reason: 'event_final_settling' };
+  // readyAt (additive, epoch ms) lets evaluateSweep's post-event settle window
+  // measure how recently the game became gradeable without re-parsing.
+  return { phase: 'post_event', defer: false, nextAttemptAt: new Date(now + POST_EVENT_RECHECK_MS), reason: 'event_final_settling', readyAt };
 }
 
 // EVENT_AWARE_RECHECK mode — strict compare (unset/anything-else → off), same
@@ -1146,6 +1149,126 @@ function retryCapAdapterExemptMode() {
   if (m === 'enforce') return 'enforce';
   if (m === 'shadow') return 'shadow';
   return 'off';
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Stage 2 reaper — exhaustion terminals route to needs_review (REAPER_MODE)
+//
+// Operator-ratified policy (WC-3 postmortem: all 3 exhaustion-voids were wrong,
+// -8.25u corrected): "search/adapter failed N times" is the SYSTEM's blindness,
+// not proof the event didn't settle — so no automated path may write void on
+// exhaustion grounds. Under REAPER_MODE=enforce the three exhaustion writers
+// (retry-cap void, autoVoidNoSearchableData, unscoped-sport void) and the
+// zombie sweep below park the bet for a human instead of voiding it. Void
+// becomes operator-only on these paths (/grade override, war-room).
+//
+// Ordering is unchanged: the #191 grace deferral runs FIRST, then #193's
+// bounded adapter deferral (retry-cap only); the reaper only replaces the
+// TERMINAL step after both runways are spent.
+// ═══════════════════════════════════════════════════════════════════
+
+// REAPER_MODE — strict compare (unset/anything-else → off), read at call time
+// so ops can flip without a restart (same idiom as RETRY_CAP_ADAPTER_EXEMPT /
+// PIPELINE_IDEM_MODE). off → byte-identical pre-flag behavior; shadow → voids
+// proceed unchanged + one reaper_shadow would-route row per void that lands;
+// enforce → exhaustion terminals park the bet in needs_review.
+function reaperMode() {
+  const m = process.env.REAPER_MODE;
+  if (m === 'enforce') return 'enforce';
+  if (m === 'shadow') return 'shadow';
+  return 'off';
+}
+
+// Which review drop-reason an exhausted bet routes under: adapter-covered
+// sports split from search-only sports so "an adapter should have settled
+// this" is queryable apart from "no source exists for this sport". Same
+// inline-require + try/catch idiom as shouldAutoVoidNoData (an unavailable
+// adapter layer classifies conservatively as search-only — the label is
+// observability, not control flow).
+function exhaustedReviewClass(sport) {
+  let covered = false;
+  try {
+    covered = require('./sportsdata').hasDeterministicAdapter(sport);
+  } catch (e) {
+    console.warn(`[Reaper] hasDeterministicAdapter unavailable, classifying as no-source: ${e.message}`);
+  }
+  return {
+    covered,
+    dropReason: covered ? 'GRADE_EXHAUSTED_ADAPTER_REVIEW' : 'GRADE_EXHAUSTED_NO_SOURCE_REVIEW',
+  };
+}
+
+// Shadow telemetry (measure before flip): one fire-and-forget, error-swallowed
+// reaper_shadow row per would-route decision. Same contract as
+// emitEventAwareShadow — observability must never affect grading control flow.
+function emitReaperShadow(betId, payload) {
+  try {
+    bets.transitionTo({
+      betId,
+      toStage: 'GRADING_ENTER',
+      eventType: 'reaper_shadow',
+      payload,
+    });
+  } catch (_) { /* observability must not break grading */ }
+}
+
+/**
+ * REAPER_MODE=enforce terminal step: park an exhausted bet for a human
+ * instead of voiding it. Writes the #113 divert contract — review_status
+ * 'needs_review' (the war-room / approveBet queue), result UNTOUCHED (stays
+ * 'pending'; NO grade/profit), grading_state='done' so neither getPendingBets
+ * nor claimBetForGrading ever re-picks it (attempts stop burning),
+ * grading_next_attempt_at nulled (nothing is scheduled — the human queue owns
+ * the bet now; approveBet re-arms with attempts=0 + a fresh 3d sweep grace).
+ *
+ * Guards mirror the void writers this replaces: `(result='pending' OR result
+ * IS NULL)` (a concurrently-graded bet is never touched) + GRADER_ELIGIBLE_WHERE
+ * (#118 — an already-parked bet is a 0-change no-op, which also makes the
+ * routing idempotent: re-routing emits no second drop).
+ *
+ * One GRADE_EXHAUSTED_{ADAPTER|NO_SOURCE}_REVIEW drop per routing that lands
+ * (payload carries attempts, sport, and the writer that routed it). Returns
+ * true iff the row changed.
+ */
+function routeExhaustedBetToReview(betId, writer, { sport = null, attempts = null, ...extra } = {}) {
+  const { covered, dropReason } = exhaustedReviewClass(sport);
+  let info;
+  try {
+    info = db.prepare(`UPDATE bets SET
+      review_status = 'needs_review',
+      grading_state = 'done',
+      grading_next_attempt_at = NULL,
+      grading_lock_until = NULL,
+      grading_last_failure_reason = ?,
+      grade_reason = ?
+    WHERE id = ? AND (result = 'pending' OR result IS NULL)
+      AND ${GRADER_ELIGIBLE_WHERE}`).run(
+      `${writer}_exhausted_review`.slice(0, 200),
+      `Routed to review: grading exhausted (writer=${writer}, attempts=${attempts ?? 'n/a'}) — parked for human grading, NOT voided (REAPER_MODE=enforce)`,
+      betId
+    );
+  } catch (e) {
+    console.error(`[Reaper] route-to-review write error (bet=${String(betId).slice(0, 8)}): ${e.message}`);
+    return false;
+  }
+  if (info.changes === 0) {
+    console.log(`[Reaper] route-to-review no-op for bet=${String(betId).slice(0, 8)} (review-parked or already settled) — left as-is`);
+    return false;
+  }
+  try {
+    bets.recordDrop({
+      betId,
+      stage: 'GRADING_DROPPED',
+      dropReason,
+      payload: { writer, sport, attempts, adapter_covered: covered, ...extra },
+      ingestId: null,
+    });
+  } catch (err) {
+    // Fire-and-forget — observability must not break the routing.
+    console.error(`[Reaper] route-to-review recordDrop error: ${err.message}`);
+  }
+  console.log(`[Reaper] Exhausted → needs_review: bet=${String(betId).slice(0, 8)} writer=${writer} sport=${sport} attempts=${attempts} reason=${dropReason}`);
+  return true;
 }
 
 /** Gateway-denial recheck: do not change state or touch attempts; just requeue. */
@@ -1246,6 +1369,35 @@ function scheduleRecheckAfterDenial(betId, reason, minutes = 30) {
       }
       shadowWouldDefer = covered && exemptMode === 'shadow';
     }
+
+    // Stage 2 reaper (REAPER_MODE=enforce): the cap's TERMINAL step becomes a
+    // route to needs_review instead of a void. Runs strictly AFTER the #191
+    // grace deferral and #193's bounded adapter deferral above — both runways
+    // are unchanged; only the terminal write they fall through to changes.
+    // GRADE_BACKOFF_EXHAUSTED stays the void marker, so under enforce it
+    // stops being emitted here (the GRADE_EXHAUSTED_* drop replaces it).
+    const reaperM = reaperMode();
+    if (reaperM === 'enforce') {
+      const routed = routeExhaustedBetToReview(betId, 'retry_cap', {
+        sport: bet?.sport ?? null, attempts, denial_reason: reason,
+      });
+      if (routed && shadowWouldDefer) {
+        // RETRY_CAP_ADAPTER_EXEMPT=shadow stays meaningful under reaper
+        // enforce: its population is "what #193 enforce would defer", and the
+        // deferral runs BEFORE this terminal step — gate the measurement on
+        // the routing landing (the same bets the void used to gate on).
+        try {
+          bets.transitionTo({
+            betId,
+            toStage: 'GRADING_ENTER',
+            eventType: 'retry_cap_adapter_shadow',
+            payload: { kind: 'would_defer', void_path: 'retry_cap', sport: bet?.sport ?? null, denial_reason: reason, attempts },
+          });
+        } catch (_) { /* observability must not break grading */ }
+      }
+      return;
+    }
+
     const voidTx = db.transaction(() => {
       // `AND ${GRADER_ELIGIBLE_WHERE}`: if an operator reverted this bet to
       // needs_review after the grader claimed it, the void is a 0-change no-op —
@@ -1299,6 +1451,18 @@ function scheduleRecheckAfterDenial(betId, reason, minutes = 30) {
             });
           } catch (_) { /* observability must not break grading */ }
           console.log(`grade.retry_cap_adapter_would_defer betId=${betId} sport=${bet?.sport} attempts=${attempts} reason=${reason}`);
+        }
+        if (reaperM === 'shadow') {
+          // Measurement only (REAPER_MODE=shadow) — gated on the void ACTUALLY
+          // landing so the measured population is exactly the set enforce
+          // would route (identical WHERE guards on both writes). Same idiom as
+          // the retry_cap_adapter_shadow row above.
+          const cls = exhaustedReviewClass(bet?.sport);
+          emitReaperShadow(betId, {
+            kind: 'would_route', writer: 'retry_cap', sport: bet?.sport ?? null,
+            attempts, adapter_covered: cls.covered, would_reason: cls.dropReason,
+          });
+          console.log(`grade.reaper_would_route betId=${betId} writer=retry_cap sport=${bet?.sport} attempts=${attempts} would_reason=${cls.dropReason}`);
         }
         console.log(`[canFinalizeBet] retry cap reached (attempts=${attempts}) for bet=${String(betId).slice(0,8)} reason=${reason} — voided with GRADE_BACKOFF_EXHAUSTED`);
       } else {
@@ -1431,6 +1595,20 @@ function autoVoidNoSearchableData(bet, info) {
   // deferral.) Requeued at the lapse; a still-no-data bet voids normally on
   // the first qualifying attempt after it.
   if (deferVoidForGraceWindow(bet.id, 'no_data', { attempts: info.attempts, hours: info.hours })) return;
+
+  // Stage 2 reaper (REAPER_MODE=enforce): route to needs_review instead of
+  // voiding — the grace deferral above is unchanged; only the terminal write
+  // changes. This writer's population is always search-only (adapter-covered
+  // sports never reach it — shouldAutoVoidNoData's Build-1d guard returns
+  // null first), so the drop is GRADE_EXHAUSTED_NO_SOURCE_REVIEW in practice.
+  const reaperM = reaperMode();
+  if (reaperM === 'enforce') {
+    routeExhaustedBetToReview(bet.id, 'no_data', {
+      sport: bet.sport ?? null, attempts: info.attempts, hours: info.hours,
+    });
+    return;
+  }
+
   console.log(`[AutoGrade] Auto-void no-data: ${bet.id} after ${info.attempts} PENDING over ${info.hours}h`);
   try {
     // `AND ${GRADER_ELIGIBLE_WHERE}`: skip if an operator reverted the bet to
@@ -1451,6 +1629,15 @@ function autoVoidNoSearchableData(bet, info) {
     );
     if (res.changes === 0) {
       console.log(`[AutoGrade] Auto-void no-data no-op for ${bet.id} (review-parked or already settled) — left as-is`);
+    } else if (reaperM === 'shadow') {
+      // Measurement only — gated on the void landing so the population is
+      // exactly what enforce would route.
+      const cls = exhaustedReviewClass(bet.sport);
+      emitReaperShadow(bet.id, {
+        kind: 'would_route', writer: 'no_data', sport: bet.sport ?? null,
+        attempts: info.attempts, adapter_covered: cls.covered, would_reason: cls.dropReason,
+      });
+      console.log(`grade.reaper_would_route betId=${bet.id} writer=no_data sport=${bet.sport} attempts=${info.attempts} would_reason=${cls.dropReason}`);
     }
   } catch (e) {
     console.error(`[AutoGrade] Auto-void no-data write error: ${e.message}`);
@@ -1996,8 +2183,21 @@ function evaluateSweep(bet, now = Date.now()) {
   // set at parse time and never mutated mid-cycle, so the snapshot value is
   // authoritative (no live re-read needed). suspect_far_future/unknown → defer=false
   // → not protected → year-typo'd dates still sweep normally.
-  if (eventAwareRecheckMode() === 'enforce' && nextAttemptForEvent(bet.event_date, now).defer) {
-    return { eligible: false, reason: 'event_pending' };
+  if (eventAwareRecheckMode() === 'enforce') {
+    const plan = nextAttemptForEvent(bet.event_date, now);
+    if (plan.defer) return { eligible: false, reason: 'event_pending' };
+    // Post-event settle window (unblocks the enforce flip — the MAX_DEFER(7d)/
+    // SWEEP_CUTOFF(7d) collision, BACKLOG 2026-06-18): a deferred bet spent its
+    // whole pre-sweep window waiting for its game, so at readyAt it is both
+    // re-pickable AND (age > 7d) sweep-eligible in the SAME cycle — one failed
+    // post-event recheck and this sweep voids it. Give the recheck the runway a
+    // normal bet gets: not sweepable until POST_EVENT_SWEEP_SETTLE_MS past
+    // readyAt. Bounded (sweeps normally after), enforce-gated (off/shadow
+    // byte-identical), and immortality-safe: a bet protected here still burns
+    // attempts to quarantine, where the zombie sweep is the terminal exit.
+    if (plan.phase === 'post_event' && plan.readyAt != null && now - plan.readyAt < POST_EVENT_SWEEP_SETTLE_MS) {
+      return { eligible: false, reason: 'event_settling' };
+    }
   }
 
   // Live-state guard against the stale-snapshot race: runAutoGrade captures
@@ -2093,6 +2293,107 @@ function sweepExpiredBet(bet) {
   return { swept: true };
 }
 
+// ── Zombie sweep (Stage 2 reaper, REAPER_MODE) ──────────────────────
+//
+// The ONE population with literally no future exit is grading_state=
+// 'quarantined' with result='pending': applyBackoff parks a bet there at
+// attempts >= 20, and BOTH selectors (getPendingBets, claimBetForGrading)
+// only admit 'ready'/'backoff' — so a quarantined bet is invisible to the
+// grader AND to the 7-Day Sweeper (which filters getPendingBets' snapshot).
+// Its only exits are operator actions (/admin grading-unstick, revert,
+// approve). This matters most for pending-legs PARLAYS that quarantine via
+// the applyBackoff ladder (ai_pending / provider errors) without ever
+// traversing the denial ladder's retry cap: the cap void can't reach them,
+// and the sweeper structurally can't settle them either (sweepExpiredBet's
+// terminal write is denied 'pending_legs' by canFinalizeBet) — pre-reaper
+// they were immortal. The zombie sweep is that population's designated exit:
+// route to needs_review per REAPER_MODE, exactly like the exhaustion writers.
+//
+// Deliberately NOT covered (they have futures — routing them would be wrong):
+//   - ready/backoff with grading_next_attempt_at NULL or past: that is the
+//     LIVE queue (both selectors treat NULL as "due now");
+//   - ready/backoff at/over RETRY_CAP: exits via the cap's terminal step on
+//     the next denial (routing them here would bypass #193's bounded
+//     deferral runway) or via applyBackoff's quarantine at 20;
+//   - future grading_next_attempt_at (normal backoff, #191 grace requeues,
+//     #193's +24h deferrals, event-aware defers): scheduled, self-heals.
+//
+// Skips, most-specific first (every routed/would-routed bet emits an event;
+// skips are log-only — no state is touched):
+//   - hidden review statuses (already parked for a human) — in the SELECT;
+//   - future grading_next_attempt_at — in the SELECT (quarantine's own +24h
+//     stamp expires long before the dwell gate below, so this is a guard,
+//     not a schedule);
+//   - dwell: quarantined less than ZOMBIE_DWELL_DAYS ago (grading_last_attempt_at
+//     is stamped at the final claim, so post-quarantine it IS the quarantine
+//     entry time; created_at fallback for NULL) — gives the operator the same
+//     7-day runway the sweeper gives a fresh bet before the system concludes
+//     "nobody is coming for this" (also comfortably past every backoff rung
+//     and #193's +24h deferrals);
+//   - active sweep_exempt_until (sweepGraceUntil — the SAME #191 predicate
+//     the sweeper and the void writers honor; BACKLOG WC-3 requires the
+//     reaper to inherit it);
+//   - future event (nextAttemptForEvent(...).defer) — a bet whose game
+//     hasn't happened is waiting, not exhausted; checked UNCONDITIONALLY
+//     (not gated on EVENT_AWARE_RECHECK — there is no pre-existing zombie
+//     behavior to keep byte-identical, so take the conservative skip).
+const ZOMBIE_DWELL_DAYS = 7;
+
+function runZombieSweep() {
+  const mode = reaperMode();
+  // off → byte-identical pre-flag behavior: no query, no writes, no events.
+  if (mode === 'off') return { examined: 0, routed: 0 };
+
+  let candidates = [];
+  try {
+    candidates = db.prepare(`
+      SELECT id, sport, event_date, created_at, grading_attempts,
+             grading_last_attempt_at, grading_next_attempt_at
+      FROM bets
+      WHERE result = 'pending'
+        AND grading_state = 'quarantined'
+        AND ${GRADER_ELIGIBLE_WHERE}
+        AND (grading_next_attempt_at IS NULL OR grading_next_attempt_at <= datetime('now'))
+        AND datetime(COALESCE(grading_last_attempt_at, created_at), '+${ZOMBIE_DWELL_DAYS} days') <= datetime('now')
+    `).all();
+  } catch (e) {
+    console.error(`[Reaper] zombie sweep query error (non-fatal): ${e.message}`);
+    return { examined: 0, routed: 0 };
+  }
+
+  let routed = 0;
+  for (const bet of candidates) {
+    const graceUntil = sweepGraceUntil(bet.id);
+    if (graceUntil) {
+      console.log(`[Reaper] Zombie skip (grace): bet=${String(bet.id).slice(0, 8)} sweep_exempt_until=${graceUntil}`);
+      continue;
+    }
+    if (nextAttemptForEvent(bet.event_date).defer) {
+      console.log(`[Reaper] Zombie skip (future event): bet=${String(bet.id).slice(0, 8)} event_date=${bet.event_date}`);
+      continue;
+    }
+    if (mode === 'enforce') {
+      if (routeExhaustedBetToReview(bet.id, 'zombie_sweep', {
+        sport: bet.sport ?? null, attempts: bet.grading_attempts ?? null,
+      })) routed++;
+    } else {
+      // shadow: one would-route row per candidate that passed every skip —
+      // no void exists on this path, so (unlike the writers) there is
+      // nothing to gate the emission on.
+      const cls = exhaustedReviewClass(bet.sport);
+      emitReaperShadow(bet.id, {
+        kind: 'would_route', writer: 'zombie_sweep', sport: bet.sport ?? null,
+        attempts: bet.grading_attempts ?? null, adapter_covered: cls.covered, would_reason: cls.dropReason,
+      });
+      console.log(`grade.reaper_would_route betId=${bet.id} writer=zombie_sweep sport=${bet.sport} attempts=${bet.grading_attempts} would_reason=${cls.dropReason}`);
+    }
+  }
+  if (candidates.length > 0) {
+    console.log(`[Reaper] Zombie sweep (${mode}): ${candidates.length} candidate(s), ${mode === 'enforce' ? `${routed} routed` : 'would-route rows emitted'}`);
+  }
+  return { examined: candidates.length, routed };
+}
+
 async function runAutoGrade(client) {
   if (process.env.AUTOGRADER_DISABLED === 'true') {
     console.log('[AutoGrade] DISABLED via env var — skipping cycle');
@@ -2117,6 +2418,23 @@ async function runAutoGrade(client) {
   }
 
   console.log('[AutoGrade] Starting grading cycle...');
+
+  // ── Zombie sweep (Stage 2 reaper) ──
+  // Piggybacks this cron (no new scheduler) but MUST run BEFORE the
+  // empty-queue early return below: its population (grading_state=
+  // 'quarantined') is disjoint from getPendingBets' snapshot, and zombies
+  // accumulate precisely in the quiet periods when `pending` is empty
+  // (offseason) — gating the sweep on queue occupancy would make the no-exit
+  // population exitless again. Deliberately AFTER the daily-cap pause above
+  // (a paused grader is an admin-intervention state; don't add writes to it).
+  // No-op under REAPER_MODE=off/unset; error-isolated so it can never break
+  // the cycle.
+  try {
+    runZombieSweep();
+  } catch (e) {
+    console.error(`[Reaper] zombie sweep error (non-fatal): ${e.message}`);
+  }
+
   const pending = await getPendingBets();
   if (pending.length === 0) {
     console.log('[AutoGrade] No pending bets in queue (state-machine selector).');
@@ -2219,6 +2537,9 @@ async function runAutoGrade(client) {
     }
     if (verdict.reason === 'event_pending') {
       console.log(`[Sweeper] Event-pending skip "${(bet.description || '').slice(0, 40)}" — event_date=${bet.event_date} not final yet (EVENT_AWARE_RECHECK=enforce); deferred recheck owns this bet, not the 7d sweep`);
+    }
+    if (verdict.reason === 'event_settling') {
+      console.log(`[Sweeper] Event-settling skip "${(bet.description || '').slice(0, 40)}" — event_date=${bet.event_date} became gradeable <48h ago (EVENT_AWARE_RECHECK=enforce); the post-event recheck owns this bet before the 7d sweep may void it`);
     }
     return verdict.eligible;
   });
@@ -3230,6 +3551,22 @@ async function gradePropWithAI(bet) {
       };
     }
 
+    // Stage 2 reaper (REAPER_MODE=enforce): route to needs_review instead of
+    // voiding — grace deferral above and the unmodeled divert before it are
+    // unchanged; only the terminal void changes. Sentinel mirrors
+    // MANUAL_REVIEW_UNMODELED: runAutoGrade's if/else won't match it, the DB
+    // write inside routeExhaustedBetToReview is the real state change.
+    const reaperM = reaperMode();
+    if (reaperM === 'enforce') {
+      routeExhaustedBetToReview(bet.id, 'unscoped_sport', {
+        sport: bet.sport ?? null, attempts: bet.grading_attempts ?? null,
+      });
+      return {
+        status: 'EXHAUSTED_REVIEW',
+        evidence: `Routed to review: sport=${bet.sport || 'null'} not in supported set — parked for human grading, NOT voided (REAPER_MODE=enforce)`,
+      };
+    }
+
     console.log(`[AutoGrade] Auto-void unscoped: ${bet.id} | sport=${bet.sport} | "${(bet.description || '').slice(0, 80)}"`);
     let voided = false;
     try {
@@ -3279,6 +3616,16 @@ async function gradePropWithAI(bet) {
         },
         ingestId: bet.ingest_id || null,
       });
+      if (reaperM === 'shadow') {
+        // Measurement only — gated on the void landing so the population is
+        // exactly what enforce would route.
+        const cls = exhaustedReviewClass(bet.sport);
+        emitReaperShadow(bet.id, {
+          kind: 'would_route', writer: 'unscoped_sport', sport: bet.sport ?? null,
+          attempts: bet.grading_attempts ?? null, adapter_covered: cls.covered, would_reason: cls.dropReason,
+        });
+        console.log(`grade.reaper_would_route betId=${bet.id} writer=unscoped_sport sport=${bet.sport} would_reason=${cls.dropReason}`);
+      }
     }
     // Return sentinel that runAutoGrade's if/else won't match → silent no-op.
     // (The DB write above is the real finalize; no need for finalizeBetGrading.)
@@ -4349,6 +4696,7 @@ module.exports = {
     classifyPendingDropReason,                         // PENDING drop-reason prefix table (terminal-state-invariant test)
     emitAutonomousGradeTelemetry, AUTO_GRADE_MATCH_WINDOW_DAYS, // T6-01/T2-01 — terminal telemetry + recap match window
     nextAttemptForEvent,                               // Codex #3 — event-aware recheck planner (EVENT_AWARE_RECHECK)
+    reaperMode, routeExhaustedBetToReview, exhaustedReviewClass, runZombieSweep, ZOMBIE_DWELL_DAYS, // Stage 2 reaper — exhaustion terminals route to needs_review (REAPER_MODE)
   },
   // Exported for tests + observability — these are called from
   // gradePropWithAI internally; importers MUST NOT mutate.

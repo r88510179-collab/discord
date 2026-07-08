@@ -44,6 +44,8 @@ const dbFile = path.join(os.tmpdir(), `event-aware-sweep-guard-${process.pid}-${
 process.env.DB_PATH = dbFile;
 delete process.env.GRADING_STATE_MACHINE_ENABLED;
 delete process.env.EVENT_AWARE_RECHECK;
+// Section B exercises the retry-cap VOID terminal — shield against a leaked REAPER_MODE.
+delete process.env.REAPER_MODE;
 
 const grading = require('../services/grading');
 const database = require('../services/database');
@@ -63,7 +65,8 @@ function ok(label, cond, detail) {
 const NOW = Date.now();
 const OLD_CREATED = '2020-01-01 00:00:00';                                  // unambiguously > 7d ago
 const FUTURE_EVENT = new Date(NOW + 60 * 60 * 1000).toISOString();         // +1h, carries time → pre_event
-const PAST_EVENT = new Date(NOW - 5 * 60 * 60 * 1000).toISOString();       // 5h ago → post_event
+const PAST_EVENT = new Date(NOW - 5 * 24 * 60 * 60 * 1000).toISOString();  // 5d ago → post_event, outside the 48h settle window
+const RECENT_PAST_EVENT = new Date(NOW - 5 * 60 * 60 * 1000).toISOString(); // 5h ago → post_event, readyAt (event+4h) 1h ago — inside the settle window
 const FUTURE_READY_MS = Date.parse(FUTURE_EVENT) + 4 * 60 * 60 * 1000;     // event + EVENT_TO_FINAL_MS (4h)
 
 let seq = 0;
@@ -113,12 +116,38 @@ console.log('A. evaluateSweep event-aware guard');
   ok('A1 reason === event_pending', v.reason === 'event_pending', JSON.stringify(v));
 }
 
-// A2 — enforce + >7d old + PAST event → swept normally (event already happened).
+// A2 — enforce + >7d old + PAST event (outside the 48h settle window) → swept
+//      normally (event long done; the settle window has lapsed).
 {
   const id = makeBet({ createdAt: OLD_CREATED, eventDate: PAST_EVENT, description: 'past-event single, 8d old' });
   const v = withMode('enforce', () => evaluateSweep(rowOf(id)));
   ok('A2 enforce + old + past event → eligible (event done, sweeps)', v.eligible === true, JSON.stringify(v));
   ok('A2 reason === eligible', v.reason === 'eligible', JSON.stringify(v));
+}
+
+// A2b — enforce + >7d old + JUST-FINISHED event (readyAt <48h ago) → NOT swept
+//      (reason=event_settling). Stage 2 reaper PR: a deferred bet spends its
+//      whole pre-sweep window waiting for its game, so without this window the
+//      sweep voids it after a single post-event recheck — the residual half of
+//      the MAX_DEFER(7d)/SWEEP_CUTOFF(7d) enforce-flip blocker. This is a
+//      DELIBERATE change to the old A2 contract (which used a 5h-old event and
+//      asserted eligible): under enforce, "event happened" now means "event
+//      happened AND the recheck had its 48h runway".
+{
+  const id = makeBet({ createdAt: OLD_CREATED, eventDate: RECENT_PAST_EVENT, description: 'just-finished event, 8d old' });
+  const v = withMode('enforce', () => evaluateSweep(rowOf(id)));
+  ok('A2b enforce + old + just-finished event → not eligible', v.eligible === false, JSON.stringify(v));
+  ok('A2b reason === event_settling', v.reason === 'event_settling', JSON.stringify(v));
+}
+
+// A2c — OFF + old + just-finished event → still eligible (settle window is
+//      enforce-gated; off/shadow stay byte-identical to the shipped default).
+{
+  const id = makeBet({ createdAt: OLD_CREATED, eventDate: RECENT_PAST_EVENT, description: 'just-finished event, off mode' });
+  const vOff = withMode(null, () => evaluateSweep(rowOf(id)));
+  ok('A2c off + old + just-finished event → eligible (window is enforce-gated)', vOff.eligible === true, JSON.stringify(vOff));
+  const vShadow = withMode('shadow', () => evaluateSweep(rowOf(id)));
+  ok('A2c shadow + old + just-finished event → eligible (shadow == off)', vShadow.eligible === true, JSON.stringify(vShadow));
 }
 
 // A3 — OFF (default) + old + future event → STILL eligible. No-regression control:

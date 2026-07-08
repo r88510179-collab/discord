@@ -52,3 +52,17 @@ the adapter/per-leg grader before the same void (see BACKLOG WC-3 section).
 
 ## 2026-07-08 — RETRY_CAP_ADAPTER_EXEMPT: (unset) → shadow
 PR #193. Shadow measures would-defer population (retry_cap_adapter_shadow events) for adapter-covered bets at the retry cap. Ceiling 19 (< quarantine 20). Enforce decision after reviewing shadow volume.
+
+## 2026-07-08 — REAPER_MODE: introduced, NOT yet set (unset = off)
+New flag (Stage 2 reaper PR). Unset/off is byte-identical to post-#193 behavior: the three
+exhaustion writers (retry-cap void, no-data void, unscoped-sport void) still terminally VOID, and
+the zombie sweep runs nothing. Flip plan: `shadow` first
+(`SELECT payload FROM pipeline_events WHERE event_type='reaper_shadow'` shows the would-route
+population — writer/sport/attempts per row; the three writers emit only when their void actually
+lands, so those rows exactly match what enforce would route; zombie_sweep rows are the quarantined
+no-exit backlog), then `enforce` after eyeballing volume against the review queue's capacity
+(baselines: GRADE_BACKOFF_EXHAUSTED ~3/day per COA 2026-06-10; unscoped+no-data 54/day on
+2026-06-10 PRE-Build-1d/#110-#113 — expect far lower now, shadow will give the real number).
+Enforce parks exhausted bets in review_status='needs_review' (result stays pending, no
+grade/profit) with one GRADE_EXHAUSTED_{ADAPTER|NO_SOURCE}_REVIEW drop each — void becomes
+operator-only on those paths (WC-3 policy). #191 grace + #193 deferral run first, unchanged.

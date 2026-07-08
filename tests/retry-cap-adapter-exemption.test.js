@@ -57,6 +57,9 @@ process.env.DB_PATH = path.join(os.tmpdir(), `retry-cap-adapter-${Date.now()}-${
 // branch only.
 delete process.env.EVENT_AWARE_RECHECK;
 delete process.env.RETRY_CAP_ADAPTER_EXEMPT;
+// This suite pins the pre-reaper VOID terminals — a leaked REAPER_MODE from the
+// caller's shell would route them to needs_review instead and fail every void check.
+delete process.env.REAPER_MODE;
 
 const database = require('../services/database');
 const { db } = database;
