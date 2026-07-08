@@ -1663,3 +1663,17 @@ Derives American odds from payout/wager decimal; a mis-parsed micro wager (wager
 
 **Watch — null-odds → 0u ROI drag (services/grading.js calcProfit).**
 Post-#181, straights with unknown odds resolve to null; calcProfit(null,…) hits the trailing `return 0` on a win → the bet counts as settled 0u with full stake in the ROI denominator → slight ROI drag on winning no-odds straights (vs dropping out via `profit_units IS NULL`). Monitor N/A-odds straights in war-room. If material: (a) calcProfit win-fallthrough `return 0` → `return null` (drops them from ROI), or (b) assume -110 for spread/total market types only, keep ML/prop null.
+
+## Direct-ingest migration — demote Discord from ingest path to review surface (opened 2026-07-08)
+
+Cappers post on Twitter and DubClub, not Discord. Discord is currently a lossy serialization hop: scraper→webhook, DubClub→webhook, TweetShift→channel, all re-parsed from Discord messages. Costs: 4s buffering gap (silent-drop source), per-capper webhook allowlists, embed-format parse fragility, message-ID dedup plumbing. Target shape: scraper and DubClub bridge POST structured payloads directly to the bot's Express ingest endpoint; Discord keeps war-room review, reactions, re-ingest, and notifications only.
+
+**Sequencing (hard prerequisite):** BetService Stage 2 (idempotency keys + reaper) ships FIRST. Migrating transports before drops are typed and idempotent means no way to prove the new path isn't losing data.
+
+Migration order once unblocked:
+1. DubClub bridge → direct POST (our code both ends, lowest risk; keep webhook path as fallback behind a flag, shadow-compare counts)
+2. Scraper → direct POST (same pattern)
+3. TweetShift stays on Discord until/unless replaced by scraper coverage
+4. Discord ingest paths remain live for manual submission + re-ingest backstop
+
+Success metric: per-source staged-bet counts identical between webhook path and direct path over a 7-day shadow window; zero new DROP enums firing on the direct path.
