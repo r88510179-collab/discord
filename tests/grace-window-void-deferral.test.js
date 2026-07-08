@@ -45,6 +45,8 @@ global.fetch = () => Promise.reject(new Error('offline-test-no-network'));
 // Fresh throwaway DB BEFORE requiring database.js so the migrator builds the
 // full schema (sweep_exempt_until is mig 028, grading_state cols are mig 016).
 process.env.DB_PATH = path.join(os.tmpdir(), `grace-void-deferral-${process.pid}-${Date.now()}.db`);
+// This suite pins the pre-reaper VOID terminals — shield against a leaked REAPER_MODE.
+delete process.env.REAPER_MODE;
 
 const database = require('../services/database');
 const { db } = database;

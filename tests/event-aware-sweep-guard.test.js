@@ -44,6 +44,8 @@ const dbFile = path.join(os.tmpdir(), `event-aware-sweep-guard-${process.pid}-${
 process.env.DB_PATH = dbFile;
 delete process.env.GRADING_STATE_MACHINE_ENABLED;
 delete process.env.EVENT_AWARE_RECHECK;
+// Section B exercises the retry-cap VOID terminal — shield against a leaked REAPER_MODE.
+delete process.env.REAPER_MODE;
 
 const grading = require('../services/grading');
 const database = require('../services/database');

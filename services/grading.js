@@ -2418,6 +2418,23 @@ async function runAutoGrade(client) {
   }
 
   console.log('[AutoGrade] Starting grading cycle...');
+
+  // ── Zombie sweep (Stage 2 reaper) ──
+  // Piggybacks this cron (no new scheduler) but MUST run BEFORE the
+  // empty-queue early return below: its population (grading_state=
+  // 'quarantined') is disjoint from getPendingBets' snapshot, and zombies
+  // accumulate precisely in the quiet periods when `pending` is empty
+  // (offseason) — gating the sweep on queue occupancy would make the no-exit
+  // population exitless again. Deliberately AFTER the daily-cap pause above
+  // (a paused grader is an admin-intervention state; don't add writes to it).
+  // No-op under REAPER_MODE=off/unset; error-isolated so it can never break
+  // the cycle.
+  try {
+    runZombieSweep();
+  } catch (e) {
+    console.error(`[Reaper] zombie sweep error (non-fatal): ${e.message}`);
+  }
+
   const pending = await getPendingBets();
   if (pending.length === 0) {
     console.log('[AutoGrade] No pending bets in queue (state-machine selector).');
@@ -2535,17 +2552,6 @@ async function runAutoGrade(client) {
 
     gradedBets.push({ bet, result: 'void', profitUnits: 0, grade: { grade: 'VOID', reason: `Expired (${SWEEP_DAYS}-day sweep)` } });
     gradedCount++;
-  }
-
-  // ── Zombie sweep (Stage 2 reaper) ──
-  // Piggybacks this existing grading cron (no new scheduler). Needs its own
-  // query: its population (grading_state='quarantined') is invisible to the
-  // getPendingBets snapshot everything above works from. No-op under
-  // REAPER_MODE=off/unset; error-isolated so it can never break the cycle.
-  try {
-    runZombieSweep();
-  } catch (e) {
-    console.error(`[Reaper] zombie sweep error (non-fatal): ${e.message}`);
   }
 
   console.log(`[AutoGrade] Graded ${gradedCount} bets total (${expiredBets.length} swept).`);

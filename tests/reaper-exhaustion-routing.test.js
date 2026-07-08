@@ -56,10 +56,12 @@ delete process.env.EVENT_AWARE_RECHECK;
 delete process.env.RETRY_CAP_ADAPTER_EXEMPT;
 delete process.env.REAPER_MODE;
 
+delete process.env.AUTOGRADER_DISABLED;
+
 const database = require('../services/database');
 const { db, getPendingBets, approveBet } = database;
 const grading = require('../services/grading');
-const { gradePropWithAI, autoVoidNoSearchableData, shouldAutoVoidNoData, claimBetForGrading } = grading;
+const { gradePropWithAI, autoVoidNoSearchableData, shouldAutoVoidNoData, claimBetForGrading, runAutoGrade } = grading;
 const { scheduleRecheckAfterDenial, runZombieSweep, evaluateSweep, reaperMode, ZOMBIE_DWELL_DAYS } = grading._internal;
 const { DROP_REASONS, EVENT_TYPES } = require('../services/pipeline-events');
 
@@ -209,8 +211,11 @@ async function main() {
   // ── 2. retry-cap × enforce ─────────────────────────────────────────────────
   console.log('2. retry-cap × enforce — route to needs_review after both runways');
   await withEnv({ REAPER_MODE: 'enforce' }, async () => {
-    // (a) search-only sport, no window → routed as NO_SOURCE.
-    const id = seedBet({ sport: 'Boxing' });
+    // (a) search-only sport, no window → routed as NO_SOURCE. Seeded with a
+    // NON-NULL next-attempt + lock so checkRouted's "nulled/cleared"
+    // assertions actually pin the SET clauses (vacuous against the NULL
+    // seed defaults — adversarial-review finding).
+    const id = seedBet({ sport: 'Boxing', grading_next_attempt_at: '2027-01-01 00:00:00', grading_lock_until: '2027-01-01 00:00:00' });
     scheduleRecheckAfterDenial(id, 'pending_legs', 30);
     checkRouted('2a (Boxing)', id, { writer: 'retry_cap', dropReason: 'GRADE_EXHAUSTED_NO_SOURCE_REVIEW', minAttempts: 15 });
 
@@ -322,7 +327,7 @@ async function main() {
       shouldAutoVoidNoData(rowOf(idg)) === null);
 
     await withEnv({ REAPER_MODE: 'enforce' }, async () => {
-      const id = seedBet({ sport: 'Boxing', grading_attempts: 7 });
+      const id = seedBet({ sport: 'Boxing', grading_attempts: 7, grading_next_attempt_at: '2027-01-01 00:00:00', grading_lock_until: '2027-01-01 00:00:00' });
       autoVoidNoSearchableData(rowOf(id), { attempts: 7, hours: 24 });
       checkRouted('4a (enforce)', id, { writer: 'no_data', dropReason: 'GRADE_EXHAUSTED_NO_SOURCE_REVIEW', minAttempts: 7 });
       check('4a: review_status is needs_review, NOT auto_void_no_searchable_data',
@@ -357,7 +362,7 @@ async function main() {
     const mk = extra => seedBet({ sport: 'Unknown', description: 'mystery pick of the day', grading_attempts: 1, ...extra });
 
     await withEnv({ REAPER_MODE: 'enforce' }, async () => {
-      const id = mk();
+      const id = mk({ grading_next_attempt_at: '2027-01-01 00:00:00', grading_lock_until: '2027-01-01 00:00:00' });
       const r = await gradePropWithAI({ ...rowOf(id) });
       check('5a: EXHAUSTED_REVIEW sentinel returned (runAutoGrade if/else won\'t match)',
         r && r.status === 'EXHAUSTED_REVIEW');
@@ -507,6 +512,26 @@ async function main() {
       const bg = rowOf(idGrace);
       check('7d: grace skip leaves quarantine state untouched (no requeue either)',
         bg.grading_state === 'quarantined' && bg.review_status === 'confirmed');
+    });
+
+    // (e) WIRING: the sweep must run even when the pending queue is EMPTY.
+    // Zombies accumulate precisely in quiet periods (offseason) when
+    // getPendingBets returns nothing, and the zombie population is DISJOINT
+    // from that snapshot — so runAutoGrade's empty-queue early return must
+    // not gate the sweep (adversarial-review finding: pre-fix the call sat at
+    // the tail, after the early return, making the "no future exit"
+    // population exitless again exactly when only zombies remain).
+    await withEnv({ REAPER_MODE: 'enforce' }, async () => {
+      // Neutralize every remaining live-queue fixture so the queue is empty.
+      db.prepare(`UPDATE bets SET result = 'void', grade = 'VOID', grading_state = 'done', grading_next_attempt_at = NULL
+        WHERE result = 'pending' AND grading_state IN ('ready','backoff')`).run();
+      check('7e: pending queue is empty', getPendingBets().length === 0);
+      // Past (non-NULL) next-attempt + lock: passes the sweep's own SELECT
+      // and makes checkRouted's null assertions real for the zombie writer.
+      const id = mkZombie({ sport: 'Boxing', grading_next_attempt_at: '2026-05-21 00:00:00', grading_lock_until: '2026-05-21 00:00:00' });
+      const out = await runAutoGrade(null);
+      check('7e: empty-queue cycle returns graded 0', out && out.graded === 0);
+      checkRouted('7e (zombie via empty-queue runAutoGrade)', id, { writer: 'zombie_sweep', dropReason: 'GRADE_EXHAUSTED_NO_SOURCE_REVIEW', minAttempts: 20 });
     });
   }
 
