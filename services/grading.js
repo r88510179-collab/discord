@@ -1150,6 +1150,13 @@ function scheduleRecheckAfterDenial(betId, reason, minutes = 30) {
     // WC-3: an ACTIVE sweep_exempt_until grace window (mig 028) defers the cap
     // void — the bet is requeued at the window's lapse instead of voided; the
     // cap check re-fires (and voids) on the first denial after the lapse.
+    // Record correction (2026-07-08): THIS writer is the path that voided the
+    // three WC-3 bets (their archived grade_reason matches the literal below;
+    // the incident was initially attributed to the no-data void, which sport
+    // 'Soccer' can't even reach — the Build-1d hasDeterministicAdapter guard
+    // exempts it there and funnels it onto this denial ladder instead). Unlike
+    // shouldAutoVoidNoData, the cap void has NO adapter exemption: an adapter-
+    // covered bet with no active window still cap-voids — see BACKLOG (WC-3).
     if (deferVoidForGraceWindow(betId, 'retry_cap', { denial_reason: reason, attempts })) return;
     const voidTx = db.transaction(() => {
       // `AND ${GRADER_ELIGIBLE_WHERE}`: if an operator reverted this bet to
@@ -1313,9 +1320,12 @@ function shouldAutoVoidNoData(bet) {
 /** Write the terminal void row. Best-effort; never throws. */
 function autoVoidNoSearchableData(bet, info) {
   // WC-3: an ACTIVE sweep_exempt_until grace window (mig 028) defers the
-  // no-data void — this is the exact path that voided the three recovered HRB
-  // World Cup bets inside their protection window. Requeued at the lapse; a
-  // still-no-data bet voids normally on the first qualifying attempt after it.
+  // no-data void. (Record correction 2026-07-08: the three WC-3 bets were NOT
+  // voided here — sport 'Soccer' is exempted from this path by the Build-1d
+  // hasDeterministicAdapter guard; the RETRY-CAP writer in
+  // scheduleRecheckAfterDenial voided them. All three writers carry the same
+  // deferral.) Requeued at the lapse; a still-no-data bet voids normally on
+  // the first qualifying attempt after it.
   if (deferVoidForGraceWindow(bet.id, 'no_data', { attempts: info.attempts, hours: info.hours })) return;
   console.log(`[AutoGrade] Auto-void no-data: ${bet.id} after ${info.attempts} PENDING over ${info.hours}h`);
   try {
