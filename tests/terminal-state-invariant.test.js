@@ -261,8 +261,8 @@ console.log('6. classifyPendingDropReason (Gate 3 UNVERIFIED_QUOTE)');
     classifyPendingDropReason('No final score found for this game') === 'GRADE_NO_SEARCH_HITS');
   check('6f: pin — too-recent prefix unchanged',
     classifyPendingDropReason('Game has not started yet') === 'GRADE_TOO_RECENT');
-  check('6g: pin — Gate 4 OFF_DATE_EVIDENCE stays in the catch-all (out of scope here)',
-    classifyPendingDropReason('OFF_DATE_EVIDENCE: evidence dated 2026-06-06 outside 2026-06-12±1d — forced PENDING (model claimed WIN)') === 'GRADE_PENDING_UNCLASSIFIED');
+  check('6g: Gate 4 OFF_DATE_EVIDENCE now classifies to GRADE_DATE_UNVERIFIED (WC-3 follow-up; full coverage in tests/grace-window-void-deferral.test.js)',
+    classifyPendingDropReason('OFF_DATE_EVIDENCE: evidence dated 2026-06-06 outside 2026-06-12±1d — forced PENDING (model claimed WIN)') === 'GRADE_DATE_UNVERIFIED');
   check('6h: pin — unknown evidence falls back to the catch-all',
     classifyPendingDropReason('some novel evidence string') === 'GRADE_PENDING_UNCLASSIFIED');
 }
