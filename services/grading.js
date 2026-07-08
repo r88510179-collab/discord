@@ -1147,6 +1147,10 @@ function scheduleRecheckAfterDenial(betId, reason, minutes = 30) {
   const attempts = bet?.grading_attempts || 0;
 
   if (attempts >= RETRY_CAP) {
+    // WC-3: an ACTIVE sweep_exempt_until grace window (mig 028) defers the cap
+    // void — the bet is requeued at the window's lapse instead of voided; the
+    // cap check re-fires (and voids) on the first denial after the lapse.
+    if (deferVoidForGraceWindow(betId, 'retry_cap', { denial_reason: reason, attempts })) return;
     const voidTx = db.transaction(() => {
       // `AND ${GRADER_ELIGIBLE_WHERE}`: if an operator reverted this bet to
       // needs_review after the grader claimed it, the void is a 0-change no-op —
@@ -1308,6 +1312,11 @@ function shouldAutoVoidNoData(bet) {
 
 /** Write the terminal void row. Best-effort; never throws. */
 function autoVoidNoSearchableData(bet, info) {
+  // WC-3: an ACTIVE sweep_exempt_until grace window (mig 028) defers the
+  // no-data void — this is the exact path that voided the three recovered HRB
+  // World Cup bets inside their protection window. Requeued at the lapse; a
+  // still-no-data bet voids normally on the first qualifying attempt after it.
+  if (deferVoidForGraceWindow(bet.id, 'no_data', { attempts: info.attempts, hours: info.hours })) return;
   console.log(`[AutoGrade] Auto-void no-data: ${bet.id} after ${info.attempts} PENDING over ${info.hours}h`);
   try {
     // `AND ${GRADER_ELIGIBLE_WHERE}`: skip if an operator reverted the bet to
@@ -1787,6 +1796,65 @@ function sweepGraceUntil(betId) {
     "WHERE id = ? AND sweep_exempt_until IS NOT NULL AND datetime('now') < sweep_exempt_until",
   ).get(betId);
   return row ? row.until : null;
+}
+
+// WC-3 (2026-07-08): the grace window above protected recovered/approved bets
+// ONLY against the 7-Day Sweeper — the three void-on-exhaustion writers (the
+// retry-cap void in scheduleRecheckAfterDenial, autoVoidNoSearchableData, and
+// the unscoped-sport auto-void in gradePropWithAI) ignored it, so three
+// recovered HRB World Cup bets were no-data-voided INSIDE their window; all
+// three were real, gradeable games (manual regrade → 3 LOSS,
+// docs/regrades/graded_wc3_2026-07-08.json). Each of those writers now calls
+// this BEFORE its terminal write. While the window is open (SAME predicate as
+// the sweeper — sweepGraceUntil, SQLite datetime('now') < sweep_exempt_until)
+// the void is SKIPPED and the bet is requeued at the window's lapse:
+//   - datetime(?) normalizes the stored 'YYYY-MM-DD HH:MM:SS' value so the
+//     lexical <= datetime('now') comparisons in getPendingBets /
+//     claimBetForGrading stay correct (same idiom as the #124 enforce write);
+//   - grading_state is deliberately untouched (stays 'ready'/'backoff') so the
+//     retry loop re-picks the bet once the window lapses — at which point the
+//     same void path fires normally (a genuinely un-gradeable bet still voids
+//     once the grace lapses, mirroring the sweeper's contract);
+//   - `AND result = 'pending'` is applyBackoff's write-side dual: a bet a
+//     concurrent handler terminally graded mid-flight is never requeued;
+//   - `AND ${GRADER_ELIGIBLE_WHERE}` (#118): a bet an operator reverted to
+//     needs_review mid-flight stays untouched — no requeue, no event (the
+//     caller still skips its void, whose own UPDATE carries the same guard
+//     and would no-op anyway);
+//   - the requeue is bounded by the window itself (stamped now+GRACE_DAYS=3d
+//     by recoverHold/approveBet), never by a new ladder.
+// One GRADE_VOID_DEFERRED_EXEMPT pipeline_events row (gated on the requeue
+// actually landing) makes the deferral observable — the bet is NOT dropped;
+// non-terminal deferral marker, same semantics as GRADE_RECAP_MATCH_DEFERRED.
+// The 7-Day Sweeper is untouched (it already honors the window via
+// evaluateSweep). Returns the window's lapse timestamp when the void must be
+// deferred, else null (caller proceeds to void).
+function deferVoidForGraceWindow(betId, voidPath, payload = {}) {
+  const graceUntil = sweepGraceUntil(betId);
+  if (!graceUntil) return null;
+  const info = db.prepare(`UPDATE bets
+    SET grading_next_attempt_at = datetime(?),
+        grading_last_failure_reason = ?,
+        grading_lock_until = NULL
+    WHERE id = ? AND result = 'pending'
+      AND ${GRADER_ELIGIBLE_WHERE}`)
+    .run(graceUntil, `${voidPath}_void_deferred_exempt`.slice(0, 200), betId);
+  if (info.changes > 0) {
+    try {
+      bets.recordDrop({
+        betId,
+        stage: 'GRADING_DROPPED',
+        dropReason: 'GRADE_VOID_DEFERRED_EXEMPT',
+        payload: { void_path: voidPath, sweep_exempt_until: graceUntil, ...payload },
+        ingestId: null,
+      });
+    } catch (err) {
+      // Fire-and-forget — observability must not break the deferral.
+      console.error(`[AutoGrade] void-deferral recordDrop error: ${err.message}`);
+    }
+    console.log(`[AutoGrade] Void deferred (grace window): bet=${String(betId).slice(0, 8)} path=${voidPath} requeued until=${graceUntil}`);
+  }
+  return graceUntil;
 }
 
 // Sweep verdict for one pending bet. Returns
@@ -3033,6 +3101,21 @@ async function gradePropWithAI(bet) {
       return { status: 'MANUAL_REVIEW_UNMODELED', evidence: `Manual review required: unmodeled league sport=${bet.sport}` };
     }
 
+    // WC-3: an ACTIVE sweep_exempt_until grace window (mig 028) defers the
+    // unscoped-sport void too — a recovered bet's sport label can be wrong at
+    // recovery time and fixed by a human (or by an alias-rescue added later)
+    // within the window; voiding it defeats the grace the recovery stamped.
+    // The sentinel mirrors AUTO_VOIDED / MANUAL_REVIEW_UNMODELED below:
+    // runAutoGrade's if/else won't match it, and the deferral's requeue UPDATE
+    // is the real state change (bet stays pending, re-picked after the lapse).
+    const graceDeferUntil = deferVoidForGraceWindow(bet.id, 'unscoped_sport', { sport: bet.sport || null });
+    if (graceDeferUntil) {
+      return {
+        status: 'VOID_DEFERRED_EXEMPT',
+        evidence: `Unscoped-sport void deferred: sweep_exempt_until=${graceDeferUntil} grace window active (sport=${bet.sport || 'null'})`,
+      };
+    }
+
     console.log(`[AutoGrade] Auto-void unscoped: ${bet.id} | sport=${bet.sport} | "${(bet.description || '').slice(0, 80)}"`);
     let voided = false;
     try {
@@ -3380,6 +3463,29 @@ function classifyPendingDropReason(evidence) {
     return 'GRADE_AI_NO_PROVIDERS';
   } else if (/^AI returned PENDING with no explanation/i.test(ev)) {
     return 'GRADE_AI_PENDING_NO_DATA';
+  } else if (/^No (final score|match details|results)\b/i.test(ev)
+      || /^No(?:\s+[A-Za-z'’/-]+){1,7}\s+(?:found|results)\b/i.test(ev)) {
+    // Free-form LLM no-data phrasings. NOT code-templated, so both forms are
+    // deliberately CONSERVATIVE, and both anchored:
+    //   1. the three stems observed 2026-07-08 batch 1 ("No final score…" /
+    //      "No match details…" / "No results…");
+    //   2. bounded-gap form (batch 2, live samples "No soccer match scores or
+    //      stats found for Ecuador/Mexico…", "No final score or game
+    //      statistics found for Lamine Yamal on 2026-07-05…", "No soccer game
+    //      data or Messi statistics found in search results"): leading "No" +
+    //      1–7 LETTER-ONLY gap words + a found/results terminator. Digits and
+    //      punctuation in the gap block the match, so a string carrying an
+    //      actual score ("No 2-1 scoreline found…", "No goals for Messi,
+    //      match found…") structurally cannot match.
+    // Tradeoff: a false positive routes a genuinely unexplained PENDING into
+    // NO_DATA (acceptable — same no-data triage bucket); a broad match that
+    // swallows future distinct evidence families is not — which is why this
+    // branch sits BEFORE OFF_DATE_EVIDENCE in the chain and must never match
+    // a prefixed family (pinned by tests/grace-window-void-deferral.test.js
+    // 4m). NOTE the chain order above: the code-templated "No final score
+    // found…" prefix is matched FIRST and keeps its GRADE_NO_SEARCH_HITS
+    // mapping — this branch only sees the LLM variants ("No final score or …").
+    return 'GRADE_AI_PENDING_NO_DATA';
   } else if (/^UNVERIFIED_QUOTE:/i.test(ev)) {
     // Gate 3 enforce (QUOTE_BOUND_GRADING) forced PENDING — the model's
     // evidence_quote failed validateEvidenceQuote. One prefix covers both
@@ -3387,6 +3493,14 @@ function classifyPendingDropReason(evidence) {
     // 'evidence_quote is not an exact substring of the evidence'). Labeling
     // only — Gate 3 behavior itself is untouched.
     return 'GRADE_QUOTE_UNVERIFIED';
+  } else if (/^OFF_DATE_EVIDENCE:/i.test(ev)) {
+    // Gate 4 (DATE_BOUND_GRADING=enforce) forced PENDING — the quote-bearing
+    // evidence record's dates all fall outside the bet's anchor±tol window.
+    // gradeSingleBet builds `OFF_DATE_EVIDENCE: evidence dated <dates> outside
+    // <anchor>±<tol>d — forced PENDING (model claimed <STATUS>)`. Labeling
+    // only — Gate 4 behavior itself is untouched (2026-07-08; Gate 3 got its
+    // dedicated reason the same day).
+    return 'GRADE_DATE_UNVERIFIED';
   } else if (/^Parlay has \d+ recorded legs/i.test(ev)) {
     return 'GRADE_PENDING_UNCLASSIFIED'; // parlay leg-count failure; known but rare
   } else if (/^Game not yet Final \(resolver\)/i.test(ev)) {
@@ -4115,6 +4229,7 @@ module.exports = {
     resolveGate4Mode, applyGate4, buildGate4WouldFireMarker, gate4ToleranceFor, GATE4_TOLERANCE_DAYS, // Gate 4 — off-date evidence reject
     buildEvidenceRecords, evaluateOffDate,             // evidence-record layer (re-exported from services/evidenceRecords.js)
     evaluateSweep, sweepGraceUntil,                    // Phase 2b-2 — 7-day sweeper grace for recovered bets
+    deferVoidForGraceWindow,                           // WC-3 — grace window defers the void-on-exhaustion writers too
     sweepExpiredBet,                                   // DP-01/T6-01 — terminal sweep write (VOID + telemetry), unit-tested in tests/sweeper-void.test.js
     scheduleRecheckAfterDenial,                        // retry-cap terminal VOID write (grader_version stamping test)
     classifyPendingDropReason,                         // PENDING drop-reason prefix table (terminal-state-invariant test)
