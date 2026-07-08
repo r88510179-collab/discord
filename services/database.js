@@ -732,12 +732,53 @@ function gradeBetRecord(betId, result, profitUnits, grade, gradeReason, allowAut
 // future grading_state drift.
 const GRADER_HIDDEN_REVIEW_STATUSES = ['needs_review', 'manual_review_unmodeled_sport'];
 
+// ── Terminal-state drift tripwire (2026-07-08 incident) ─────────────────────
+// INVARIANT: a terminal `result` (win/loss/push/void) is always written with
+// grading_state='done' in the same statement. 375 live rows violated it (93%
+// void — the pre-fix retry-cap void wrote result='void' with
+// grading_state='backoff' + a +24h next attempt); a one-time cleanup set 372
+// to 'done'. Both grader selectors (getPendingBets, claimBetForGrading)
+// already exclude terminal results, so violating rows are silently invisible
+// — this counter makes that skip observable: one log line on the first queue
+// pull per process. A growing count means some write path regressed the
+// invariant. 'graded' is a legacy-but-terminal state; NULL never occurs on
+// graded rows and is excluded by the explicit IN list either way.
+function countTerminalStateDrift() {
+  const rows = db.prepare(`
+    SELECT grading_state AS state, COUNT(*) AS c FROM bets
+    WHERE result IN ('win','loss','push','void')
+      AND grading_state IN ('ready','backoff','quarantined')
+    GROUP BY grading_state
+  `).all();
+  const byState = {};
+  let total = 0;
+  for (const r of rows) { byState[r.state] = r.c; total += r.c; }
+  return { total, byState };
+}
+
+let _terminalDriftLogged = false;
+function logTerminalStateDriftOnce() {
+  if (_terminalDriftLogged) return;
+  _terminalDriftLogged = true;
+  try {
+    const { total, byState } = countTerminalStateDrift();
+    if (total > 0) {
+      console.warn(`[TerminalStateDrift] ${total} bet(s) have a terminal result but non-terminal grading_state (${JSON.stringify(byState)}) — invisible to the grader queue by the result='pending' predicate; a growing count means a terminal write path lost the grading_state='done' invariant`);
+    } else {
+      console.log('[TerminalStateDrift] 0 terminal-result bets with non-terminal grading_state — invariant holds');
+    }
+  } catch (e) {
+    console.error(`[TerminalStateDrift] count failed (non-fatal): ${e.message}`);
+  }
+}
+
 // P0 state-machine selector: only rows eligible for the current grading cycle.
 // Kill-switch env var reverts to the old broad query.
 // Bets awaiting human review (review_status in GRADER_HIDDEN_REVIEW_STATUSES) are
 // invisible to the grader and every auto-void path until they are confirmed —
 // otherwise the AutoGrader races the war-room queue and stales its buttons.
 function getPendingBets() {
+  logTerminalStateDriftOnce();
   if ((process.env.GRADING_STATE_MACHINE_ENABLED || 'true') === 'false') {
     // stmts.pendingBets is shared with getAllPendingBets (dashboards/admin),
     // so the review-queue exclusion is applied here, not in the statement.
@@ -1266,6 +1307,7 @@ module.exports = {
   gradeBet: gradeBetRecord,
   getPendingBets,
   getAllPendingBets,
+  countTerminalStateDrift,   // terminal-state drift tripwire (one-time startup log; exported for tests)
   revertBetToPending,
   getRecentBets,
   getCapperStats,

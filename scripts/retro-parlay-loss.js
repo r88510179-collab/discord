@@ -241,8 +241,11 @@ function main() {
   // ── Apply (only with --commit) ──
   if (!args.dryRun && plan.length > 0) {
     console.log('\n═══ COMMITTING ═══');
+    // grading_state='done': terminal-state invariant — a terminal result write
+    // must land with a terminal grading_state (also heals drift on the row).
     const stmt = db.prepare(
-      "UPDATE bets SET result = 'loss', profit_units = ?, grade_reason = ?, graded_at = datetime('now') "
+      "UPDATE bets SET result = 'loss', profit_units = ?, grade_reason = ?, graded_at = datetime('now'), "
+      + "grading_state = 'done', grading_lock_until = NULL "
       + "WHERE id = ? AND result = 'void'"
     );
     const tx = db.transaction((items) => {

@@ -83,8 +83,15 @@ function applyGradeOverride(deps, { betId, result, reason, invokerId }) {
     // c. Rewrite the bet directly (NOT gradeBet() — it no-ops on graded rows).
     //    Stamp grader_version so a manual override is attributable (B2) instead
     //    of leaving the NULL every non-main-grader write used to leave.
+    //    TERMINAL-STATE INVARIANT: every terminal `result` write sets
+    //    grading_state='done' in the same statement. The precondition above
+    //    guarantees the bet is already non-pending, but the row may carry a
+    //    DRIFTED state (the pre-fix retry-cap void left 'backoff' — 2026-07-08
+    //    cleanup class), and /grade override is exactly the tool used on such
+    //    rows; without this the override perpetuates the drift.
     db.prepare(`
-      UPDATE bets SET result = ?, profit_units = ?, grade_reason = ?, grader_version = 'manual-v1', graded_at = datetime('now')
+      UPDATE bets SET result = ?, profit_units = ?, grade_reason = ?, grader_version = 'manual-v1', graded_at = datetime('now'),
+        grading_state = 'done', grading_lock_until = NULL
       WHERE id = ?
     `).run(result, newProfit, gradeReason, bet.id);
 

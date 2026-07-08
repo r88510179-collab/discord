@@ -1132,7 +1132,8 @@ function scheduleRecheckAfterDenial(betId, reason, minutes = 30) {
   // Attempt cap — prevents backdoor around the state machine when a denial
   // (e.g. pending_legs) keeps flipping state back to 'ready' faster than
   // the normal backoff ladder. At cap, stamp GRADE_BACKOFF_EXHAUSTED and
-  // move far into the future so the grader stops re-picking.
+  // finalize terminally (VOID + grading_state='done') so the grader stops
+  // re-picking.
   const RETRY_CAP = 15;
   const bet = db.prepare('SELECT grading_attempts, event_date FROM bets WHERE id = ?').get(betId);
   const attempts = bet?.grading_attempts || 0;
@@ -1142,9 +1143,18 @@ function scheduleRecheckAfterDenial(betId, reason, minutes = 30) {
       // `AND ${GRADER_ELIGIBLE_WHERE}`: if an operator reverted this bet to
       // needs_review after the grader claimed it, the void is a 0-change no-op —
       // the bet stays safely parked instead of being voided out of the queue.
+      //
+      // TERMINAL-STATE INVARIANT: a terminal `result` write must set
+      // grading_state='done' in the SAME statement. Pre-fix this wrote
+      // result='void' with grading_state='backoff' + a +24h next attempt — the
+      // recurring creator of the 2026-07-08 cleanup class (375 bets terminal
+      // with state backoff/ready/quarantined, 93% void; ~40% of the week's
+      // grading-side pipeline_events churned on already-terminal bets on the
+      // then-deployed build). No next attempt is scheduled: 'done' + a terminal
+      // result is exactly what getPendingBets/claimBetForGrading exclude.
       const info = db.prepare(`UPDATE bets
-        SET grading_state = 'backoff',
-            grading_next_attempt_at = datetime('now', '+24 hours'),
+        SET grading_state = 'done',
+            grading_next_attempt_at = NULL,
             grading_last_failure_reason = ?,
             grading_lock_until = NULL,
             result = 'void',
@@ -3343,6 +3353,42 @@ function writeGradingAudit(audit) {
   } catch (e) { console.error(`[GradeAudit] Write FAILED: ${e.message}`); }
 }
 
+// ── PENDING drop-reason classifier ─────────────────────────────
+// Maps a forced-PENDING evidence string to its pipeline_events drop_reason by
+// prefix. Extracted from gradeSingleBet's earlyReturn closure (verbatim) so the
+// prefix table is unit-testable (tests/terminal-state-invariant.test.js) —
+// classification MUST track the exact strings the grade paths produce (e.g.
+// applyGate3's forced-PENDING evidence). Pure; falls back to
+// GRADE_PENDING_UNCLASSIFIED for any unrecognized evidence.
+function classifyPendingDropReason(evidence) {
+  const ev = String(evidence || '');
+  if (/^No final score found/i.test(ev)) {
+    return 'GRADE_NO_SEARCH_HITS';
+  } else if (/^Event was [\d.]+h ago/i.test(ev) || /^Game has not started/i.test(ev) || /^No event date/i.test(ev) || /^Invalid event date/i.test(ev)) {
+    return 'GRADE_TOO_RECENT';
+  } else if (/^HALLUCINATION:|^Soft hallucination:|^Team mismatch:|^Player \[.*\] not in evidence|^Cross-sport:/i.test(ev)) {
+    return 'GRADE_POST_GUARD_REJECTED';
+  } else if (/^All AI providers failed|^No AI providers configured|^JSON parse error/i.test(ev)) {
+    return 'GRADE_AI_NO_PROVIDERS';
+  } else if (/^AI returned PENDING with no explanation/i.test(ev)) {
+    return 'GRADE_AI_PENDING_NO_DATA';
+  } else if (/^UNVERIFIED_QUOTE:/i.test(ev)) {
+    // Gate 3 enforce (QUOTE_BOUND_GRADING) forced PENDING — the model's
+    // evidence_quote failed validateEvidenceQuote. One prefix covers both
+    // variants gradeSingleBet emits ('missing evidence_quote' and
+    // 'evidence_quote is not an exact substring of the evidence'). Labeling
+    // only — Gate 3 behavior itself is untouched.
+    return 'GRADE_QUOTE_UNVERIFIED';
+  } else if (/^Parlay has \d+ recorded legs/i.test(ev)) {
+    return 'GRADE_PENDING_UNCLASSIFIED'; // parlay leg-count failure; known but rare
+  } else if (/^Game not yet Final \(resolver\)/i.test(ev)) {
+    return 'GRADE_RESOLVER_PENDING';
+  } else if (/^Parlay PENDING — \d+ leg/i.test(ev)) {
+    return 'GRADE_PARLAY_LEGS_PENDING';
+  }
+  return 'GRADE_PENDING_UNCLASSIFIED';
+}
+
 // ── Single-bet grader — ANTI-HALLUCINATION HARDENED ────────────
 async function gradeSingleBet(bet, _auditCtx = {}) {
   const today = new Date().toISOString().split('T')[0];
@@ -3380,29 +3426,9 @@ async function gradeSingleBet(bet, _auditCtx = {}) {
     // otherwise we classify by evidence prefix, falling back to
     // GRADE_PENDING_UNCLASSIFIED.
     if (result && result.status === 'PENDING') {
-      let dropReason = opts.dropReason;
-      if (!dropReason) {
-        const ev = String(result.evidence || '');
-        if (/^No final score found/i.test(ev)) {
-          dropReason = 'GRADE_NO_SEARCH_HITS';
-        } else if (/^Event was [\d.]+h ago/i.test(ev) || /^Game has not started/i.test(ev) || /^No event date/i.test(ev) || /^Invalid event date/i.test(ev)) {
-          dropReason = 'GRADE_TOO_RECENT';
-        } else if (/^HALLUCINATION:|^Soft hallucination:|^Team mismatch:|^Player \[.*\] not in evidence|^Cross-sport:/i.test(ev)) {
-          dropReason = 'GRADE_POST_GUARD_REJECTED';
-        } else if (/^All AI providers failed|^No AI providers configured|^JSON parse error/i.test(ev)) {
-          dropReason = 'GRADE_AI_NO_PROVIDERS';
-        } else if (/^AI returned PENDING with no explanation/i.test(ev)) {
-          dropReason = 'GRADE_AI_PENDING_NO_DATA';
-        } else if (/^Parlay has \d+ recorded legs/i.test(ev)) {
-          dropReason = 'GRADE_PENDING_UNCLASSIFIED'; // parlay leg-count failure; known but rare
-        } else if (/^Game not yet Final \(resolver\)/i.test(ev)) {
-          dropReason = 'GRADE_RESOLVER_PENDING';
-        } else if (/^Parlay PENDING — \d+ leg/i.test(ev)) {
-          dropReason = 'GRADE_PARLAY_LEGS_PENDING';
-        } else {
-          dropReason = 'GRADE_PENDING_UNCLASSIFIED';
-        }
-      }
+      // Classify by evidence prefix via the module-level table (extracted for
+      // unit-testability); opts.dropReason still wins when a caller passes one.
+      const dropReason = opts.dropReason || classifyPendingDropReason(result.evidence);
 
       try {
         bets.recordDrop({
@@ -4083,6 +4109,7 @@ module.exports = {
     evaluateSweep, sweepGraceUntil,                    // Phase 2b-2 — 7-day sweeper grace for recovered bets
     sweepExpiredBet,                                   // DP-01/T6-01 — terminal sweep write (VOID + telemetry), unit-tested in tests/sweeper-void.test.js
     scheduleRecheckAfterDenial,                        // retry-cap terminal VOID write (grader_version stamping test)
+    classifyPendingDropReason,                         // PENDING drop-reason prefix table (terminal-state-invariant test)
     emitAutonomousGradeTelemetry, AUTO_GRADE_MATCH_WINDOW_DAYS, // T6-01/T2-01 — terminal telemetry + recap match window
     nextAttemptForEvent,                               // Codex #3 — event-aware recheck planner (EVENT_AWARE_RECHECK)
   },
