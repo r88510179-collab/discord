@@ -34,3 +34,6 @@ image, this session (2026-07-04):
 | `OCR_FIRST_MODE` | `shadow` | OCR-first is measured, not wired into the live extract path |
 | `GEMMA_FALLBACK_DISABLED` | `true` | Gemma vision fallback is **OFF** |
 | `AUTOGRADER_DISABLED` | `false` | the autograder cron is **RUNNING** (grading enabled) |
+
+## 2026-07-08 — PIPELINE_IDEM_MODE: (unset) → shadow
+PR #189 (v-next). Shadow measures grading-side DROP duplicate rate (expected source: deferRecapMatchToReview re-parks). Review query in PR #189 body. Enforce decision after ~1wk of shadow data.
