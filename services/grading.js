@@ -1135,6 +1135,19 @@ function emitEventAwareShadow(betId, payload) {
   } catch (_) { /* observability must not break grading */ }
 }
 
+// RETRY_CAP_ADAPTER_EXEMPT mode — strict compare (unset/anything-else → off),
+// same read-at-call-time idiom as EVENT_AWARE_RECHECK so ops can flip without a
+// restart. Gates the Build-1d-parity adapter exemption at the retry cap:
+// 'enforce' → an adapter-covered sport at the cap is requeued +24h instead of
+// terminally voided; 'shadow' → one measurement row per would-defer, void
+// unchanged; 'off' → byte-identical to pre-flag behavior.
+function retryCapAdapterExemptMode() {
+  const m = process.env.RETRY_CAP_ADAPTER_EXEMPT;
+  if (m === 'enforce') return 'enforce';
+  if (m === 'shadow') return 'shadow';
+  return 'off';
+}
+
 /** Gateway-denial recheck: do not change state or touch attempts; just requeue. */
 function scheduleRecheckAfterDenial(betId, reason, minutes = 30) {
   // Attempt cap — prevents backdoor around the state machine when a denial
@@ -1143,7 +1156,7 @@ function scheduleRecheckAfterDenial(betId, reason, minutes = 30) {
   // finalize terminally (VOID + grading_state='done') so the grader stops
   // re-picking.
   const RETRY_CAP = 15;
-  const bet = db.prepare('SELECT grading_attempts, event_date FROM bets WHERE id = ?').get(betId);
+  const bet = db.prepare('SELECT grading_attempts, event_date, sport FROM bets WHERE id = ?').get(betId);
   const attempts = bet?.grading_attempts || 0;
 
   if (attempts >= RETRY_CAP) {
@@ -1158,6 +1171,81 @@ function scheduleRecheckAfterDenial(betId, reason, minutes = 30) {
     // shouldAutoVoidNoData, the cap void has NO adapter exemption: an adapter-
     // covered bet with no active window still cap-voids — see BACKLOG (WC-3).
     if (deferVoidForGraceWindow(betId, 'retry_cap', { denial_reason: reason, attempts })) return;
+
+    // Build-1d parity (gated RETRY_CAP_ADAPTER_EXEMPT, default off): an
+    // adapter-covered sport must not be terminally cap-voided on the FIRST
+    // at-cap denial. THIS writer is the path that voided the three WC-3 bets —
+    // their sport 'Soccer' is exempt from the no-data void via
+    // hasDeterministicAdapter (#145), which funnels adapter-covered no-data
+    // bets onto this denial ladder instead.
+    //
+    // BOUNDED deferral — the ceiling is load-bearing. The cap's population is
+    // exclusively pending-legs parlays (canFinalizeBet denies 'pending_legs'
+    // only for parlay/sgp; every production caller of this fn gates on it), and
+    // the 7-Day Sweeper CANNOT settle that population: sweepExpiredBet's own
+    // terminal write goes through the SAME canFinalizeBet gate, gets denied
+    // pending_legs, and lands right back here. So an UNBOUNDED deferral would
+    // make a never-resolving adapter parlay immortal (no cap void, no no-data
+    // void via #145, no sweep). Instead: defer only while grading_attempts <
+    // RETRY_CAP + RETRY_CAP_EXEMPT_EXTRA; the daily re-claim grows attempts by
+    // ~1/day, so this buys ~RETRY_CAP_EXEMPT_EXTRA extra daily re-picks for the
+    // adapter/per-leg grader to settle the legs, after which the cap void fires
+    // exactly as pre-flag — the cap itself stays the terminal guarantee. The
+    // ceiling (15+4=19) is deliberately BELOW applyBackoff's quarantine
+    // threshold (20) so a bet deferred by this feature cannot cross into the
+    // selector-invisible 'quarantined' state mid-deferral.
+    //
+    // enforce → requeue +24h below the ceiling; at/above it, void as pre-flag.
+    // shadow → one measurement row per would-defer (emitted inside the voidTx
+    // gated on the void landing, so the measured population is EXACTLY the set
+    // enforce would defer — same guards), void unchanged. Same inline-require +
+    // try/catch idiom as shouldAutoVoidNoData (adapter layer unavailable →
+    // conservative fall-through to the pre-flag void).
+    const RETRY_CAP_EXEMPT_EXTRA = 4;
+    const exemptMode = retryCapAdapterExemptMode();
+    let shadowWouldDefer = false;
+    if (exemptMode !== 'off' && attempts < RETRY_CAP + RETRY_CAP_EXEMPT_EXTRA) {
+      let covered = false;
+      try {
+        covered = require('./sportsdata').hasDeterministicAdapter(bet?.sport);
+      } catch (e) {
+        console.warn(`[canFinalizeBet] hasDeterministicAdapter unavailable, cap-void adapter exemption skipped: ${e.message}`);
+      }
+      if (covered && exemptMode === 'enforce') {
+        // Same write-side guards as deferVoidForGraceWindow: `AND result =
+        // 'pending'` (a concurrently-graded bet is never requeued) + `AND
+        // ${GRADER_ELIGIBLE_WHERE}` (#118 — an operator-parked bet stays
+        // untouched). A 0-change no-op still returns without voiding — the
+        // void's own UPDATE carries the same guards and would no-op anyway
+        // (mirrors deferVoidForGraceWindow's contract).
+        const info = db.prepare(`UPDATE bets
+          SET grading_next_attempt_at = datetime('now', '+24 hours'),
+              grading_last_failure_reason = ?,
+              grading_lock_until = NULL
+          WHERE id = ? AND result = 'pending'
+            AND ${GRADER_ELIGIBLE_WHERE}`)
+          .run(`${String(reason).slice(0, 160)}_cap_adapter_deferred`, betId);
+        if (info.changes > 0) {
+          try {
+            bets.recordDrop({
+              betId,
+              stage: 'GRADING_DROPPED',
+              dropReason: 'GRADE_VOID_DEFERRED_ADAPTER',
+              payload: { void_path: 'retry_cap', sport: bet?.sport ?? null, denial_reason: reason, attempts },
+              ingestId: null,
+            });
+          } catch (err) {
+            // Fire-and-forget — observability must not break the deferral.
+            console.error(`[canFinalizeBet] adapter-deferral recordDrop error: ${err.message}`);
+          }
+          console.log(`[canFinalizeBet] retry cap reached (attempts=${attempts}) for bet=${String(betId).slice(0,8)} sport=${bet?.sport} — adapter-covered, cap void deferred +24h (RETRY_CAP_ADAPTER_EXEMPT=enforce, ceiling ${RETRY_CAP + RETRY_CAP_EXEMPT_EXTRA})`);
+        } else {
+          console.log(`[canFinalizeBet] cap-void adapter deferral no-op for bet=${String(betId).slice(0,8)} (review-parked or already settled) — left as-is`);
+        }
+        return;
+      }
+      shadowWouldDefer = covered && exemptMode === 'shadow';
+    }
     const voidTx = db.transaction(() => {
       // `AND ${GRADER_ELIGIBLE_WHERE}`: if an operator reverted this bet to
       // needs_review after the grader claimed it, the void is a 0-change no-op —
@@ -1196,6 +1284,22 @@ function scheduleRecheckAfterDenial(betId, reason, minutes = 30) {
           payload: { denial_reason: reason, attempts },
           ingestId: null,
         });
+        if (shadowWouldDefer) {
+          // Measurement only (RETRY_CAP_ADAPTER_EXEMPT=shadow) — gated on the
+          // void ACTUALLY landing so the measured population is exactly the
+          // set enforce would defer (identical WHERE guards on both writes); a
+          // review-parked/settled no-op emits nothing, matching enforce's
+          // no-op. Fire-and-forget, same idiom as emitEventAwareShadow.
+          try {
+            bets.transitionTo({
+              betId,
+              toStage: 'GRADING_ENTER',
+              eventType: 'retry_cap_adapter_shadow',
+              payload: { kind: 'would_defer', void_path: 'retry_cap', sport: bet?.sport ?? null, denial_reason: reason, attempts },
+            });
+          } catch (_) { /* observability must not break grading */ }
+          console.log(`grade.retry_cap_adapter_would_defer betId=${betId} sport=${bet?.sport} attempts=${attempts} reason=${reason}`);
+        }
         console.log(`[canFinalizeBet] retry cap reached (attempts=${attempts}) for bet=${String(betId).slice(0,8)} reason=${reason} — voided with GRADE_BACKOFF_EXHAUSTED`);
       } else {
         console.log(`[canFinalizeBet] retry cap reached for bet=${String(betId).slice(0,8)} but void was a no-op (review-parked) — left as-is`);
