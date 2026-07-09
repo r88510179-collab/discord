@@ -317,6 +317,35 @@ function checkVoided(section, id, expectDeferEvent = 0) {
     check('4m: negative — digits/punctuation in the gap block the match (score cannot hide inside)',
       classifyPendingDropReason('No 2-1 scoreline found for this match') === 'GRADE_PENDING_UNCLASSIFIED'
       && classifyPendingDropReason('No goals for Messi, match found, final score 2-1') === 'GRADE_PENDING_UNCLASSIFIED');
+
+    // v3 widening (2026-07-08 batch 3, live ~19:15-19:18 UTC): two more
+    // production no-data phrasings the batch-2 form misses by design limits —
+    // an ISO date token in the gap (blocked by the letter-only class) and an
+    // 8-word gap (bound was 7). Widened: gap tokens are letter-only OR a full
+    // 3-group date (\d{4}[-/]\d{2}[-/]\d{2}); bound 1–10. The SCORE-GUARD is
+    // the invariant: short digit-dash tokens that read as scores must stay
+    // structurally blocked.
+    const noData6 = 'No MLB game scores or stats for 2026-07-08 found in search results';
+    const noData7 = 'No soccer match scores or Julian Alvarez goal data found in search res…';
+    check('4n: live sample 6 (ISO date token in the gap) → GRADE_AI_PENDING_NO_DATA',
+      classifyPendingDropReason(noData6) === 'GRADE_AI_PENDING_NO_DATA');
+    check('4n: live sample 7 (8-word gap) → GRADE_AI_PENDING_NO_DATA',
+      classifyPendingDropReason(noData7) === 'GRADE_AI_PENDING_NO_DATA');
+
+    // Score-guard negatives: date widening must NOT open a path for
+    // score-shaped digit-dash tokens (two groups, 1-3 digits each — never a
+    // 4-digit first group + third group like a date).
+    check('4o: negative — score-carrying string (no leading "No") → catch-all',
+      classifyPendingDropReason('United States 1-4 Belgium — no stats found in search results') === 'GRADE_PENDING_UNCLASSIFIED');
+    check('4o: negative — bare "No 2-1 scoreline found" stays blocked → catch-all',
+      classifyPendingDropReason('No 2-1 scoreline found') === 'GRADE_PENDING_UNCLASSIFIED');
+    check('4o: negative — 3-digit basketball score in the gap stays blocked → catch-all',
+      classifyPendingDropReason('No recap of the 107-106 thriller found in search results') === 'GRADE_PENDING_UNCLASSIFIED');
+    check('4o: negative — prefixed families keep their own reasons (chain order intact)',
+      classifyPendingDropReason('OFF_DATE_EVIDENCE: evidence dated 2026-07-08 outside 2026-07-06±1d — forced PENDING (model claimed LOSS)') === 'GRADE_DATE_UNVERIFIED'
+      && classifyPendingDropReason('UNVERIFIED_QUOTE: missing evidence_quote — forced PENDING (model claimed WIN). Original: ') === 'GRADE_QUOTE_UNVERIFIED');
+    check('4o: negative — gap beyond the new 10-word bound → catch-all',
+      classifyPendingDropReason('No soccer match scores or stats or goal data or assists whatsoever found') === 'GRADE_PENDING_UNCLASSIFIED');
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

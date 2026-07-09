@@ -3925,19 +3925,33 @@ function classifyPendingDropReason(evidence) {
   } else if (/^AI returned PENDING with no explanation/i.test(ev)) {
     return 'GRADE_AI_PENDING_NO_DATA';
   } else if (/^No (final score|match details|results)\b/i.test(ev)
-      || /^No(?:\s+[A-Za-z'’/-]+){1,7}\s+(?:found|results)\b/i.test(ev)) {
+      || /^No(?:\s+(?:[A-Za-z'’/-]+|\d{4}[-/]\d{2}[-/]\d{2})){1,10}\s+(?:found|results)\b/i.test(ev)) {
     // Free-form LLM no-data phrasings. NOT code-templated, so both forms are
     // deliberately CONSERVATIVE, and both anchored:
     //   1. the three stems observed 2026-07-08 batch 1 ("No final score…" /
     //      "No match details…" / "No results…");
-    //   2. bounded-gap form (batch 2, live samples "No soccer match scores or
-    //      stats found for Ecuador/Mexico…", "No final score or game
-    //      statistics found for Lamine Yamal on 2026-07-05…", "No soccer game
-    //      data or Messi statistics found in search results"): leading "No" +
-    //      1–7 LETTER-ONLY gap words + a found/results terminator. Digits and
-    //      punctuation in the gap block the match, so a string carrying an
-    //      actual score ("No 2-1 scoreline found…", "No goals for Messi,
-    //      match found…") structurally cannot match.
+    //   2. bounded-gap form (batch 2, widened batch 3 — live samples "No
+    //      soccer match scores or stats found for Ecuador/Mexico…", "No MLB
+    //      game scores or stats for 2026-07-08 found in search results", "No
+    //      soccer match scores or Julian Alvarez goal data found in search
+    //      res…"): leading "No" + 1–10 gap tokens + a found/results
+    //      terminator. A gap token is LETTER-ONLY or a full 3-group date
+    //      (\d{4}[-/]\d{2}[-/]\d{2}, e.g. 2026-07-08). The SCORE-GUARD is the
+    //      invariant: any other digit-bearing token blocks the match, so a
+    //      string carrying an actual score ("No 2-1 scoreline found…", "No
+    //      goals for Messi, match found…") structurally cannot match. The
+    //      date shape cannot smuggle a score in: scorelines are TWO
+    //      dash-joined groups of 1–3 digits each ("1-4", "2-1", "107-106"),
+    //      while the admitted shape requires THREE groups whose first is
+    //      exactly 4 digits — no plausible scoreline has a 4-digit component
+    //      (record basketball totals stay 3-digit), let alone a third group.
+    //      Bound 7→10 (batch 3): longest observed gap is 8 ("…or Julian
+    //      Alvarez goal data…"); multi-token player/team names realistically
+    //      add 1–2 more, and the bound is not what excludes the dangerous
+    //      families (the ^No anchor, token classes, and prefixed-family
+    //      branches do that structurally) — it only caps how much free text a
+    //      false positive can ride in on, so +2 headroom over observed does
+    //      not widen the failure modes that matter.
     // Tradeoff: a false positive routes a genuinely unexplained PENDING into
     // NO_DATA (acceptable — same no-data triage bucket); a broad match that
     // swallows future distinct evidence families is not — which is why this
