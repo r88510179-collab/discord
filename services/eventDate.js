@@ -14,9 +14,12 @@
 //   unparseable string.
 //
 // Time-only strings resolve against the bet's created_at calendar date in
-// ET (sportsbook slips print Eastern times); dated formats without a year
-// anchor to created_at's year. Anything else stores NULL — the grader
-// already falls back to created_at when event_date is NULL.
+// ET (sportsbook slips print Eastern times); a leading weekday resolves to
+// the NEXT occurrence of that weekday on/after created_at's ET day (printed
+// game-start days — "Mon 1:05 PM ET" on a Saturday post means Monday);
+// dated formats without a year anchor to created_at's year. Anything else
+// stores NULL — the grader already falls back to created_at when event_date
+// is NULL.
 //
 // A second backstop runs on every PARSED datetime before it is stored: a
 // sanity guard that NULLs values implausibly far from created_at (see
@@ -24,6 +27,16 @@
 // real-but-stale dates (e.g. a 2023 World-Cup fixture on a 2026 bet) from
 // being trusted event_date-first by the grader. NULL — never throw — so the
 // bet still saves and falls back to created_at.
+//
+// EVENT_DATE_SANITY_MODE gates TELEMETRY ONLY, not the guard itself: the
+// NULLing above shipped always-on (#153/#154) and is live prod behavior, so
+// unset/off = byte-identical today (guard NULLs, warn log only). shadow and
+// enforce additionally report each rejection to the caller via
+// opts.onSanityReject so createBet can emit an event_date_sanity_rejected
+// pipeline event carrying the rejected value — the reviewable paper trail the
+// warn log (ephemeral Fly logs) is not. enforce ≡ shadow today; the third
+// state exists so the flag reads like every other tri-state ladder and leaves
+// room if enforcement semantics ever need to diverge from telemetry.
 //
 // recoverHold's backdate path (services/holdReview.js) writes event_date
 // directly from the Discord snowflake — already a valid datetime, and
@@ -38,6 +51,8 @@ const MONTHS = {
   jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
   jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
 };
+
+const WEEKDAYS = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
 
 // Calendar fields of `date` as seen on an ET wall clock.
 function etParts(date) {
@@ -124,9 +139,36 @@ function applyEventDateSanityGuard(date, anchor, raw, opts) {
       `created=${anchor.toISOString()} gapDays=${gapDays.toFixed(1)} rule=out-of-bounds ` +
       `raw="${String(raw).slice(0, 80)}"`,
     );
+    // Surface the rejection to the caller (createBet emits the
+    // event_date_sanity_rejected pipeline event when EVENT_DATE_SANITY_MODE
+    // is shadow/enforce). Fires ONLY for out-of-bounds rejections — an
+    // unparseable string never reaches this guard. The callback must never
+    // break the NULL-never-throw contract.
+    if (opts && typeof opts.onSanityReject === 'function') {
+      try {
+        opts.onSanityReject({
+          value: date.toISOString(),
+          gapDays,
+          raw: String(raw).slice(0, 120),
+        });
+      } catch (_) { /* telemetry must not affect the write */ }
+    }
     return null;
   }
   return date.toISOString();
+}
+
+// EVENT_DATE_SANITY_MODE — strict compare, read per call (injectable raw for
+// tests), unset/anything-else → 'off'. Same tri-state idiom as
+// PIPELINE_IDEM_MODE / EVENT_DATE_SLATE. NOTE the atypical semantics: the
+// guard's NULLing is NOT gated (always-on since #153/#154) — this flag gates
+// only the pipeline-event telemetry on rejections. off = warn log only
+// (byte-identical current behavior); shadow/enforce = also emit one
+// event_date_sanity_rejected pipeline event per rejection (see createBet).
+function resolveEventDateSanityMode(raw = process.env.EVENT_DATE_SANITY_MODE) {
+  if (raw === 'shadow') return 'shadow';
+  if (raw === 'enforce') return 'enforce';
+  return 'off';
 }
 
 /**
@@ -150,22 +192,49 @@ function normalizeEventDateForStorage(raw, createdAt = new Date(), opts = {}) {
   if (!s) return null;
 
   // Time-only: "9:10PM ET" / "3:00 PM ET" — the age-gate poison. Resolve
-  // against created_at's ET calendar date. A leading weekday ("THU 6:29AM ET")
-  // is the slip's post-day label, so it resolves the same way.
-  const timeOnly = s.match(/^(\d{1,2}):(\d{2})\s*(am|pm)\b/i)
-    || s.match(/^(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?,?\s+(\d{1,2}):(\d{2})\s*(am|pm)\b/i);
-  if (timeOnly) {
+  // against created_at's ET calendar date.
+  //
+  // A leading weekday ("Mon 1:05 PM ET" / "Sat, 7:30pm EDT") is the printed
+  // GAME start day: resolve to the NEXT occurrence of that weekday on/after
+  // created_at's ET date (delta 0..6 days — a matching weekday stays on
+  // created_at's own day, so same-day slips and post-day stamps like
+  // "THU 6:29AM ET" on a Thursday post are unchanged). Previously the day
+  // token was DISCARDED and the time re-anchored to the posting day, which
+  // stored a plausible-looking WRONG date for every future-game slip within
+  // the week — worse than NULL, and invisible to the gap guard (adversarial
+  // review, this PR). Known residual: a throwback repost labeled with a PAST
+  // weekday resolves forward instead of back — wrong either way, in-bounds
+  // either way; accepted (rare, and the old behavior was no better).
+  const bareTime = s.match(/^(\d{1,2}):(\d{2})\s*(am|pm)\b/i);
+  const dowTime = bareTime ? null
+    : s.match(/^(sun|mon|tue|wed|thu|fri|sat)[a-z]*\.?,?\s+(\d{1,2}):(\d{2})\s*(am|pm)\b/i);
+  if (bareTime || dowTime) {
     if (!anchorOk) return null;
     const d = etParts(anchor);
+    let day = d.day;
+    if (dowTime) {
+      // Weekday of the anchor's ET calendar date (TZ-independent given Y/M/D).
+      const anchorDow = new Date(Date.UTC(d.year, d.month - 1, d.day)).getUTCDay();
+      day += (WEEKDAYS[dowTime[1].toLowerCase()] - anchorDow + 7) % 7;
+      // etWallClockToUtc normalizes day/month/year overflow AND applies the
+      // TARGET day's DST offset (same contract the tomorrow-branch relies on).
+    }
+    const hour = bareTime ? bareTime[1] : dowTime[2];
+    const minute = bareTime ? bareTime[2] : dowTime[3];
+    const ampm = bareTime ? bareTime[3] : dowTime[4];
     return applyEventDateSanityGuard(
-      etWallClockToUtc(d.year, d.month, d.day, to24h(timeOnly[1], timeOnly[3]), parseInt(timeOnly[2], 10)),
+      etWallClockToUtc(d.year, d.month, day, to24h(hour, ampm), parseInt(minute, 10)),
       anchor, raw, opts);
   }
 
-  // "Thu Apr 2 @ 10:30pm" / "Mon Apr 2 10:30pm" — month+day but no year.
-  // Anchor to created_at's year; a date that lands >7d before the anchor is
-  // assumed to wrap into the next year (mirrors the read-side normalizer).
-  let m = s.match(/\w{3,}\s+(\w{3})\s+(\d{1,2})(?:\s*@\s*|\s+)(\d{1,2}):?(\d{0,2})\s*(am|pm)/i);
+  // "Thu Apr 2 @ 10:30pm" / "Mon Apr 2 10:30pm" / "Apr 12 5:00 PM" —
+  // month+day but no year. The leading weekday is OPTIONAL (the bare form is
+  // one of the prompt directives' own exemplars; it previously fell to the
+  // generic Date() branch, parsed as year 2001, and was always guard-NULLed —
+  // #154's documented "safe widening gap", closed here). Anchor to
+  // created_at's year; a date that lands >7d before the anchor is assumed to
+  // wrap into the next year (mirrors the read-side normalizer).
+  let m = s.match(/(?:\w{3,}\.?,?\s+)?(\w{3})[a-z]*\.?\s+(\d{1,2})(?:\s*@\s*|\s+)(\d{1,2}):?(\d{0,2})\s*(am|pm)/i);
   if (m && MONTHS[m[1].toLowerCase()]) {
     if (!anchorOk) return null;
     let year = etParts(anchor).year;
@@ -219,6 +288,7 @@ function normalizeEventDateForStorage(raw, createdAt = new Date(), opts = {}) {
 module.exports = {
   normalizeEventDateForStorage,
   applyEventDateSanityGuard,
+  resolveEventDateSanityMode,
   etWallClockToUtc,
   etParts,
   EVENT_DATE_GUARD_MIN_GAP_DAYS,

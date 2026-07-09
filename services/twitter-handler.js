@@ -186,7 +186,12 @@ async function handleTwitterWebhookPayload(payload, client) {
 
           if (parsed && parsed.bets?.length > 0 && parsed.is_bet !== false && parsed.type !== 'ignore') {
             const bet = parsed.bets[0];
-            pick = { sport: bet.sport || 'Unknown', type: bet.bet_type || 'straight', description: bet.description, odds: bet.odds ? String(bet.odds) : null, units: bet.units || 1, legs: bet.legs || [], is_ladder: bet.is_ladder || false, ladder_step: bet.ladder_step || 0 };
+            // event_date rides along: the vision prompt extracts the slip's
+            // printed date/time verbatim (ai.js EVENT DATE/TIME rule) and
+            // normalizeEventDateForStorage resolves/guards it at insert.
+            // Dropping it here is why twitter_vision (the largest source
+            // bucket) was 100% NULL — see docs/diagnosis/EVENT_DATE_DIAGNOSIS.
+            pick = { sport: bet.sport || 'Unknown', type: bet.bet_type || 'straight', description: bet.description, odds: bet.odds ? String(bet.odds) : null, units: bet.units || 1, event_date: bet.event_date || null, legs: bet.legs || [], is_ladder: bet.is_ladder || false, ladder_step: bet.ladder_step || 0 };
             legs = bet.legs || [];
             if (/\b(sgp|same\s*game\s*parlay)\b/i.test(text) && pick.type === 'straight') pick.type = 'parlay';
             recordStage({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'PARSED', eventType: 'STAGE_ENTER', payload: { source: 'vision', legCount: legs.length, betType: pick.type } });
@@ -285,7 +290,10 @@ async function handleTwitterWebhookPayload(payload, client) {
             recordDrop({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'DROPPED', dropReason: 'DUPLICATE_REPOST', payload: { window: '12h', handle: cleanHandle, prior_bet_id: priorStep.id, ladder_step: step.ladder_step || 0 } });
             continue;
           }
-          const saved = createBetWithLegs({ capper_id: capper.id, sport: pick.sport || 'Unknown', bet_type: 'straight', description: step.description, odds: stepOdds, units: step.units || 1, source: betSource, source_url: sourceUrl, source_tweet_id: tweetId, source_tweet_handle: cleanHandle, raw_text: text.slice(0, 500), review_status: 'needs_review', is_ladder: 1, ladder_step: step.ladder_step || 0 }, []);
+          // event_date: a ladder's steps ride the same slip/game, so each step
+          // inherits the pick-level extracted date (undefined on the text path
+          // → write gate stores NULL, byte-identical to before).
+          const saved = createBetWithLegs({ capper_id: capper.id, sport: pick.sport || 'Unknown', bet_type: 'straight', description: step.description, odds: stepOdds, units: step.units || 1, event_date: pick.event_date || null, source: betSource, source_url: sourceUrl, source_tweet_id: tweetId, source_tweet_handle: cleanHandle, raw_text: text.slice(0, 500), review_status: 'needs_review', is_ladder: 1, ladder_step: step.ladder_step || 0 }, []);
           if (saved && !saved._deduped) ladderBets.push(saved);
         }
         if (ladderBets.length > 0 && client) {
@@ -325,7 +333,10 @@ async function handleTwitterWebhookPayload(payload, client) {
               recordDrop({ ingestId, sourceType: 'twitter', sourceRef: tweetId, stage: 'DROPPED', dropReason: 'DUPLICATE_REPOST', payload: { window: '12h', handle: cleanHandle, prior_bet_id: priorPick.id, resplit: true } });
               continue;
             }
-            const saved = createBetWithLegs({ capper_id: capper.id, sport: p.sport || pick.sport || 'Unknown', bet_type: 'straight', description: p.description, odds: p.odds ?? null, units: p.units || 1, source: betSource, source_url: sourceUrl, source_tweet_id: tweetId, source_tweet_handle: cleanHandle, raw_text: (p.description || text).slice(0, 500), review_status: 'needs_review' }, []);
+            // event_date: re-split picks inherit the parent slip's extracted
+            // date — the same value the un-split parlay would have stored, so
+            // the re-split is date-neutral vs. staging the parlay as-is.
+            const saved = createBetWithLegs({ capper_id: capper.id, sport: p.sport || pick.sport || 'Unknown', bet_type: 'straight', description: p.description, odds: p.odds ?? null, units: p.units || 1, event_date: pick.event_date || null, source: betSource, source_url: sourceUrl, source_tweet_id: tweetId, source_tweet_handle: cleanHandle, raw_text: (p.description || text).slice(0, 500), review_status: 'needs_review' }, []);
             if (saved && !saved._deduped) sheetBets.push(saved);
           }
           for (const sb of sheetBets) {
@@ -358,7 +369,10 @@ async function handleTwitterWebhookPayload(payload, client) {
       // Normal bet. `wager`: the P1 dollar-stake correction (services/ai.js
       // reassignDollarStakeUnits) moves a mis-parsed "$5,000" out of units into
       // pick.wager; persist it so the dollar stake is recorded (units stays sane).
-      const saved = createBetWithLegs({ capper_id: capper.id, sport: pick.sport || 'Unknown', bet_type: pick.type || 'straight', description: pick.description, odds: normalOdds, units: pick.units || 1, wager: pick.wager ?? null, source: betSource, source_url: sourceUrl, source_tweet_id: tweetId, source_tweet_handle: cleanHandle, raw_text: text.slice(0, 500), review_status: 'needs_review', is_ladder: pick.is_ladder || false, ladder_step: pick.ladder_step || 0 }, legs);
+      // `event_date`: present only on the vision path (pick rebuilt from the
+      // parseBetText bet above); the text path (extractPickFromTweet) has no
+      // date field in its schema → undefined → write gate stores NULL.
+      const saved = createBetWithLegs({ capper_id: capper.id, sport: pick.sport || 'Unknown', bet_type: pick.type || 'straight', description: pick.description, odds: normalOdds, units: pick.units || 1, wager: pick.wager ?? null, event_date: pick.event_date || null, source: betSource, source_url: sourceUrl, source_tweet_id: tweetId, source_tweet_handle: cleanHandle, raw_text: text.slice(0, 500), review_status: 'needs_review', is_ladder: pick.is_ladder || false, ladder_step: pick.ladder_step || 0 }, legs);
 
       if (saved && !saved._deduped) {
         if (client) {

@@ -2,7 +2,7 @@ const Database = require('better-sqlite3');
 const path = require('path');
 const crypto = require('crypto');
 const { runMigrations } = require('./migrator');
-const { normalizeEventDateForStorage } = require('./eventDate');
+const { normalizeEventDateForStorage, resolveEventDateSanityMode } = require('./eventDate');
 const { canonicalizeSport } = require('./sportNormalize');
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'bettracker.db');
@@ -370,6 +370,64 @@ function getOrCreateCapperByTwitter(handle) {
   return stmts.getCapperById.get(id);
 }
 
+// ── EVENT_DATE_SANITY_MODE telemetry (services/eventDate.js) ─────────────────
+// When the write-gate's sanity guard NULLs an implausible event_date, emit one
+// event_date_sanity_rejected pipeline event carrying the rejected value — the
+// queryable paper trail behind the guard's ephemeral warn log. Gated on
+// EVENT_DATE_SANITY_MODE (unset/off → no event, byte-identical; shadow/enforce
+// → emit; the guard's NULLing itself is ALWAYS-ON and ungated, shipped
+// #153/#154). Fire-and-forget: never throws, never affects the insert.
+// pipeline-events is LAZY-required (memoized) — a top-level require would be a
+// load-order break: pipeline-events requires ./database, so requiring it while
+// database.js is still loading hands it a partial exports object with db
+// undefined (same rationale as services/slateResplit.js:244).
+let _recordStageForSanity = null;
+let _makeIngestIdForSanity = null;
+function emitEventDateSanityRejected(betId, betData, reject) {
+  try {
+    if (resolveEventDateSanityMode() === 'off') return;
+    if (!_recordStageForSanity) {
+      const pe = require('./pipeline-events');
+      _recordStageForSanity = pe.recordStage;
+      _makeIngestIdForSanity = pe.makeIngestId;
+    }
+    // writeRow requires an ingestId for non-grading sources. Derive it from
+    // the bet's source refs; a bet with neither (e.g. a manual insert) is
+    // skipped — the guard's warn log still records it.
+    let sourceType = null;
+    let sourceRef = null;
+    if (betData.source_message_id) {
+      sourceType = 'discord';
+      sourceRef = betData.source_message_id;
+    } else if (betData.source_tweet_id) {
+      sourceType = 'twitter';
+      sourceRef = betData.source_tweet_id;
+    } else {
+      return;
+    }
+    _recordStageForSanity({
+      ingestId: _makeIngestIdForSanity(sourceType, sourceRef),
+      betId,
+      sourceType,
+      sourceRef,
+      stage: 'STAGED',
+      eventType: 'event_date_sanity_rejected',
+      payload: {
+        where: 'createBet',
+        source: betData.source || 'manual',
+        rejected_value: reject.value,
+        gap_days: Math.round(reject.gapDays * 10) / 10,
+        raw: reject.raw,
+        min_gap_days: require('./eventDate').EVENT_DATE_GUARD_MIN_GAP_DAYS,
+        max_gap_days: require('./eventDate').EVENT_DATE_GUARD_MAX_GAP_DAYS,
+        mode: resolveEventDateSanityMode(),
+      },
+    });
+  } catch (err) {
+    console.error(`[eventDateSanity] telemetry emit failed (bet=${String(betId).slice(0, 8)}): ${err.message}`);
+  }
+}
+
 // ── Bet CRUD ────────────────────────────────────────────────
 function createBet(betData) {
   const fingerprint = buildFingerprint(betData);
@@ -379,6 +437,10 @@ function createBet(betData) {
   }
 
   const id = uid();
+  // Set by the sanity guard's onSanityReject callback when it NULLs an
+  // implausible event_date during the insert below; consumed after a
+  // SUCCESSFUL insert (a dedup/race return never emits).
+  let sanityReject = null;
   try {
     stmts.insertBet.run(id,
       // Normalize sport casing at the write site so any future off-casing source
@@ -393,7 +455,10 @@ function createBet(betData) {
       // datetimes implausibly far from created_at (>+60d or <-2d gap) so the
       // vision model's stale-year dates can't poison the grader. The id is
       // passed for the guard's warn log. See services/eventDate.js.
-      normalizeEventDateForStorage(betData.event_date, new Date(), { betId: id }),
+      normalizeEventDateForStorage(betData.event_date, new Date(), {
+        betId: id,
+        onSanityReject: (info) => { sanityReject = info; },
+      }),
       betData.source || 'manual',
       betData.source_url || null, betData.source_channel_id || null,
       betData.source_message_id || null, fingerprint, betData.raw_text || null,
@@ -425,6 +490,9 @@ function createBet(betData) {
       db.prepare("UPDATE bets SET grading_state = 'ready' WHERE id = ?").run(id);
     } catch (_) {}
   }
+  // EVENT_DATE_SANITY_MODE telemetry — after the insert landed, so the event
+  // always refers to a real row (dedup/race returns exit above this point).
+  if (sanityReject) emitEventDateSanityRejected(id, betData, sanityReject);
   return { ...stmts.getBet.get(id), _deduped: false };
 }
 

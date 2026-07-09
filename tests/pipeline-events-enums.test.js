@@ -143,6 +143,16 @@ run('REINGEST_* stages are registered in STAGES', () => {
   }
 });
 
+// EVENT_DATE_SANITY_MODE telemetry: createBet emits one row per write-gate
+// sanity-guard rejection (services/database.js emitEventDateSanityRejected).
+// Registered so the warn-only write-boundary tripwire stays quiet.
+run('event_date_sanity_rejected is registered in EVENT_TYPES', () => {
+  assert.ok(
+    pe.EVENT_TYPES.includes('event_date_sanity_rejected'),
+    'event_date_sanity_rejected missing from EVENT_TYPES',
+  );
+});
+
 // ── (b) drift: unknown value warns ONCE, does NOT throw, does NOT skip ──
 run('unknown stage → warns, does NOT throw, row STILL written', () => {
   const before = countRows();

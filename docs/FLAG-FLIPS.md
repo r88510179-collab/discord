@@ -69,3 +69,21 @@ operator-only on those paths (WC-3 policy). #191 grace + #193 deferral run first
 
 ## 2026-07-08 — REAPER_MODE: (unset) → shadow
 PR #194. Shadow measures would-route population (reaper_shadow events; dedupe zombie_sweep rows by bet — they re-emit per cycle) across the 3 exhaustion writers + quarantine zombie sweep. Enforce decision after volume review. Note: the event_settling sweep-hold (EVENT_AWARE_RECHECK unblock) is gated on REAPER_MODE=enforce — the EVENT_AWARE enforce flip chain is now: REAPER shadow review → REAPER enforce → EVENT_AWARE enforce.
+
+## 2026-07-08 — EVENT_DATE_SANITY_MODE: introduced, NOT yet set (unset = off)
+New flag (event_date population PR). ⚠️ ATYPICAL semantics — this flag gates TELEMETRY ONLY: the
+write-gate sanity guard itself (NULL an extracted event_date outside −2d..+60d of created_at,
+`services/eventDate.js`) shipped ALWAYS-ON in #153/#154 and is live prod behavior. Unset/off is
+byte-identical to today: guard NULLs + warn-logs, no pipeline event. `shadow` additionally emits one
+`event_date_sanity_rejected` pipeline_events row per **createBet-path** rejection carrying the
+rejected value, gap-days, and the raw extractor string — the queryable reject trail the ephemeral
+Fly warn log is not
+(review: `SELECT payload FROM pipeline_events WHERE event_type='event_date_sanity_rejected'`).
+`enforce` ≡ shadow today (enforcement pre-dates the flag; the third state keeps the ladder uniform).
+Flip plan: `shadow` after deploy → review reject volume/shape (expect near-zero: the ingest paths
+now instruct verbatim-copy-never-guess, and the guard is the backstop) → optionally `enforce` for
+ledger cleanliness; the bounds are tuned from the reject rows if legitimate futures ever clip.
+Two review caveats: (1) the §9 grader write-back's guard rejections do NOT emit (that path passes no
+callback — `[eventDateWriteback] … guard NULLed` in logs is its trail), so the SQL slightly
+undercounts total guard firings; (2) a days-late 🔄 re-ingest of an old slip re-extracts a stale
+printed date and legitimately rejects — a row there is the guard working, not extractor drift.

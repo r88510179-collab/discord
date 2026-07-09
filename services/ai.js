@@ -1322,8 +1322,9 @@ Output strictly valid JSON. Do not include markdown formatting, do not include \
 
 async function parseBetSlipImage(imageBase64, mediaType = 'image/png', opts = {}) {
   const sys = `Bet slip OCR expert. Recognize Hard Rock Bet, DraftKings, FanDuel, BetMGM, Caesars, Onyx.
-Return ONLY JSON: {"sportsbook":"Hard Rock Bet","bets":[{"sport":"UCL","league":"Champions League","bet_type":"straight","description":"Over 1.5 1H Goals - Corum vs Erokspor","odds":130,"units":1.0,"stake_amount":14.85,"potential_payout":34.15,"legs":[]}]}
+Return ONLY JSON: {"sportsbook":"Hard Rock Bet","bets":[{"sport":"UCL","league":"Champions League","bet_type":"straight","description":"Over 1.5 1H Goals - Corum vs Erokspor","odds":130,"units":1.0,"stake_amount":14.85,"potential_payout":34.15,"event_date":"Today 7:10 PM ET","legs":[]}]}
 Use specific league names (UCL, EPL, La Liga, etc) not generic Soccer.
+EVENT DATE/TIME: If the slip shows a game date or start time (e.g. "Today 7:10 PM ET", "Mon 1:05 PM ET", "Apr 12 5:00 PM"), copy it VERBATIM into "event_date". If no date/time is visible, set "event_date": null. NEVER invent, infer, or compute a date — copy only what is shown.
 Transcribe team and player names EXACTLY as printed on the slip. Never expand a nickname to a fuller or more "official" name, and never add a city, region, or country that is not visible in the image (e.g. keep "Hanwha Eagles" — do NOT write "Hanwha Philadelphia Eagles"; keep "Samsung Lions" — do NOT write "Samsung Detroit Lions").`;
 
   // Image-only call: require image-capable providers. Text-only fallback
