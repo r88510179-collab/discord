@@ -69,10 +69,36 @@ check(
   `got ${normalizeEventDateForStorage('9:10PM ET', new Date('2026-06-02T02:00:00Z'))}`,
 );
 
+// Weekday-prefixed times resolve to the NEXT occurrence of that weekday
+// on/after created_at's ET date (event_date population PR). The old behavior
+// DISCARDED the day token — "THU 6:29AM ET" on this Monday anchor used to
+// store the Monday, a plausible-looking wrong date the gap guard can't see.
 check(
-  'weekday-prefixed time ("THU 6:29AM ET") resolves on created_at ET date',
-  normalizeEventDateForStorage('THU 6:29AM ET', new Date('2026-06-01T12:00:00Z')) === '2026-06-01T10:29:00.000Z',
+  'weekday-prefixed time ("THU 6:29AM ET") on a Monday anchor resolves to THAT Thursday',
+  normalizeEventDateForStorage('THU 6:29AM ET', new Date('2026-06-01T12:00:00Z')) === '2026-06-04T10:29:00.000Z',
   `got ${normalizeEventDateForStorage('THU 6:29AM ET', new Date('2026-06-01T12:00:00Z'))}`,
+);
+check(
+  'matching weekday stays on created_at\'s own ET day (post-day stamps unchanged)',
+  normalizeEventDateForStorage('THU 6:29AM ET', new Date('2026-06-04T12:00:00Z')) === '2026-06-04T10:29:00.000Z',
+  `got ${normalizeEventDateForStorage('THU 6:29AM ET', new Date('2026-06-04T12:00:00Z'))}`,
+);
+check(
+  '"Mon 1:05 PM ET" posted Saturday resolves to Monday (the directive exemplar)',
+  normalizeEventDateForStorage('Mon 1:05 PM ET', new Date('2026-07-04T18:00:00Z')) === '2026-07-06T17:05:00.000Z',
+  `got ${normalizeEventDateForStorage('Mon 1:05 PM ET', new Date('2026-07-04T18:00:00Z'))}`,
+);
+check(
+  '"Sat, 7:30pm EDT" (HRB comma form) same-day stays put',
+  normalizeEventDateForStorage('Sat, 7:30pm EDT', new Date('2026-07-04T18:00:00Z')) === '2026-07-04T23:30:00.000Z',
+  `got ${normalizeEventDateForStorage('Sat, 7:30pm EDT', new Date('2026-07-04T18:00:00Z'))}`,
+);
+// Weekday-forward across a DST boundary: Sun Nov 1 2026 is the fall-back day
+// (EST), so 1:00 PM ET = 18:00Z — the TARGET day's offset, not the anchor's.
+check(
+  'weekday-forward across fall-back applies the target day\'s DST offset',
+  normalizeEventDateForStorage('Sun 1:00 PM ET', new Date('2026-10-31T18:00:00Z')) === '2026-11-01T18:00:00.000Z',
+  `got ${normalizeEventDateForStorage('Sun 1:00 PM ET', new Date('2026-10-31T18:00:00Z'))}`,
 );
 
 check(
@@ -91,6 +117,20 @@ check(
   '"4/12/26 5:00 PM" parses as ET wall clock',
   normalizeEventDateForStorage('4/12/26 5:00 PM', new Date('2026-04-01T12:00:00Z')) === '2026-04-12T21:00:00.000Z',
   `got ${normalizeEventDateForStorage('4/12/26 5:00 PM', new Date('2026-04-01T12:00:00Z'))}`,
+);
+
+// Bare month+day (no weekday) — #154's documented "safe widening gap", closed
+// by the event_date population PR: "Apr 12 5:00 PM" used to fall to the
+// generic Date() branch, parse as YEAR 2001, and get guard-NULLed.
+check(
+  'bare "Apr 12 5:00 PM" anchors to created_at year, ET wall clock',
+  normalizeEventDateForStorage('Apr 12 5:00 PM', new Date('2026-04-01T12:00:00Z')) === '2026-04-12T21:00:00.000Z',
+  `got ${normalizeEventDateForStorage('Apr 12 5:00 PM', new Date('2026-04-01T12:00:00Z'))}`,
+);
+check(
+  'bare month+day far in the past wraps forward and is guard-NULLed (throwback → safe NULL)',
+  normalizeEventDateForStorage('Apr 12 5:00 PM', new Date('2026-06-25T12:00:00Z')) === null,
+  `got ${normalizeEventDateForStorage('Apr 12 5:00 PM', new Date('2026-06-25T12:00:00Z'))}`,
 );
 
 check(

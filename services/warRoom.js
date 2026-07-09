@@ -457,14 +457,14 @@ async function handleWarRoomInteraction(interaction) {
               description: legDesc,
               odds: originalBet.odds || null,
               units: originalBet.units || 1,
-              // Singles inherit the parent's event_date (previously dropped —
-              // splits lost the slip's extracted game date). createBet re-gates
-              // it against NOW, not the parent's created_at: a split run days
-              // after the game pushes the gap past the -2d bound and the guard
-              // stores NULL — exactly the pre-threading behavior, so this is
-              // at-worst-equal. The singles' created_at is the split moment
-              // either way (createBet has no created_at override).
-              event_date: originalBet.event_date || null,
+              // event_date DELIBERATELY NOT inherited (adversarial-review
+              // decision, event_date population PR): war_split exists because
+              // the parent was mis-parsed / its legs are independent picks —
+              // often different games on different days — so the parent's
+              // single bet-level date is least trustworthy exactly here, and
+              // an in-bounds wrong day would grade the wrong box score (Gate 4
+              // tolerance is ±1d). NULL keeps the designed-safe created_at
+              // fallback; the operator can /grade override a specific date.
               source: originalBet.source,
               source_url: originalBet.source_url,
               source_channel_id: originalBet.source_channel_id,
@@ -504,9 +504,9 @@ async function handleWarRoomInteraction(interaction) {
             description: leg.description,
             odds: leg.odds || originalBet.odds || null,
             units: originalBet.units || 1,
-            // Parent's event_date, re-gated at insert — see the desc-split
-            // branch above for the late-split NULL semantics.
-            event_date: originalBet.event_date || null,
+            // event_date deliberately not inherited — see the desc-split
+            // branch above (split legs are independent picks; the parent's
+            // one date is wrong for off-day legs and invisible to the guard).
             source: originalBet.source,
             source_url: originalBet.source_url,
             source_channel_id: originalBet.source_channel_id,

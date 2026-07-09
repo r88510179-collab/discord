@@ -75,15 +75,15 @@ New flag (event_date population PR). ⚠️ ATYPICAL semantics — this flag gat
 write-gate sanity guard itself (NULL an extracted event_date outside −2d..+60d of created_at,
 `services/eventDate.js`) shipped ALWAYS-ON in #153/#154 and is live prod behavior. Unset/off is
 byte-identical to today: guard NULLs + warn-logs, no pipeline event. `shadow` additionally emits one
-`event_date_sanity_rejected` pipeline_events row per rejection carrying the rejected value, gap-days,
-and the raw extractor string — the queryable reject trail the ephemeral Fly warn log is not
+`event_date_sanity_rejected` pipeline_events row per **createBet-path** rejection carrying the
+rejected value, gap-days, and the raw extractor string — the queryable reject trail the ephemeral
+Fly warn log is not
 (review: `SELECT payload FROM pipeline_events WHERE event_type='event_date_sanity_rejected'`).
 `enforce` ≡ shadow today (enforcement pre-dates the flag; the third state keeps the ladder uniform).
 Flip plan: `shadow` after deploy → review reject volume/shape (expect near-zero: the ingest paths
 now instruct verbatim-copy-never-guess, and the guard is the backstop) → optionally `enforce` for
 ledger cleanliness; the bounds are tuned from the reject rows if legitimate futures ever clip.
-Review caveat: a `war_split` of a stale parlay (or a days-late re-ingest) re-gates the parent's
-INHERITED event_date against the split moment, so each split single past the −2d bound emits one
-rejection row that looks like an extractor stale-date (clean ISO `raw`, parent's `source`). Storage
-is unchanged either way (NULL, the pre-threading behavior) — discount those rows when eyeballing
-volume; they cluster on one `source_message_id` (the parent's) at the same second.
+Two review caveats: (1) the §9 grader write-back's guard rejections do NOT emit (that path passes no
+callback — `[eventDateWriteback] … guard NULLed` in logs is its trail), so the SQL slightly
+undercounts total guard firings; (2) a days-late 🔄 re-ingest of an old slip re-extracts a stale
+printed date and legitimately rejects — a row there is the guard working, not extractor drift.

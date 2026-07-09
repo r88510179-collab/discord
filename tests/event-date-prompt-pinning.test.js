@@ -24,8 +24,12 @@
 // twitter_vision, the single largest source bucket, was 100% NULL):
 //   D. services/twitter-handler.js — the vision pick rebuild + all three
 //      createBetWithLegs payloads carry event_date.
-//   E. services/warRoom.js — both war_split createBet payloads inherit the
-//      parent's event_date.
+//   E. services/warRoom.js — war_split singles deliberately do NOT inherit
+//      the parent's event_date (adversarial-review decision: split legs are
+//      independent picks, often different days; the parent's one date is
+//      wrong for off-day legs, sits inside the ±(-2..+60d) guard, and Gate 4's
+//      ±1d tolerance passes it → silent wrong-game grade). Pinned as ABSENCE
+//      so a future "fix" can't re-thread it without meeting this rationale.
 // (Source-level pins, matching the repo's driveable-surface reality: the
 // tweet pipeline has no end-to-end harness — tests/twitter-repost-dedup.test.js
 // exercises exported helpers only. The ocrFirstWiring threading has a real
@@ -178,15 +182,25 @@ check('every createBetWithLegs payload carries event_date (ladder, re-split, nor
   }
 });
 
-// ── E. warRoom split threading ───────────────────────────────
-console.log('\nE. warRoom war_split event_date threading');
+// ── E. warRoom split NON-threading (deliberate) ──────────────
+console.log('\nE. warRoom war_split event_date non-inheritance (deliberate)');
 const WR_SRC = fs.readFileSync(path.join(__dirname, '..', 'services', 'warRoom.js'), 'utf8');
 
-check('both war_split createBet payloads inherit the parent event_date', () => {
+check('war_split payloads do NOT inherit the parent event_date (ABSENCE pin)', () => {
+  // Split legs are independent picks, often on different days — the parent's
+  // single date would be an in-bounds WRONG anchor for off-day legs (Gate 4
+  // tolerance ±1d passes it → silent wrong-game grade). NULL keeps the
+  // designed-safe created_at fallback. Do not re-thread without revisiting
+  // that rationale (documented at both payload sites in warRoom.js).
   assert.strictEqual(
-    countOccurrences(WR_SRC, 'event_date: originalBet.event_date || null'),
-    2,
-    'expected the inherit line in BOTH split branches (desc-split + structured-legs)',
+    countOccurrences(WR_SRC, 'event_date: originalBet.event_date'),
+    0,
+    'war_split must NOT inherit the parent event_date — see the rationale comments in warRoom.js',
+  );
+  assert.strictEqual(
+    countOccurrences(WR_SRC, 'event_date DELIBERATELY NOT inherited'),
+    1,
+    'the rationale comment must stay with the desc-split payload',
   );
 });
 check('untracked-win payload stays date-less (no parent bet exists there)', () => {
