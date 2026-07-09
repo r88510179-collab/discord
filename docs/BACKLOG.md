@@ -1735,3 +1735,23 @@ Full read-only diagnosis at `docs/diagnosis/EVENT_DATE_DIAGNOSIS-2026-06-25.md` 
 - **GEMMA_SLIP_PROMPT has no date column** — the Cerebras parity directive is dead-in-practice (its input format carries no date); add a DATE column to the PICK format if the Gemma fallback is ever re-enabled (dormant: `GEMMA_FALLBACK_DISABLED=true`).
 - **Text-path stance** — the regex fast-path (`ai.js regexParseBet`) and discord/DubClub text bets stay `event_date: null` by design: no NLP date extraction; the `parseBetText` directive already covers text picks that print a time, and everything else falls back to created_at (designed-safe).
 - `EVENT_DATE_SLATE=enforce` remains the consumer flip, still gated on population coverage + the recoverHold format fix above. Interacts with: Gate 4 firings, GRADE_TOO_RECENT noise, capper-class anchoring, event-aware recheck targeting.
+
+## Dial observability gaps (opened 2026-07-09, from ladder dials probe)
+
+### UNITS_SANITY_MODE=enforce is live with console.warn-only observability
+`resolveUnitsSanityMode` (services/database.js:181, read at :707) is `enforce` in-container,
+but its only emission is an ephemeral `console.warn UNITS_SANITY_WOULD_FIRE|mode=…|units=…|max=…`
+(database.js:712) — no pipeline_events row, no grading_audit marker. Two questions:
+(1) confirm the enforce flip was intentional (no FLAG-FLIPS entry found for it);
+(2) an enforce gate actively clamping/rejecting stakes should have a durable, queryable
+sink like every other gate. Fix: emit one pipeline_events row alongside the warn
+(same idiom as retry_cap_adapter_shadow). Until then the only audit trail is Fly log grep.
+
+### EVENT_DATE_SLATE=shadow dial read 0 rows in 7d — emit literal unconfirmed
+Container has `EVENT_DATE_SLATE=shadow`, but the 2026-07-09 all-table marker probe
+(markers incl. `event_date_slate`) found zero matching rows in any table. Either the
+shadow path hasn't fired in 7d (possible — gated on mixed-slate ingest shapes) or its
+emission uses a different literal/sink than assumed. Before trusting this dial for the
+enforce ladder: grep the emit site in services/eventDate.js / services/slateResplit.js
+for the exact event_type/payload literal, re-probe with that literal, and only then
+interpret 0 as "hasn't fired" rather than "can't see it."
