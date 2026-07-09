@@ -1777,6 +1777,23 @@ rows; (b) decide whether operator bulk-grade scripts (shadow-regrade / tierb / p
 family) should clear review_status at write time; (c) separately, the 286 pending
 needs_review rows are the real war-room queue depth — review whether it's being worked.
 
+### Stuck-pending >24h triage — CLOSED 2026-07-09, zero new bugs (session-note "111 stuck" was stale)
+Full readonly sweep of the 361 bets with result='pending' older than 24h. Every row lands in a known class:
+- **246 needs_review** (223 ready / 22 backoff / 1 done) — grader-hidden war-room queue by design; same
+  action as the item above (queue is unworked, not stuck).
+- **109 confirmed backoff, 100% with future grading_next_attempt_at** — actively cycling, not wedged.
+  Sport mix (Soccer 66 / MLB-prop-parlays 19 / World Cup 13 / Tennis 8) is exactly the S-arc
+  searchless / props-in-covered-sports pool — existing source-path arc, nothing new.
+- **6 done+pending unmodeled-sport parks** (KBO/WNBA/Lacrosse/FIBA/MULTI/WC-Soccer) — by design per
+  GRADE_MANUAL_REVIEW_UNMODELED (2026-06-16): result stays pending for a human, sweeper-safe.
+- **1 unsplit-card park** (8c671e70, NBA, duplicated-leg card) — deliberately parked per its
+  grade_reason ("legs not split; parked for a human to split/grade") after 11 attempts,
+  GRADING_DROPPED 2026-07-03. By design.
+- **11 at 15+ attempts, all with near-future next_attempt** — cycling, not wedged; the documented
+  non-uniform retry-cap behavior (cap only fires on the denial branch). Existing item.
+Do not re-open "stuck pending" as a standalone investigation — the lever is (1) working the
+needs_review queue and (2) the S-arc source paths, both already tracked.
+
 ## SLATE_RESPLIT cutover verdict: STAY SHADOW (spot-check 2026-07-09, n=55 of 57 events)
 Full payload review of all `slate_resplit_shadow` pipeline_events (2026-07-04 → 07-09).
 wouldSplit=true: 14. Of those ~5 are false/garbage splits; also a false-NEGATIVE class.
