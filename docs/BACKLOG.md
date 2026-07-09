@@ -1741,20 +1741,41 @@ Full read-only diagnosis at `docs/diagnosis/EVENT_DATE_DIAGNOSIS-2026-06-25.md` 
 ### UNITS_SANITY_MODE=enforce is live with console.warn-only observability
 `resolveUnitsSanityMode` (services/database.js:181, read at :707) is `enforce` in-container,
 but its only emission is an ephemeral `console.warn UNITS_SANITY_WOULD_FIRE|mode=…|units=…|max=…`
-(database.js:712) — no pipeline_events row, no grading_audit marker. Two questions:
-(1) confirm the enforce flip was intentional (no FLAG-FLIPS entry found for it);
-(2) an enforce gate actively clamping/rejecting stakes should have a durable, queryable
-sink like every other gate. Fix: emit one pipeline_events row alongside the warn
-(same idiom as retry_cap_adapter_shadow). Until then the only audit trail is Fly log grep.
+(database.js:712) — no pipeline_events row, no grading_audit marker.
+**2026-07-09 code-read correction:** enforce does NOT clamp/reject/mutate units — it clones
+betData with `review_status='needs_review'` (database.js:716), diverting the insert to the
+war-room human queue. The divert is real and correct; the gap is notification only.
+**Live check 2026-07-09:** zero UNITS_SANITY firings observed — every recent needs_review
+row has units=1 (parked by the Twitter-relay `needs_review` stamp, not this tripwire).
+Remaining: (1) confirm the enforce flip was intentional (no FLAG-FLIPS entry found for it);
+(2) emit one pipeline_events row alongside the warn (same idiom as retry_cap_adapter_shadow)
+so firings are queryable. Until then the only audit trail is Fly log grep. Low urgency —
+gate has never fired.
 
-### EVENT_DATE_SLATE=shadow dial read 0 rows in 7d — emit literal unconfirmed
-Container has `EVENT_DATE_SLATE=shadow`, but the 2026-07-09 all-table marker probe
-(markers incl. `event_date_slate`) found zero matching rows in any table. Either the
-shadow path hasn't fired in 7d (possible — gated on mixed-slate ingest shapes) or its
-emission uses a different literal/sink than assumed. Before trusting this dial for the
-enforce ladder: grep the emit site in services/eventDate.js / services/slateResplit.js
-for the exact event_type/payload literal, re-probe with that literal, and only then
-interpret 0 as "hasn't fired" rather than "can't see it."
+### ~~EVENT_DATE_SLATE=shadow dial read 0 rows in 7d — emit literal unconfirmed~~ ✅ CLOSED 2026-07-09 — probe error, dial healthy
+The 2026-07-09 all-table marker probe used the wrong literal. Actual emission (confirmed
+at services/sportsdata/index.js `emitSlateShadow` + pipeline-events.js:55):
+`event_type='slate_shadow'` on `stage='GRADING_ENTER'`, via bets.transitionTo. Re-probe with
+the correct literal: **94 rows all-time / 84 in last 7d**, against ~10 divergent-eligible
+MLB/NBA/NHL bets (event_date non-NULL AND ≠ created_at) in the same window. Dial is live
+and emitting; usable for the enforce ladder. (7d rows > 7d eligible-bets because emission
+is per grading attempt, not per bet.)
+
+### 161 bets settled while review_status='needs_review' (found 2026-07-09, dials probe)
+`GRADER_HIDDEN_REVIEW_STATUSES` (database.js:801) hides needs_review from the grader, yet
+161 needs_review bets carry a settled result (92W/69L, net **+229.39u** already in the live
+ROI surface — these are real grades, so NO P&L correction is needed, only a status
+reconcile). Attribution (2026-07-09 probes): **156 grader_version=NULL** — pre-#89-gate
+residue (86 graded 2026-04, 64 2026-05) plus operator batch writes that don't clear
+review_status (e.g. 24 bets at graded_at='2026-07-02 21:39:37', archived_by=
+'shadow-regrade-2026-07-02'); **5 phase1-gates-v1** (Apr–May era, plausibly pre-gate).
+No recent auto-grader stamps — the gate holds. Queue context: 577 needs_review total
+(286 pending / 130 void / the 161 settled), sources twitter_vision 242 / vision_slip 171 /
+twitter_text 75 / twitter 49 / discord 40. Actions: (a) one-shot reconcile script
+(dry-run gated, operator-run) setting `review_status='confirmed'` on settled needs_review
+rows; (b) decide whether operator bulk-grade scripts (shadow-regrade / tierb / pregate
+family) should clear review_status at write time; (c) separately, the 286 pending
+needs_review rows are the real war-room queue depth — review whether it's being worked.
 
 ## SLATE_RESPLIT cutover verdict: STAY SHADOW (spot-check 2026-07-09, n=55 of 57 events)
 Full payload review of all `slate_resplit_shadow` pipeline_events (2026-07-04 → 07-09).
