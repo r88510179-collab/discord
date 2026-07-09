@@ -131,6 +131,17 @@ ok('"Christian Rodriguez ML (-215) 10u" → pick', slate.isStatsFooterSegment('C
 ok('"Lakers: +6.5u" → KEEP (team label not in vocab)', slate.isStatsFooterSegment('Lakers: +6.5u') === false);
 ok('"Totally different: +5u" → KEEP (word-boundary)', slate.isStatsFooterSegment('Totally different: +5u') === false);
 ok('"Mayweather: -2.5u" → KEEP ("may" boundary)', slate.isStatsFooterSegment('Mayweather: -2.5u') === false);
+// Adversarial-review class: a month stem matches the LABEL but the selection
+// hides in the qualifier — the qualifier is a closed vocab (recap words /
+// months / numbers only), so any selection-shaped word before the colon
+// breaks the match. All four were eaten by a permissive [^:]{0,24} qualifier.
+ok('"Jun 9 Padres: +1.5u" → KEEP (date-prefixed pick)', slate.isStatsFooterSegment('Jun 9 Padres: +1.5u') === false);
+ok('"May 6 Yankees ML: +1.5u" → KEEP (date-prefixed pick)', slate.isStatsFooterSegment('May 6 Yankees ML: +1.5u') === false);
+ok('"Jun Yong Park ITD: +1.5u" → KEEP (fighter name starts with month stem)', slate.isStatsFooterSegment('Jun Yong Park ITD: +1.5u') === false);
+ok('"May o5.5 Ks: +1.5u" → KEEP (pitcher-prop market in qualifier)', slate.isStatsFooterSegment('May o5.5 Ks: +1.5u') === false);
+// …while month-qualified RECAP labels still strip.
+ok('"Since Jun 11th: -2.87u" → footer (ordinal qualifier)', slate.isStatsFooterSegment('Since Jun 11th: -2.87u') === true);
+ok('"Last 30 plays: +5u" → footer (vocab qualifier)', slate.isStatsFooterSegment('Last 30 plays: +5u') === true);
 ok('"Parlay: +450 2u" → KEEP (odds then unsigned stake)', slate.isStatsFooterSegment('Parlay: +450 2u') === false);
 // A pick that embeds a URL AND carries a stake token keeps (unsure → keep).
 ok('URL + stake → KEEP', slate.isStatsFooterSegment('Lakers ML 5u write-up: https://example.com/x') === false);
@@ -170,6 +181,7 @@ console.log('D. shadow — footer-contaminated slate');
   eq('one shadow event', 1, events.length);
   const p = events[0].payload;
   eq('pickCount excludes footer lines', 1, p.pickCount);
+  eq('segmentCount counts KEPT segments only', 1, p.segmentCount);
   ok('wouldSplit false (1 real pick)', p.wouldSplit === false);
   ok('no 48.7u phantom in sample', !p.sample.some((s) => s.u === 48.7));
   ok('footerStripped recorded', p.footerStripped === true);
@@ -184,6 +196,7 @@ console.log('D. shadow — footer-contaminated slate');
   slate.applySlateResplit({ pick: parlay('Soccer', 5), rawText: FP_SLATE_TWO_PICKS, mode: 'shadow', deps: realDeps, recordStageFn: (e) => events.push(e), ingestId: 'twit_fp2', sourceRef: 'fp2' });
   const p = events[0].payload;
   eq('pickCount = 2 real picks', 2, p.pickCount);
+  eq('segmentCount = 2 kept segments (raw total = segmentCount + footerRemovedCount)', 2, p.segmentCount);
   ok('wouldSplit true (2 real picks)', p.wouldSplit === true);
   ok('no phantom units survive', !p.sample.some((s) => s.u === 48.7 || s.u === 2.87 || s.u === 1.6));
   eq('footerRemovedCount 4', 4, p.footerRemovedCount);
@@ -196,6 +209,7 @@ console.log('E. shadow — real slate survives the filter unchanged');
   slate.applySlateResplit({ pick: parlay('Soccer', 12), rawText: TWEET_A, mode: 'shadow', deps: realDeps, recordStageFn: (e) => events.push(e), ingestId: 'twit_a', sourceRef: 'a' });
   const p = events[0].payload;
   eq('pickCount still 12', 12, p.pickCount);
+  eq('segmentCount still 12 (nothing stripped)', 12, p.segmentCount);
   ok('wouldSplit still true', p.wouldSplit === true);
   ok('footerStripped false', p.footerStripped === false);
   eq('footerRemovedCount 0', 0, p.footerRemovedCount);

@@ -212,11 +212,19 @@ function isNonPickSegment(text) {
 //      only content (leading bullets/emoji and trailing punctuation allowed).
 //      TWO independent discriminators must both hold: real stakes are UNSIGNED
 //      ("5u") — the sign is P&L vocabulary — and a real pick always names a
-//      selection after any label, so it can never be whole-line "label: ±Nu".
+//      selection somewhere, so it can never be whole-line "label: ±Nu".
 //      ("Total goals: Over 2.5 (-110) 2u", "Parlay: Lakers ML + Celtics ML
 //      (+264) 2u" both KEEP: content after the colon is not a lone signed
 //      units token. "Lakers: +6.5u" also KEEPS — team labels are deliberately
-//      NOT in the vocab.)
+//      NOT in the vocab.) The qualifier between label and colon is NOT
+//      free-form: every word must itself be recap vocab, a month, or a
+//      number, so a selection can't hide BEFORE the colon either —
+//      adversarial review proved a permissive [^:]{0,24} qualifier ate
+//      date-/name-prefixed picks ("Jun 9 Padres: +1.5u", "May 6 Yankees ML:
+//      +1.5u", "Jun Yong Park ITD: +1.5u", "May o5.5 Ks: +1.5u" — month stem
+//      matched the label, the selection hid in the qualifier); all four must
+//      KEEP, while "Since Jun 11: -2.87u" / "SGP Parlay: -1.6u" /
+//      "Last 30 days: +12.4u" still strip.
 //   B. isNonPickSegment — the existing record/promo guard ("N-N (NN%)" via
 //      ai.js PITCHER_RECORD_PATTERN, W-L token + "plays" vocab), already
 //      pick-safe per its own adversarial review above. Catches the BACKLOG
@@ -225,16 +233,25 @@ function isNonPickSegment(text) {
 //      Safe by construction: a stake-less segment can never parse into a pick
 //      (parsePick requires a units token), so stripping it cannot eat one. A
 //      URL segment that DOES carry a stake token KEEPS (unsure → keep).
+const FOOTER_PNL_MONTH =
+  'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|' +
+  'sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?';
 const FOOTER_PNL_LABEL =
   '(?:totals?|since|records?|sgps?|parlays?|straights?|roi|profits?|units?|last|overall|season|ytd|this|months?|weeks?|' +
-  'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|' +
-  'sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)';
+  FOOTER_PNL_MONTH + ')';
+// Qualifier words allowed between the label and the colon: recap vocab, months,
+// or plain numbers/ordinals ONLY — never a team/player/market word, so a
+// selection can't hide before the colon (see header, adversarial review).
+const FOOTER_PNL_QUALIFIER_WORD =
+  '(?:days?|weeks?|months?|years?|plays?|picks?|bets?|parlays?|straights?|sgps?|props?|records?|totals?|units?|free|vip|roi|' +
+  FOOTER_PNL_MONTH + '|\\d{1,4}(?:st|nd|rd|th)?)';
 const FOOTER_PNL_LINE_RE = new RegExp(
-  '^[^A-Za-z0-9]*' +                                    // leading bullets/emoji only
+  '^[^A-Za-z0-9]*' +                                        // leading bullets/emoji only
   FOOTER_PNL_LABEL + '\\b' +
-  '[^:]{0,24}:' +                                       // short qualifier, then the colon
-  '\\s*[+-]\\s?\\d+(?:[.,]\\d+)?\\s*u(?:nits?)?\\b' +   // SIGNED P&L units token
-  '[^A-Za-z0-9]*$',                                     // trailing punctuation/emoji only
+  '(?:[\\s.,-]+' + FOOTER_PNL_QUALIFIER_WORD + '\\b)*' +    // qualifier: closed vocab/month/number words only
+  '[\\s.,-]*:' +                                            // then the colon
+  '\\s*[+-]\\s?\\d+(?:[.,]\\d+)?\\s*u(?:nits?)?\\b' +       // SIGNED P&L units token
+  '[^A-Za-z0-9]*$',                                         // trailing punctuation/emoji only
   'i'
 );
 const FOOTER_URL_RE = /\b(?:https?:\/\/\S+|www\.[^\s|]+|t\.me\/\S+)/i;
