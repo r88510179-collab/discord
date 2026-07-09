@@ -1755,3 +1755,40 @@ emission uses a different literal/sink than assumed. Before trusting this dial f
 enforce ladder: grep the emit site in services/eventDate.js / services/slateResplit.js
 for the exact event_type/payload literal, re-probe with that literal, and only then
 interpret 0 as "hasn't fired" rather than "can't see it."
+
+## SLATE_RESPLIT cutover verdict: STAY SHADOW (spot-check 2026-07-09, n=55 of 57 events)
+Full payload review of all `slate_resplit_shadow` pipeline_events (2026-07-04 → 07-09).
+wouldSplit=true: 14. Of those ~5 are false/garbage splits; also a false-NEGATIVE class.
+Three preconditions before any cutover flip:
+
+1. **Stats-footer contamination (worst class).** Capper ROI footers parsed as picks —
+   `Total: +`, `Since Jun 11: -`, `SGP Parlay: -`, `Grass Record 72-32 (69%)` — with the
+   running P&L landing in units (u=1.6, 2.87, even 48.7). Cutover would mint phantom
+   bets with 48-unit stakes off a record line. Evidence: twit_2074867391738105896,
+   twit_2074483275452633352, twit_2073780065347747969, twit_2074119944707391954,
+   twit_2073408453779812573. Fix: drop `Total:/Since <date>:/Record/SGP:/Parlay:`-shaped
+   segments before pick extraction.
+
+2. **Ladder double-count.** twit_2074613046878638498 splits Djokovic ML + S1/S3/S4 MLs
+   into 4 concurrent picks — but S3 ML (twit_2074564596933775520, 19:30) and S4 ML
+   (twit_2074577632797077876, 23:00) posted individually as ladder steps the same day.
+   Re-split = duplicate bets for anything already ingested via the ladder path. Fix:
+   suppress re-split when picks match an active ladder / recently-ingested singles.
+
+3. **Sport-label fragmentation feeds distinctSports.** Splits triggered on "2 sports"
+   that are `World Cup`+`Soccer` (twit_2074280485065240864) and `SOCCER`+`Soccer`
+   (twit_2074483275452633352); also Colombia-to-reach-Last-16 tagged Tennis
+   (twit_2073249314890014740). The known 5-label Soccer taxonomy fragmentation
+   (see "Sport-label taxonomy normalization" item) now has a concrete consumer —
+   normalize BEFORE the distinctSports computation.
+
+**False-negative class (cutover would also MISS real slates):** multiple MLB events
+with legCount 7–12 but pickCount=0, sample=[] (e.g. twit_2073644116563607734 legs=11,
+twit_2073923702245425164 legs=7, twit_2074172375520727235 legs=12) — detector sees
+legs but extracts zero picks, so those parlays would silently not re-split.
+
+**Legit splits confirmed (~8-9):** multi-pick same-slate soccer posts with distinct
+games + sane units (e.g. twit_2073251767278538864, twit_2074539700086255840,
+twit_2074176839568752848) — the detector reads the intended case correctly.
+
+Re-run this spot-check after fixes 1–3 land; cutover decision only on a clean pass.
