@@ -43,6 +43,14 @@
 // ships with. --scrub, by contrast, is pure harm-reduction and is the
 // recommended op.
 //
+// NOTE — scrub→populate two-run convergence (intended): both plans are read
+// BEFORE the apply transaction, so a row scrubbed in run 1 is NOT populated in
+// the same run; on a LATER --populate run it is an ordinary Tier-1 candidate
+// (NULL + pending + confirmed) and would get the created_at echo. That cohort
+// is exactly the one where the extractor asserted a DIFFERENT date than
+// created_at — review those rows' descriptions in the report before a second
+// --apply.
+//
 // Safety rails (apply-regrade-s01-s05.js mold):
 //   • dry-run by default; --apply is the only write gate; --apply --dry-run
 //     conflict → exit 2. Dry-run opens the DB READONLY (cannot write).
@@ -93,7 +101,11 @@ const POPULATE_SPORTS = new Set(['MLB', 'NBA', 'NHL']);
 const DATEISH_RE = new RegExp(
   [
     String.raw`\b(?:mon|tues?|wed(?:nes)?|thur?s?|fri|sat(?:ur)?|sun)(?:day)?\b`,
-    String.raw`\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}\b`,
+    // "tomorrow" contradicts a created_at echo BY DEFINITION (game = created
+    // day + 1). "today"/"tonight" are NOT flagged — they agree with the echo.
+    String.raw`\btomorrow\b`,
+    // month-name + day number, ordinal suffix included ("June 24th").
+    String.raw`\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(?:st|nd|rd|th)?\b`,
     String.raw`\b\d{1,2}/\d{1,2}\b`,
   ].join('|'),
   'i',
@@ -114,6 +126,11 @@ function parseStoredUtc(value) {
   let iso = s;
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) iso = `${s}T00:00:00Z`;
   else if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})?(\.\d+)?$/.test(s)) iso = `${s.replace(' ', 'T')}Z`;
+  // T-separated but ZONE-LESS ("2026-06-21T19:00:00") — SQLite's datetime()
+  // reads it as UTC (so such legacy values survived mig 029), but bare
+  // new Date() reads it as LOCAL time, which would make the gap math depend
+  // on the host TZ (operator-Mac dry-run vs in-container apply). Pin it UTC.
+  else if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?(\.\d+)?$/.test(s)) iso = `${s}Z`;
   const d = new Date(iso);
   return isNaN(d.getTime()) ? null : d;
 }
@@ -213,7 +230,10 @@ function printPlan(plan) {
     ];
     if (p.gap != null) bits.push(`gap=${p.gap}d`);
     if (p.value) bits.push(`new=${p.value}`);
-    if (p.action === 'SKIP_TIER2_DATEISH_DESC') bits.push(`desc="${String(r.description || '').slice(0, 60)}"`);
+    // Description shown on every populate-side row (POPULATE included, not
+    // just the Tier-2 skips) so the operator can eyeball what each row IS
+    // before blessing an --apply.
+    if (p.op === 'populate') bits.push(`desc="${String(r.description || '').slice(0, 60)}"`);
     console.log('  ' + bits.join(' '));
   }
 }
@@ -235,8 +255,13 @@ function parseArgs(argv) {
     else if (a === '--allow-nonprod') out.allowNonprod = true;
     else if (a === '--scrub') out.scrub = true;
     else if (a === '--populate') out.populate = true;
-    else if (a === '--db') out.dbPath = argv[++i];
-    else return { error: `unknown arg: ${a}` };
+    else if (a === '--db') {
+      // A missing value must NOT silently fall through to the prod default —
+      // the operator typed --db intending to point somewhere specific.
+      const v = argv[++i];
+      if (v == null || v.startsWith('--')) return { error: '--db requires a path value' };
+      out.dbPath = v;
+    } else return { error: `unknown arg: ${a}` };
   }
   if (out.mode === 'conflict') return { error: '--dry-run and --apply are mutually exclusive' };
   if (out.mode == null) out.mode = 'dry-run'; // DRY RUN is the default

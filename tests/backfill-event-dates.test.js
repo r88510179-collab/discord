@@ -35,6 +35,8 @@ check('A1: --apply --dry-run conflict', !!S.parseArgs(['--scrub', '--apply', '--
 check('A1: no op selected → error', !!S.parseArgs([]).error);
 check('A1: unknown arg → error', !!S.parseArgs(['--scrub', '--frobnicate']).error);
 check('A1: both ops parse', (() => { const a = S.parseArgs(['--scrub', '--populate']); return a.scrub && a.populate && !a.error; })());
+check('A1: --db with a MISSING value errors (never silently falls to prod)', !!S.parseArgs(['--scrub', '--db']).error);
+check('A1: --db swallowing the next flag errors', !!S.parseArgs(['--scrub', '--db', '--apply']).error);
 
 check('A2: parseStoredUtc space-separated is UTC',
   S.parseStoredUtc('2026-06-21 14:15:24').toISOString() === '2026-06-21T14:15:24.000Z');
@@ -44,6 +46,10 @@ check('A2: parseStoredUtc ISO passthrough',
   S.parseStoredUtc('2023-11-26T19:00:00.000Z').toISOString() === '2023-11-26T19:00:00.000Z');
 check('A2: parseStoredUtc junk → null', S.parseStoredUtc('not a date') === null);
 check('A2: parseStoredUtc null/empty → null', S.parseStoredUtc(null) === null && S.parseStoredUtc('') === null);
+check('A2: parseStoredUtc T-separated zone-less is pinned UTC (host-TZ independent)',
+  S.parseStoredUtc('2026-06-21T19:00:00').toISOString() === '2026-06-21T19:00:00.000Z');
+check('A2: parseStoredUtc explicit-zone value untouched',
+  S.parseStoredUtc('2026-06-21T19:00:00-04:00').toISOString() === '2026-06-21T23:00:00.000Z');
 
 // Boundary semantics mirror the gate: outOfBounds strictly < -2 or > +60.
 check('A3: gap exactly -2d is IN bounds', !S.isImplausibleGap(-2));
@@ -61,6 +67,9 @@ check('A4: numeric M/D flags', S.hasDateishToken('Yankees ML 6/24'));
 check('A4: "Suns ML" does NOT flag (weekday substring guard)', !S.hasDateishToken('Suns ML -110'));
 check('A4: bare "May" without a day number does NOT flag', !S.hasDateishToken('May the parlay gods bless us'));
 check('A4: plain prop text does NOT flag', !S.hasDateishToken('Aaron Judge 2+ Total Bases'));
+check('A4: "tomorrow" flags (contradicts a created_at echo by definition)', S.hasDateishToken('Yankees ML tomorrow night'));
+check('A4: "today"/"tonight" do NOT flag (they AGREE with the echo)', !S.hasDateishToken('Lakers -3.5 tonight') && !S.hasDateishToken('hammer this today'));
+check('A4: ordinal month-day "June 24th" flags', S.hasDateishToken('Nats vs Phillies June 24th under'));
 
 check('A5: populateValueFromCreatedAt = full ISO instant, never date-only',
   S.populateValueFromCreatedAt('2026-06-21 14:15:24') === '2026-06-21T14:15:24.000Z');

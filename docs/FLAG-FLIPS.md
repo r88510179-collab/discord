@@ -82,3 +82,8 @@ and the raw extractor string — the queryable reject trail the ephemeral Fly wa
 Flip plan: `shadow` after deploy → review reject volume/shape (expect near-zero: the ingest paths
 now instruct verbatim-copy-never-guess, and the guard is the backstop) → optionally `enforce` for
 ledger cleanliness; the bounds are tuned from the reject rows if legitimate futures ever clip.
+Review caveat: a `war_split` of a stale parlay (or a days-late re-ingest) re-gates the parent's
+INHERITED event_date against the split moment, so each split single past the −2d bound emits one
+rejection row that looks like an extractor stale-date (clean ISO `raw`, parent's `source`). Storage
+is unchanged either way (NULL, the pre-threading behavior) — discount those rows when eyeballing
+volume; they cluster on one `source_message_id` (the parent's) at the same second.

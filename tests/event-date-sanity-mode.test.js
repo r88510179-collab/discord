@@ -219,6 +219,31 @@ check('row: bet_id set', row && !!row.bet_id);
   check('twitter bet: ingest_id twit_<tweet id>', row && /^twit_tw-/.test(row.ingest_id), row && row.ingest_id);
 }
 
+// Dedup returns never emit: an identical re-submission (same fingerprint)
+// short-circuits BEFORE the normalizer runs, so no second event appears even
+// though the payload still carries the rejectable date.
+{
+  const before = eventCount();
+  const dupPayload = {
+    capper_id: capper.id,
+    sport: 'MLB',
+    bet_type: 'straight',
+    description: 'sanity dedup bet',
+    odds: -110,
+    units: 1,
+    event_date: WRONG_YEAR,
+    source: 'vision_slip',
+    source_channel_id: 'chan-1',
+    source_message_id: `msg-dedup-${process.pid}`,
+    review_status: 'confirmed',
+  };
+  const first = createBet(dupPayload);
+  const second = createBet(dupPayload);
+  check('dedup: first insert emits once', eventCount() === before + 1);
+  check('dedup: identical re-submission is deduped', second._deduped === true && second.id === first.id);
+  check('dedup: deduped return emits NOTHING (no double-count)', eventCount() === before + 1);
+}
+
 // No source refs at all: rejection still NULLs, telemetry skipped (writeRow
 // would drop an ingest-side row without an ingestId; we skip explicitly).
 {
