@@ -25,6 +25,16 @@
 // being trusted event_date-first by the grader. NULL — never throw — so the
 // bet still saves and falls back to created_at.
 //
+// EVENT_DATE_SANITY_MODE gates TELEMETRY ONLY, not the guard itself: the
+// NULLing above shipped always-on (#153/#154) and is live prod behavior, so
+// unset/off = byte-identical today (guard NULLs, warn log only). shadow and
+// enforce additionally report each rejection to the caller via
+// opts.onSanityReject so createBet can emit an event_date_sanity_rejected
+// pipeline event carrying the rejected value — the reviewable paper trail the
+// warn log (ephemeral Fly logs) is not. enforce ≡ shadow today; the third
+// state exists so the flag reads like every other tri-state ladder and leaves
+// room if enforcement semantics ever need to diverge from telemetry.
+//
 // recoverHold's backdate path (services/holdReview.js) writes event_date
 // directly from the Discord snowflake — already a valid datetime, and
 // derived from the SAME timestamp it stamps into created_at (same calendar
@@ -124,9 +134,36 @@ function applyEventDateSanityGuard(date, anchor, raw, opts) {
       `created=${anchor.toISOString()} gapDays=${gapDays.toFixed(1)} rule=out-of-bounds ` +
       `raw="${String(raw).slice(0, 80)}"`,
     );
+    // Surface the rejection to the caller (createBet emits the
+    // event_date_sanity_rejected pipeline event when EVENT_DATE_SANITY_MODE
+    // is shadow/enforce). Fires ONLY for out-of-bounds rejections — an
+    // unparseable string never reaches this guard. The callback must never
+    // break the NULL-never-throw contract.
+    if (opts && typeof opts.onSanityReject === 'function') {
+      try {
+        opts.onSanityReject({
+          value: date.toISOString(),
+          gapDays,
+          raw: String(raw).slice(0, 120),
+        });
+      } catch (_) { /* telemetry must not affect the write */ }
+    }
     return null;
   }
   return date.toISOString();
+}
+
+// EVENT_DATE_SANITY_MODE — strict compare, read per call (injectable raw for
+// tests), unset/anything-else → 'off'. Same tri-state idiom as
+// PIPELINE_IDEM_MODE / EVENT_DATE_SLATE. NOTE the atypical semantics: the
+// guard's NULLing is NOT gated (always-on since #153/#154) — this flag gates
+// only the pipeline-event telemetry on rejections. off = warn log only
+// (byte-identical current behavior); shadow/enforce = also emit one
+// event_date_sanity_rejected pipeline event per rejection (see createBet).
+function resolveEventDateSanityMode(raw = process.env.EVENT_DATE_SANITY_MODE) {
+  if (raw === 'shadow') return 'shadow';
+  if (raw === 'enforce') return 'enforce';
+  return 'off';
 }
 
 /**
@@ -219,6 +256,7 @@ function normalizeEventDateForStorage(raw, createdAt = new Date(), opts = {}) {
 module.exports = {
   normalizeEventDateForStorage,
   applyEventDateSanityGuard,
+  resolveEventDateSanityMode,
   etWallClockToUtc,
   etParts,
   EVENT_DATE_GUARD_MIN_GAP_DAYS,

@@ -206,6 +206,18 @@ function ocrBetToInternalBets(ocr, opts = {}) {
   const description = internalLegs.map((l) => l.description).join('\n');
   const sport = inferSportFromLegs(internalLegs, opts.inferSport) || 'Unknown';
 
+  // event_date: the Groq schema already captures each leg's printed
+  // start_time ("Today, 4:05pm EDT" — ocrFirst.js OCR_PARSE_SYSTEM); pass the
+  // FIRST non-empty one through VERBATIM as the bet-level slate anchor (same
+  // first-leg convention the vision parser follows on multi-leg slips, spec
+  // §5.5). No parsing here: normalizeEventDateForStorage resolves the string
+  // against created_at at insert (its relative-token branch matches exactly
+  // this HRB format) and gap-guards it — an unparseable/implausible value
+  // stores NULL, the pre-threading behavior.
+  const firstStartTime = legs
+    .map((l) => (l && typeof l.start_time === 'string' ? l.start_time.trim() : ''))
+    .find((t) => t.length > 0) || null;
+
   return [{
     sport,
     league: null,
@@ -215,7 +227,7 @@ function ocrBetToInternalBets(ocr, opts = {}) {
     units: null,              // never invent stake → defaults to 1 downstream
     wager: parseMoney(ocr.stake),
     payout: parseMoney(ocr.payout),
-    event_date: null,
+    event_date: firstStartTime,
     legs: internalLegs,
   }];
 }

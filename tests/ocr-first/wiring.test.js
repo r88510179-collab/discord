@@ -610,6 +610,29 @@ async function main() {
     assert.deepStrictEqual(ocrBetToInternalBets({ legs: [{}] }, { inferSport: () => 'MLB' }), [], 'legs with no description drop out');
   });
 
+  // event_date threading: the Groq schema captures per-leg start_time; the
+  // converter passes the FIRST non-empty one through VERBATIM (no parsing —
+  // normalizeEventDateForStorage resolves + gap-guards it at insert). The raw
+  // string is asserted, not a resolved ISO: resolution happens at the
+  // database.js write gate against created_at, not in the converter.
+  await run('ocrBetToInternalBets: event_date = first non-empty leg start_time, verbatim', async () => {
+    const bets = ocrBetToInternalBets(slip1Groq, { inferSport: () => 'MLB' });
+    assert.strictEqual(bets[0].event_date, slip1Groq.legs[0].start_time);
+    assert.strictEqual(typeof bets[0].event_date, 'string');
+    assert.ok(/^Today,/i.test(bets[0].event_date), `fixture start_time should be the HRB relative form, got ${bets[0].event_date}`);
+  });
+
+  await run('ocrBetToInternalBets: skips empty start_time legs; all-missing → event_date null', async () => {
+    const mk = (legs) => ({ bet_type: 'straight', legs });
+    const leg = (start_time) => ({ matchup: 'A vs B', market: 'Total', selection: 'Over 1.5', odds: '-110', start_time });
+    // first leg blank/whitespace/null → falls to the next non-empty one
+    assert.strictEqual(ocrBetToInternalBets(mk([leg(null), leg('  '), leg('Today, 9:38pm EDT')]), { inferSport: () => 'MLB' })[0].event_date, 'Today, 9:38pm EDT');
+    // none present → null (the pre-threading behavior)
+    assert.strictEqual(ocrBetToInternalBets(mk([leg(null), leg(undefined)]), { inferSport: () => 'MLB' })[0].event_date, null);
+    // non-string start_time never leaks through
+    assert.strictEqual(ocrBetToInternalBets(mk([leg(12345)]), { inferSport: () => 'MLB' })[0].event_date, null);
+  });
+
   await run('isNonNewBet / isSupportedSport', async () => {
     assert.strictEqual(isNonNewBet({ type: 'result' }), true);
     assert.strictEqual(isNonNewBet({ type: 'untracked_win' }), true);
