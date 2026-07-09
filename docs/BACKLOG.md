@@ -774,10 +774,9 @@ Evidence (live 2026-06-10): bet `9d839e18` (McGhee/Yannis ITD, UFC) auto-voided 
 ### 24h void-volume watch (S5 / auto-void monitoring, opened 2026-06-10 evening)
 Tie-in to the **"Non-uniform auto-void rule"** above and **S5**. Live 2026-06-10 the 24h void volume was **22 unscoped + 32 no-data = 54 voids**. With S2 honest search live + the 298-bet reset, a *wave* of legitimate voids is expected as searchless bets exhaust honestly (the close-out's "VOID-slip flow" watch item) — so this is **not** auto-alarming. But because the two void paths key on different signals (non-uniform rule), raw count alone is misleading. **Action:** watch the daily `auto_void_no_searchable_data` (content-based) vs `GRADE_BACKOFF_EXHAUSTED` (RETRY_CAP=15) split in `pipeline_events`; if either climbs *after* the backlog should have drained (~1 week), the per-sport adapter gap (S3/S4) — not the breaker — is the driver. Fold the numbers into the S1b re-measure.
 
-### Handle review — pending keep/drop decisions (opened 2026-06-10 evening)
-Two `scraper_handles` rows need an operator keep/drop call (toggle `enabled` via `POST /api/admin/handles/:handle`, never delete the row):
-- **`@toptierpicks_` — 0 saved bets in the last 7 days.** Either the handle has gone quiet, the scraper is silently failing on it (cross-ref the `page.waitForSelector` timeout item below — `@toptierpicks_` is named there), or its picks aren't ingest-shaped. Decide: disable, or investigate the scrape path.
-- **`@nrfianalytics` — pending keep/drop.** Confirm it is still a wanted source before the next scrape-cost review.
+### ~~Handle review — pending keep/drop decisions~~ ✅ CLOSED 2026-07-09 — both decided, data-backed
+- **`@toptierpicks_` — DISABLED 2026-07-09** via `POST /api/admin/handles/toptierpicks_` (HTTP 200, verified enabled=0 + dated note in row). Data: 3 lifetime bets, last 2026-04-16, 0 in 30d+ — scraper polled ~3 months for nothing. Scrape-path-failure vs quiet-handle left undetermined (orthogonal; row kept for re-enable — cross-ref the `page.waitForSelector` timeout item if investigated later). Side flag: its single settled bet booked **+76.92u on one win** — extreme-odds row worth a skeptical audit someday.
+- **`@nrfianalytics` — already disabled** (enabled=0 found in row 2026-07-09); data supports it: 25 lifetime bets, only 2 ever settled, last bet 2026-06-04, 0 in 30d. No action.
 
 ### Sport-label taxonomy normalization (opened 2026-06-10 evening, from S1a)
 S1a found the **Soccer family fragmented across 5 distinct sport labels**: `Soccer 31` / `Serie A 4` / `EPL 2` / `SOCCER 1` / `UCL 1` (= 39 bets). League names (`Serie A`, `EPL`, `UCL`) and a casing variant (`SOCCER`) are stored as if they were top-level sports, which (a) splits the bucket so per-sport sizing under-counts Soccer, and (b) will fragment any future Soccer adapter's dispatch key (`services/sportsdata/index.js` routes on `sport`). **Action:** normalize at the classification/storage boundary so a league maps to its parent sport (`Serie A`/`EPL`/`UCL`/`SOCCER` → `Soccer`) with the league preserved as a sub-field, not the dispatch key. Audit other sports for the same leakage before building S4's Soccer adapter. **Update (2026-06-15):** the *casing* half (`SOCCER`/`soccer` → `Soccer`) is now handled at write + backfill by `canonicalizeSport` (PR `sport-casing-normalize`, see the "Sport-casing divergence" item above). Only the league→parent-sport **folding** (`Serie A`/`EPL`/`UCL` → `Soccer` with league as a sub-field) remains open here — `canonicalizeSport` deliberately keeps those as distinct canonical labels, not folded.
@@ -1776,6 +1775,23 @@ twitter_text 75 / twitter 49 / discord 40. Actions: (a) one-shot reconcile scrip
 rows; (b) decide whether operator bulk-grade scripts (shadow-regrade / tierb / pregate
 family) should clear review_status at write time; (c) separately, the 286 pending
 needs_review rows are the real war-room queue depth — review whether it's being worked.
+
+### Stuck-pending >24h triage — CLOSED 2026-07-09, zero new bugs (session-note "111 stuck" was stale)
+Full readonly sweep of the 361 bets with result='pending' older than 24h. Every row lands in a known class:
+- **246 needs_review** (223 ready / 22 backoff / 1 done) — grader-hidden war-room queue by design; same
+  action as the item above (queue is unworked, not stuck).
+- **109 confirmed backoff, 100% with future grading_next_attempt_at** — actively cycling, not wedged.
+  Sport mix (Soccer 66 / MLB-prop-parlays 19 / World Cup 13 / Tennis 8) is exactly the S-arc
+  searchless / props-in-covered-sports pool — existing source-path arc, nothing new.
+- **6 done+pending unmodeled-sport parks** (KBO/WNBA/Lacrosse/FIBA/MULTI/WC-Soccer) — by design per
+  GRADE_MANUAL_REVIEW_UNMODELED (2026-06-16): result stays pending for a human, sweeper-safe.
+- **1 unsplit-card park** (8c671e70, NBA, duplicated-leg card) — deliberately parked per its
+  grade_reason ("legs not split; parked for a human to split/grade") after 11 attempts,
+  GRADING_DROPPED 2026-07-03. By design.
+- **11 at 15+ attempts, all with near-future next_attempt** — cycling, not wedged; the documented
+  non-uniform retry-cap behavior (cap only fires on the denial branch). Existing item.
+Do not re-open "stuck pending" as a standalone investigation — the lever is (1) working the
+needs_review queue and (2) the S-arc source paths, both already tracked.
 
 ## SLATE_RESPLIT cutover verdict: STAY SHADOW (spot-check 2026-07-09, n=55 of 57 events)
 Full payload review of all `slate_resplit_shadow` pipeline_events (2026-07-04 → 07-09).
