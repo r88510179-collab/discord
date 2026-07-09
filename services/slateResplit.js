@@ -193,6 +193,91 @@ function isNonPickSegment(text) {
   return false;
 }
 
+// ── Stats-footer filter — SLATE_RESPLIT cutover precondition 1 (docs/BACKLOG.md
+// "SLATE_RESPLIT cutover verdict: STAY SHADOW", 2026-07-09 spot-check). Capper
+// ROI/recap FOOTERS carry SIGNED running-P&L units tokens — "Total: +48.7u",
+// "Since Jun 11: -2.87u", "SGP Parlay: -1.6u" — whose "Nu" shape parseUnits
+// reads as a stake, so each footer line minted a phantom pick (u=1.6, 2.87,
+// even 48.7) and inflated pickCount into a false wouldSplit. Evidence events:
+// twit_2074867391738105896, twit_2074483275452633352, twit_2073780065347747969,
+// twit_2074119944707391954, twit_2073408453779812573.
+//
+// CONSERVATIVE BY DESIGN (a missed footer line = the FP persists, acceptable;
+// eating a real pick = a new false negative, NOT acceptable — when unsure,
+// KEEP). A segment is footer ONLY on one of three tight shapes:
+//   A. FOOTER_PNL_LINE_RE — the ENTIRE segment is "<recap-label …>: ±N[.N]u":
+//      a recap label from a closed vocab (the BACKLOG fix list Total/Since/
+//      Record/SGP/Parlay plus safe siblings ROI/Profit/Units/Last/…/month
+//      names), a short qualifier, a colon, then a SIGNED units token as the
+//      only content (leading bullets/emoji and trailing punctuation allowed).
+//      TWO independent discriminators must both hold: real stakes are UNSIGNED
+//      ("5u") — the sign is P&L vocabulary — and a real pick always names a
+//      selection somewhere, so it can never be whole-line "label: ±Nu".
+//      ("Total goals: Over 2.5 (-110) 2u", "Parlay: Lakers ML + Celtics ML
+//      (+264) 2u" both KEEP: content after the colon is not a lone signed
+//      units token. "Lakers: +6.5u" also KEEPS — team labels are deliberately
+//      NOT in the vocab.) The qualifier between label and colon is NOT
+//      free-form: every word must itself be recap vocab, a month, or a
+//      number, so a selection can't hide BEFORE the colon either —
+//      adversarial review proved a permissive [^:]{0,24} qualifier ate
+//      date-/name-prefixed picks ("Jun 9 Padres: +1.5u", "May 6 Yankees ML:
+//      +1.5u", "Jun Yong Park ITD: +1.5u", "May o5.5 Ks: +1.5u" — month stem
+//      matched the label, the selection hid in the qualifier); all four must
+//      KEEP, while "Since Jun 11: -2.87u" / "SGP Parlay: -1.6u" /
+//      "Last 30 days: +12.4u" still strip.
+//   B. isNonPickSegment — the existing record/promo guard ("N-N (NN%)" via
+//      ai.js PITCHER_RECORD_PATTERN, W-L token + "plays" vocab), already
+//      pick-safe per its own adversarial review above. Catches the BACKLOG
+//      "Grass Record 72-32 (69%)" footer shape.
+//   C. FOOTER_URL_RE + NO stake token — a capper-page/telegram link block.
+//      Safe by construction: a stake-less segment can never parse into a pick
+//      (parsePick requires a units token), so stripping it cannot eat one. A
+//      URL segment that DOES carry a stake token KEEPS (unsure → keep).
+const FOOTER_PNL_MONTH =
+  'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|' +
+  'sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?';
+const FOOTER_PNL_LABEL =
+  '(?:totals?|since|records?|sgps?|parlays?|straights?|roi|profits?|units?|last|overall|season|ytd|this|months?|weeks?|' +
+  FOOTER_PNL_MONTH + ')';
+// Qualifier words allowed between the label and the colon: recap vocab, months,
+// or plain numbers/ordinals ONLY — never a team/player/market word, so a
+// selection can't hide before the colon (see header, adversarial review).
+const FOOTER_PNL_QUALIFIER_WORD =
+  '(?:days?|weeks?|months?|years?|plays?|picks?|bets?|parlays?|straights?|sgps?|props?|records?|totals?|units?|free|vip|roi|' +
+  FOOTER_PNL_MONTH + '|\\d{1,4}(?:st|nd|rd|th)?)';
+const FOOTER_PNL_LINE_RE = new RegExp(
+  '^[^A-Za-z0-9]*' +                                        // leading bullets/emoji only
+  FOOTER_PNL_LABEL + '\\b' +
+  '(?:[\\s.,-]+' + FOOTER_PNL_QUALIFIER_WORD + '\\b)*' +    // qualifier: closed vocab/month/number words only
+  '[\\s.,-]*:' +                                            // then the colon
+  '\\s*[+-]\\s?\\d+(?:[.,]\\d+)?\\s*u(?:nits?)?\\b' +       // SIGNED P&L units token
+  '[^A-Za-z0-9]*$',                                         // trailing punctuation/emoji only
+  'i'
+);
+const FOOTER_URL_RE = /\b(?:https?:\/\/\S+|www\.[^\s|]+|t\.me\/\S+)/i;
+
+// True when a segment is stats-footer/recap-footer content, not a pick.
+function isStatsFooterSegment(text) {
+  const s = String(text == null ? '' : text).trim();
+  if (!s) return false;
+  if (FOOTER_PNL_LINE_RE.test(s)) return true;                     // A: "<label>: ±Nu" whole-segment
+  if (isNonPickSegment(s)) return true;                            // B: record/promo line
+  if (FOOTER_URL_RE.test(s) && parseUnits(s) == null) return true; // C: stake-less link block
+  return false;
+}
+
+// Pure: remove stats-footer segments from a raw slate text. Returns
+// { text, removedCount, removed } — `text` re-joined with '\n' is equivalent
+// under splitSegments (which splits on pipe OR newline), so detection over the
+// filtered text sees exactly the kept segments.
+function stripStatsFooter(rawText) {
+  const segments = splitSegments(rawText);
+  const kept = [];
+  const removed = [];
+  for (const seg of segments) (isStatsFooterSegment(seg) ? removed : kept).push(seg);
+  return { text: kept.join('\n'), removedCount: removed.length, removed };
+}
+
 // Parse ONE segment into a pick, or null. A segment is a sheet pick only when it
 // is NOT a record/promo/stat line AND carries its OWN stake token (the per-pick-
 // stake discriminator) and a usable description; that gate keeps genuine
@@ -257,12 +342,14 @@ function emit(recordStageFn, eventType, ingestId, sourceRef, payload) {
   } catch (_) { /* observability must never break ingest */ }
 }
 
-function shadowPayload(det) {
+function shadowPayload(det, footer) {
   return {
     wouldSplit: det.isSheet,
     multiLeg: det.multiLeg,
     legCount: det.legCount,
     pickCount: det.unitBearing,
+    // segmentCount counts the KEPT segments (post footer-strip); the stripped
+    // ones are accounted for by footerRemovedCount below.
     segmentCount: det.segmentCount,
     distinctSports: det.distinctSports,
     sports: det.sports.slice(0, 12),
@@ -270,6 +357,11 @@ function shadowPayload(det) {
     sample: det.picks.slice(0, 4).map((p) => ({
       d: (p.description || '').slice(0, 48), u: p.units, s: p.sport, c: p.sportConfidence,
     })),
+    // Stats-footer filter observability (cutover precondition 1) — lets the
+    // next spot-check measure the filter's effect straight from events.
+    footerStripped: !!(footer && footer.removedCount > 0),
+    footerRemovedCount: footer ? footer.removedCount : 0,
+    footerRemovedSample: footer ? footer.removed.slice(0, 4).map((s) => s.slice(0, 48)) : [],
   };
 }
 
@@ -285,14 +377,21 @@ function shadowPayload(det) {
 function applySlateResplit({ pick, rawText, ingestId, sourceRef, mode = MODE, recordStageFn, deps } = {}) {
   try {
     if (mode === 'off') return { ran: false, isSheet: false, picks: [], detection: null };
-    const det = detectSheet({ pick, rawText, deps });
     if (mode === 'shadow') {
+      // Cutover precondition 1: strip stats-footer segments BEFORE detection so
+      // a footer's signed P&L "u" token cannot mint phantom picks / inflate
+      // pickCount into a false wouldSplit. SHADOW-ONLY by design — this refines
+      // what shadow WOULD decide; the cutover branch below still detects on the
+      // raw text, byte-identical to before.
+      const footer = stripStatsFooter(rawText);
+      const det = detectSheet({ pick, rawText: footer.text, deps });
       // Measure only the candidate population (multi-leg vision parlays) so the
       // shadow volume tracks parlays, not every single-bet tweet. NEVER re-splits.
-      if (det.multiLeg) emit(recordStageFn, 'slate_resplit_shadow', ingestId, sourceRef, shadowPayload(det));
+      if (det.multiLeg) emit(recordStageFn, 'slate_resplit_shadow', ingestId, sourceRef, shadowPayload(det, footer));
       return { ran: true, isSheet: false, picks: det.picks, detection: det };
     }
     if (mode === 'cutover') {
+      const det = detectSheet({ pick, rawText, deps });
       if (det.isSheet) {
         emit(recordStageFn, 'slate_resplit_used', ingestId, sourceRef, {
           legCount: det.legCount, pickCount: det.unitBearing,
@@ -316,6 +415,8 @@ module.exports = {
   detectSheet,
   parsePick,
   isNonPickSegment,
+  isStatsFooterSegment,
+  stripStatsFooter,
   inferPickSport,
   splitSegments,
   parseUnits,
