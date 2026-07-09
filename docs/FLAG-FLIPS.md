@@ -87,3 +87,10 @@ Two review caveats: (1) the §9 grader write-back's guard rejections do NOT emit
 callback — `[eventDateWriteback] … guard NULLed` in logs is its trail), so the SQL slightly
 undercounts total guard firings; (2) a days-late 🔄 re-ingest of an old slip re-extracts a stale
 printed date and legitimately rejects — a row there is the guard working, not extractor drift.
+
+## 2026-07-09 — EVENT_DATE_SANITY_MODE unset→shadow (v840)
+Telemetry only (enforce≡shadow today, no teeth). Emits `event_date_sanity_rejected`
+pipeline event on out-of-bounds event_date rejections. Code shipped v838 (#195);
+flag applied via `fly secrets deploy` after the v839 (#196) image deploy — the
+flydeploy push 502'd at registry AFTER the machine had already taken the image,
+so staged secret needed a separate secrets-deploy.
