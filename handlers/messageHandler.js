@@ -1275,11 +1275,86 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
         return;
       }
 
+      // ═══ SGP 2b (design D2, #41 Option A): drop→hold on a gate PASS ═══
+      // Vision failed on this message (is_bet=false / indeterminate below) — the
+      // outcome today is a legless hold (human channel) or PURE_SLIP_SKIP_HOLD →
+      // drop (pure-slip capper channels, the DatDude silent-drop path). When the
+      // slip is an SGP/SGPMAX HRB slip whose OCR→Groq parse clears the
+      // deterministic gate (services/sgpGate.js, validated live via PR 2a's
+      // ocr_sgp_would_hold split + docs/regrades/sgp-audit-20260710.json), hold
+      // it for human review carrying the OCR-parsed legs instead.
+      //
+      // Gated on SGP_HOLD_MODE (off default | shadow | enforce, read per call in
+      // ocrFirstWiring.resolveSgpHoldMode). Returns true ONLY when the slip was
+      // staged as a hold (enforce + gate PASS) — the caller then returns and the
+      // branch's existing routing never runs. EVERY other outcome (off, shadow,
+      // non-human channel, no/multi image, gate FAIL, any error) returns false
+      // and the branch proceeds byte-identically to today. NEVER throws into
+      // ingest — same swallow discipline as runSgpWouldHold.
+      const trySgpDropToHold = async (holdReason, holdExtra, aiVerdict) => {
+        try {
+          const sgpHoldMode = ocrFirstWiring.resolveSgpHoldMode();
+          if (sgpHoldMode === 'off') return false;
+          // Same human-channel scope as the branches' own hold eligibility —
+          // holds are curated-channel review; other surfaces keep their drop.
+          const sgpHumanChannelIds = (process.env.HUMAN_SUBMISSION_CHANNEL_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+          if (!sgpHumanChannelIds.includes(message.channel.id)) return false;
+          if (imageUrls.length === 0) return false; // an SGP slip is an image
+          const res = await ocrFirstWiring.runSgpDropToHold({
+            imageUrl: imageUrls[0],
+            mediaType: combinedImages[0]?.type,
+            // REAL attachments only (slip+share-embed collapses to 1) — same
+            // derivation as the applyOcrFirst seam above.
+            imageCount: ocrFirstWiring.eligibleImageCount(combinedImages),
+            requestId: ingestId,
+            sourceRef,
+            mode: sgpHoldMode,
+          });
+          if (!res || res.hold !== true || !res.sgp) return false;
+          // Same payload shape as the branch's own hold (loadHoldEvent / modal /
+          // review tooling all keep working), plus the additive ocrSgp block the
+          // release modal prefills from (services/holdReview.js sgpHoldPrefill).
+          const holdPayload = {
+            reason: holdReason,
+            ...holdExtra,
+            channelId: message.channel.id,
+            capper: capperInfo?.name || message.author?.username || 'unknown',
+            messageUrl: message.url,
+            sample: cleanText.slice(0, 400),
+            ocrSgp: res.sgp,
+          };
+          linkReader.attachShareLink(holdPayload, cleanText);
+          // Fit the FINAL payload (incl. sample + share_link) under the
+          // pipeline-events 4000-char safeJson slice — a truncated payload is
+          // invalid JSON and bricks the hold's Release/recover flow. Clones on
+          // shrink; res.sgp (used for the embed below) is never mutated.
+          stageAll('MANUAL_REVIEW_HOLD', ocrFirstWiring.fitHoldPayload(holdPayload));
+          try {
+            await sendHoldReviewEmbed(message.client, {
+              ingestId,
+              capperName: capperInfo?.name || message.author?.username || 'unknown',
+              channelId: message.channel.id,
+              aiVerdict: `${aiVerdict} → SGP gate PASS (${res.sgp.legCount} legs)`,
+              sample: res.sgp.description || cleanText,
+              messageUrl: message.url,
+            });
+          } catch (e) { console.log(`[ManualReviewNotice] Failed: ${e.message}`); }
+          console.log(`[SgpHold] SGP gate PASS → MANUAL_REVIEW_HOLD (${holdReason}) legs=${res.sgp.legCount} channel=${message.channel.id}`);
+          return true;
+        } catch (err) {
+          try { console.warn(`[SgpHold] swallowed: ${err && err.message}`); } catch (_) { /* noop */ }
+          return false;
+        }
+      };
+
       // AI explicitly said not-a-bet.
       // Human-submission channels: hold for manual review (MANUAL_REVIEW_HOLD stage event)
       // instead of silent drop, since a real human posted to a curated capper channel.
       // All other surfaces: existing PRE_FILTER_NO_BET_CONTENT drop is correct.
       if (parsed.is_bet === false) {
+        // SGP 2b: gate-PASS SGP slips hold (with legs) instead of the routing
+        // below; anything else falls through unchanged.
+        if (await trySgpDropToHold('ai_is_bet_false', {}, 'ignore (is_bet=false)')) return;
         const humanChannelIds = (process.env.HUMAN_SUBMISSION_CHANNEL_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
         const isHumanChannel = humanChannelIds.includes(message.channel.id);
         // pureSlipChannelIds / isPureSlip hoisted to the top of processAggregatedMessage.
@@ -1374,6 +1449,16 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
       // AI indeterminate (no is_bet=true, no usable bets).
       // Same human-channel hold pattern as the is_bet=false branch above.
       if (parsed.is_bet !== true && (!parsed.bets || parsed.bets.length === 0)) {
+        // SGP 2b: same gate-PASS drop→hold as the is_bet=false branch above.
+        if (await trySgpDropToHold(
+          'ai_indeterminate_no_bets',
+          {
+            is_bet_value: parsed.is_bet === undefined ? 'undefined' : String(parsed.is_bet),
+            parsedType: parsed.type || null,
+            betCount: parsed.bets?.length || 0,
+          },
+          `indeterminate (is_bet=${parsed.is_bet}, bets=${parsed.bets?.length || 0})`,
+        )) return;
         const humanChannelIds = (process.env.HUMAN_SUBMISSION_CHANNEL_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
         const isHumanChannel = humanChannelIds.includes(message.channel.id);
         // pureSlipChannelIds / isPureSlip hoisted to the top of processAggregatedMessage.

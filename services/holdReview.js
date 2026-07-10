@@ -49,6 +49,52 @@ function loadHoldEvent(ingestId) {
   try { return JSON.parse(event.payload); } catch (_) { return null; }
 }
 
+// ─────────────────────────────────────────────────────────────
+// SGP 2b (design D2): OCR-leg surfacing in the Release modal
+//
+// A hold staged by the SGP drop→hold rescue (handlers/messageHandler.js
+// trySgpDropToHold) carries an additive `ocrSgp` payload block:
+//   { gate:'SGP_PASS', legs:[{entity,market,line,odds}], description,
+//     total_odds, stake, payout, declaredLegCount, ... }
+// where `description` is the precomputed newline-joined leg lines
+// (ocrFirstWiring.sgpHoldLegLine). Both helpers below are PURE and exported
+// for unit tests; holds without ocrSgp behave byte-identically to before.
+
+// Modal prefill: prefer the OCR legs over the (often empty on an image-only
+// slip) text sample, and prefill odds from the slip's combined odds.
+function sgpHoldPrefill(payload) {
+  const sgp = payload && payload.ocrSgp && typeof payload.ocrSgp === 'object' ? payload.ocrSgp : null;
+  const legsDescription = sgp && typeof sgp.description === 'string' && sgp.description.trim()
+    ? sgp.description
+    : null;
+  const odds = sgp && sgp.total_odds != null && String(sgp.total_odds).trim()
+    ? String(sgp.total_odds).trim()
+    : null;
+  return {
+    description: legsDescription || (payload && payload.sample) || '',
+    odds,
+  };
+}
+
+// Release plan: an ocrSgp hold whose (operator-editable) description still has
+// ≥2 non-empty lines releases as a PARLAY with one leg per line — the newline-
+// separated-description parlay convention (bets.description / parlay_legs).
+// Everything else keeps today's exact shape: bet_type 'straight', no legs.
+// Keys on the gate stamp (gate:'SGP_PASS') + description lines, NOT the legs
+// array — an oversized payload may have had legs dropped to stay under the
+// pipeline_events 4000-char slice (ocrFirstWiring runSgpDropToHold cap).
+// Leg odds stay null on purpose: after operator edits the line↔odds alignment
+// is unreliable, and parlays grade off the parent odds + leg descriptions.
+function sgpReleasePlan(payload, description) {
+  const sgp = payload && payload.ocrSgp && typeof payload.ocrSgp === 'object' ? payload.ocrSgp : null;
+  const lines = String(description == null ? '' : description)
+    .split('\n').map((l) => l.trim()).filter(Boolean);
+  if (!sgp || sgp.gate !== 'SGP_PASS' || lines.length < 2) {
+    return { betType: 'straight', legs: [] };
+  }
+  return { betType: 'parlay', legs: lines.map((l) => ({ description: l, odds: null })) };
+}
+
 function strippedComponentsKeepLinks(message) {
   const keptButtons = message.components?.[0]?.components?.filter(c => c.style === 5) || [];
   if (keptButtons.length === 0) return [];
@@ -613,6 +659,10 @@ async function handleReleaseButton(interaction, ingestId) {
       .setCustomId(`hold:releasemodal:${ingestId}`)
       .setTitle('Release as Bet');
 
+    // SGP 2b: an ocrSgp hold prefills the gate's legs (one per line) and the
+    // slip's combined odds; plain holds keep the sample-based prefill.
+    const prefill = sgpHoldPrefill(payload);
+
     const capperInput = new TextInputBuilder()
       .setCustomId('capper_name').setLabel('Capper (must match an existing capper)')
       .setStyle(TextInputStyle.Short).setRequired(true)
@@ -625,12 +675,18 @@ async function handleReleaseButton(interaction, ingestId) {
     const descInput = new TextInputBuilder()
       .setCustomId('description').setLabel('Description')
       .setStyle(TextInputStyle.Paragraph).setRequired(true)
-      .setValue((payload.sample || '').slice(0, 1000));
+      // 3000, not the old 1000: ocrSgp.description can be up to 1800 chars
+      // (runSgpDropToHold cap) and a 1000-char slice would silently drop legs
+      // from the released parlay (sgpReleasePlan builds legs from these lines).
+      // Discord paragraph inputs accept 4000. Plain holds (sample ≤ 400) are
+      // unaffected.
+      .setValue((prefill.description || '').slice(0, 3000));
 
     const oddsInput = new TextInputBuilder()
       .setCustomId('odds').setLabel('Odds')
       .setStyle(TextInputStyle.Short).setRequired(true)
       .setPlaceholder('-110, +150');
+    if (prefill.odds) oddsInput.setValue(prefill.odds.slice(0, 16));
 
     const unitsInput = new TextInputBuilder()
       .setCustomId('units').setLabel('Units')
@@ -699,11 +755,16 @@ async function handleReleaseModal(interaction, ingestId) {
     }
     const [, channelId, messageId] = urlMatch;
 
+    // SGP 2b: an ocrSgp hold whose edited description keeps ≥2 lines releases
+    // as a parlay with one leg per line; everything else is today's exact
+    // straight/no-legs shape (sgpReleasePlan is pure + unit-tested).
+    const plan = sgpReleasePlan(payload, description);
+
     const savedBet = createBetWithLegs({
       capper_id: capper.id,
       sport,
       league: null,
-      bet_type: 'straight',
+      bet_type: plan.betType,
       description,
       odds,
       units,
@@ -718,7 +779,7 @@ async function handleReleaseModal(interaction, ingestId) {
       payout: null,
       is_ladder: false,
       ladder_step: 0,
-    }, []);
+    }, plan.legs);
 
     if (savedBet?._deduped) {
       return interaction.editReply({
@@ -745,6 +806,8 @@ async function handleReleaseModal(interaction, ingestId) {
         odds,
         units,
         message_url: messageUrl,
+        // SGP 2b: additive — absent on plain (straight) releases.
+        ...(plan.betType === 'parlay' ? { bet_type: plan.betType, leg_count: plan.legs.length } : {}),
       },
     });
 
@@ -778,4 +841,4 @@ async function handleReleaseModal(interaction, ingestId) {
   }
 }
 
-module.exports = { handleHoldInteraction, dismissHold, recoverHold, _recoveredDatesFromTimestamp, _graceMarkRecoveredBets, GRACE_DAYS, FETCH_MAX_ATTEMPTS, FETCH_RETRY_BACKOFF_MS, RECOVERY_RETRY_CAP };
+module.exports = { handleHoldInteraction, dismissHold, recoverHold, sgpHoldPrefill, sgpReleasePlan, _recoveredDatesFromTimestamp, _graceMarkRecoveredBets, GRACE_DAYS, FETCH_MAX_ATTEMPTS, FETCH_RETRY_BACKOFF_MS, RECOVERY_RETRY_CAP };
