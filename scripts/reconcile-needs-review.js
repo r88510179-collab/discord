@@ -97,10 +97,13 @@ const REQUIRED_BETS_COLS = [
 
 function parseArgs(argv) {
   const out = { mode: null, dbPath: null, allowNonprod: false, force: false };
+  // 'conflict' is STICKY: once both modes have been seen, no later repeat of
+  // either flag may un-conflict the parse — any command line that contains
+  // --dry-run must never reach apply (e.g. `--dry-run --apply --apply`).
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--apply') out.mode = out.mode === 'dry-run' ? 'conflict' : 'apply';
-    else if (a === '--dry-run') out.mode = out.mode === 'apply' ? 'conflict' : 'dry-run';
+    if (a === '--apply') out.mode = (out.mode === 'dry-run' || out.mode === 'conflict') ? 'conflict' : 'apply';
+    else if (a === '--dry-run') out.mode = (out.mode === 'apply' || out.mode === 'conflict') ? 'conflict' : 'dry-run';
     else if (a === '--force') out.force = true;
     else if (a === '--allow-nonprod') out.allowNonprod = true;
     else if (a === '--db') {
@@ -190,6 +193,20 @@ module.exports = {
 
 const USAGE = 'Usage: node scripts/reconcile-needs-review.js [--db <path>] [--dry-run|--apply] [--force] [--allow-nonprod]';
 
+// Operator flow is sftp-upload to /tmp in the container (merged != deployed),
+// where a bare require resolves nothing on the /tmp ancestor chain — same
+// fallback as backfill-event-dates.js / apply-regrade-s01-s05.js.
+function requireBetterSqlite() {
+  const path = require('path');
+  const APP_ROOT = process.env.APP_ROOT || '/app';
+  const candidates = ['better-sqlite3', path.join(APP_ROOT, 'node_modules', 'better-sqlite3')];
+  let lastErr;
+  for (const c of candidates) {
+    try { return require(c); } catch (err) { lastErr = err; }
+  }
+  throw lastErr;
+}
+
 function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.error) {
@@ -204,7 +221,7 @@ function main() {
     process.exit(2);
   }
 
-  const Database = require('better-sqlite3');
+  const Database = requireBetterSqlite();
   let db;
   try {
     db = new Database(args.dbPath, { readonly: !apply, fileMustExist: true });
@@ -257,7 +274,12 @@ function main() {
   if (rows.length > 0 && !magnitude.ok && !args.force) {
     console.error(`\nABORT: count ${rows.length} is outside the ±${MAGNITUDE_TOLERANCE * 100}% band around ${EXPECTED_COUNT} — re-run with --apply --force to override. Nothing was written.`);
     db.close();
-    process.exit(2);
+    // exitCode + natural exit (NOT process.exit): the before-state JSON just
+    // printed can exceed the 64KB pipe buffer, and process.exit() drops
+    // undrained stdout — truncating the operator's archive exactly when the
+    // population is anomalous.
+    process.exitCode = 2;
+    return;
   }
 
   // ONE transaction; the WHERE clause repeats the full selection predicate,

@@ -30,6 +30,8 @@ check('A1: default is dry-run', S.parseArgs([]).mode === 'dry-run');
 check('A1: default db is prod', S.parseArgs([]).dbPath === S.PROD_DB_PATH);
 check('A1: --apply parses', S.parseArgs(['--apply']).mode === 'apply');
 check('A1: --apply --dry-run conflict', !!S.parseArgs(['--apply', '--dry-run']).error);
+check('A1: conflict is STICKY — --dry-run --apply --apply still errors', !!S.parseArgs(['--dry-run', '--apply', '--apply']).error);
+check('A1: conflict is STICKY — --apply --dry-run --dry-run still errors', !!S.parseArgs(['--apply', '--dry-run', '--dry-run']).error);
 check('A1: unknown arg → error', !!S.parseArgs(['--frobnicate']).error);
 check('A1: --db with a MISSING value errors (never silently falls to prod)', !!S.parseArgs(['--db']).error);
 check('A1: --db swallowing the next flag errors', !!S.parseArgs(['--db', '--apply']).error);
@@ -242,6 +244,27 @@ const DB_C = path.join(TMP, 'c2.db');
   const conf = db2.prepare("SELECT COUNT(*) AS n FROM bets WHERE review_status = 'confirmed'").get().n;
   db2.close();
   check('C6: all 161 now confirmed, none left needs_review', left === 0 && conf === 161);
+}
+
+// C7: magnitude abort with a LARGE population must not truncate the archived
+// JSON — >64KB of before-state through a pipe survives the exit-2 path
+// (process.exitCode + natural exit, never process.exit after the JSON print).
+{
+  const f = path.join(TMP, 'c7.db');
+  const db = makeDb(f);
+  for (let i = 0; i < 250; i++) {
+    seed(db, `big-${String(i).padStart(3, '0')}`, { result: 'win', review_status: 'needs_review' });
+  }
+  db.close();
+  const r = run(['--apply'], f);
+  check('C7: 250-row --apply without --force → exit 2', r.status === 2 && /ABORT/.test(r.out));
+  check('C7: abort output is big enough to exercise the pipe buffer (>64KB)', r.out.length > 65536);
+  check('C7: archived JSON survives the abort intact (parses, 250 rows)', (() => {
+    const m = r.out.match(/BEFORE-STATE JSON \(archive this\):\n(\[[\s\S]*?\n\])/);
+    if (!m) return false;
+    try { return JSON.parse(m[1]).length === 250; } catch (_) { return false; }
+  })());
+  check('C7: nothing written on the big-population abort', snapshotRow(f, 'big-000').review_status === 'needs_review');
 }
 
 fs.rmSync(TMP, { recursive: true, force: true });
