@@ -1796,39 +1796,53 @@ Full readonly sweep of the 361 bets with result='pending' older than 24h. Every 
 Do not re-open "stuck pending" as a standalone investigation — the lever is (1) working the
 needs_review queue and (2) the S-arc source paths, both already tracked.
 
-## SLATE_RESPLIT cutover verdict: STAY SHADOW (spot-check 2026-07-09, n=55 of 57 events)
-Full payload review of all `slate_resplit_shadow` pipeline_events (2026-07-04 → 07-09).
-wouldSplit=true: 14. Of those ~5 are false/garbage splits; also a false-NEGATIVE class.
-Three preconditions before any cutover flip:
+## SLATE_RESPLIT cutover verdict: STAY SHADOW (re-measured 2026-07-10, n=77 shadow events)
 
-1. **Stats-footer contamination (worst class).** Capper ROI footers parsed as picks —
-   `Total: +`, `Since Jun 11: -`, `SGP Parlay: -`, `Grass Record 72-32 (69%)` — with the
-   running P&L landing in units (u=1.6, 2.87, even 48.7). Cutover would mint phantom
-   bets with 48-unit stakes off a record line. Evidence: twit_2074867391738105896,
-   twit_2074483275452633352, twit_2073780065347747969, twit_2074119944707391954,
-   twit_2073408453779812573. Fix: drop `Total:/Since <date>:/Record/SGP:/Parlay:`-shaped
-   segments before pick extraction.
+Supersedes the 2026-07-09 spot-check writeup (n=55/57). Re-measured **read-only** against
+live `/data/bettracker.db` this session: **77** `slate_resplit_shadow` events, **24**
+`wouldSplit=true`. The three "preconditions" from the 7/09 prose were reconciled against
+**code** (code is authoritative — the 7/09 writeup was frozen before the footer filter
+landed and never retro-edited). Cutover STILL blocked, but by the false-negative recall
+class below, **not** by the preconds.
 
-2. **Ladder double-count.** twit_2074613046878638498 splits Djokovic ML + S1/S3/S4 MLs
-   into 4 concurrent picks — but S3 ML (twit_2074564596933775520, 19:30) and S4 ML
-   (twit_2074577632797077876, 23:00) posted individually as ladder steps the same day.
-   Re-split = duplicate bets for anything already ingested via the ladder path. Fix:
-   suppress re-split when picks match an active ladder / recently-ingested singles.
+**Precond status (reconciled to code + live telemetry):**
 
-3. **Sport-label fragmentation feeds distinctSports.** Splits triggered on "2 sports"
-   that are `World Cup`+`Soccer` (twit_2074280485065240864) and `SOCCER`+`Soccer`
-   (twit_2074483275452633352); also Colombia-to-reach-Last-16 tagged Tennis
-   (twit_2073249314890014740). The known 5-label Soccer taxonomy fragmentation
-   (see "Sport-label taxonomy normalization" item) now has a concrete consumer —
-   normalize BEFORE the distinctSports computation.
+1. **Stats-footer contamination — SHIPPED (shadow-only), firing clean.** `stripStatsFooter`
+   / `isStatsFooterSegment` (`services/slateResplit.js:273` / `:260`, both exported) run
+   detection on footer-stripped text; the shadow payload carries `footerStripped` /
+   `footerRemovedCount` / `footerRemovedSample`. Live 2026-07-10: **2** strips across the
+   **19** post-filter rows; `footer_stripped_in_would = 0` — no footer-contaminated
+   would-split remains. Coverage is only ~2 days post-ship; re-confirm the 0 after ~1wk.
+   No further code.
 
-**False-negative class (cutover would also MISS real slates):** multiple MLB events
-with legCount 7–12 but pickCount=0, sample=[] (e.g. twit_2073644116563607734 legs=11,
-twit_2073923702245425164 legs=7, twit_2074172375520727235 legs=12) — detector sees
-legs but extracts zero picks, so those parlays would silently not re-split.
+2. **Ladder double-count — ALREADY GUARDED in the cutover path.** The prescribed fix exists:
+   the cutover branch runs per-pick `findRecentRepost` (`services/twitter-handler.js:331`)
+   and drops any re-split pick matching a recently-ingested ladder single as
+   `DUPLICATE_REPOST`. Residual = a `normalizeForDedup` key-equivalence check on the
+   Djokovic-ladder case (`twit_2074613046878638498` vs the S3/S4 singles) — validate at
+   flip time; moot under shadow (shadow never re-splits). No code today.
 
-**Legit splits confirmed (~8-9):** multi-pick same-slate soccer posts with distinct
-games + sane units (e.g. twit_2073251767278538864, twit_2074539700086255840,
-twit_2074176839568752848) — the detector reads the intended case correctly.
+3. **Sport-label fragmentation — TELEMETRY-ONLY, not a gate.** Code: `isSheet = multiLeg
+   && picks.length >= 2` — `distinctSports` is reported in the payload but is **never gated
+   on**. Live: **3** of the 24 `wouldSplit` events show ≥2 raw sports collapsing to 1
+   normalized, all legit soccer slates mislabeled 2-sport (`[World Cup, Soccer]`,
+   `[SOCCER, Soccer]`, `[Soccer, World Cup]`) — cosmetic, they do not affect `wouldSplit`.
+   Folding a sport normalization into `shadowPayload.sports` is an **optional** telemetry
+   refinement (apply in lockstep with the "Sport-label taxonomy normalization" item); it
+   changes no cutover decision. **Deferred.**
 
-Re-run this spot-check after fixes 1–3 land; cutover decision only on a clean pass.
+**STANDING CUTOVER GATE — false-negative recall (the real blocker):** **13 of 77** shadow
+events (**17%**) are multi-leg vision parlays with `legCount ≥ 2` but `pickCount = 0` — the
+detector sees legs but `parsePick` extracts zero picks (segments carry no per-segment stake
+token), so under cutover these real slates would stay collapsed as the single dominant-sport
+parlay instead of re-splitting. Mostly MLB (samples `twit_2073644116563607734` legs=11,
+`twit_2073923702245425164` legs=7, `twit_2074172375520727235` legs=12). This is a `parsePick`
+**recall** gap, distinct from the preconds — cutover would ship with 17% of real slates still
+collapsed. **Before any cutover:** sample these 13 to separate genuine misses from correct
+single-stake-parlay rejections, then decide whether to relax the per-segment stake requirement
+in `parsePick`. This is the cutover-blocking item.
+
+**Verdict:** STAY SHADOW. Preconds effectively handled (1 shipped, 2 guarded, 3 cosmetic/
+deferred); cutover gated on closing the 17% false-negative recall gap. Re-run the shadow
+measurement after that lands; cutover decision only on a clean pass (false-negative →
+near-zero AND `footer_stripped_in_would` still 0).
