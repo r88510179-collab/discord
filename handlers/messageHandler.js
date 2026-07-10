@@ -1324,7 +1324,11 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
             ocrSgp: res.sgp,
           };
           linkReader.attachShareLink(holdPayload, cleanText);
-          stageAll('MANUAL_REVIEW_HOLD', holdPayload);
+          // Fit the FINAL payload (incl. sample + share_link) under the
+          // pipeline-events 4000-char safeJson slice — a truncated payload is
+          // invalid JSON and bricks the hold's Release/recover flow. Clones on
+          // shrink; res.sgp (used for the embed below) is never mutated.
+          stageAll('MANUAL_REVIEW_HOLD', ocrFirstWiring.fitHoldPayload(holdPayload));
           try {
             await sendHoldReviewEmbed(message.client, {
               ingestId,

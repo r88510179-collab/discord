@@ -632,6 +632,51 @@ async function runSgpDropToHold({ imageUrl, mediaType, imageCount, requestId, so
 }
 
 /**
+ * Fit a MANUAL_REVIEW_HOLD payload under pipeline-events' safeJson slice.
+ *
+ * safeJson truncates serialized payloads at 4000 chars — a truncated payload is
+ * INVALID JSON, loadHoldEvent then returns null, and the hold's Release /
+ * recover flow is bricked (strictly worse than today's legless hold). The
+ * ocrSgp block is budgeted at build time (runSgpDropToHold), but the FINAL
+ * staged payload also carries reason/channelId/capper/messageUrl, a 400-char
+ * sample, and (LINK_READER_MODE=shadow) an additive share_link block — the sum
+ * can clear 4000 even with the block under its own cap.
+ *
+ * Never mutates the input (clones per shrink step — the caller's res.sgp ref
+ * stays intact for the embed). Shrinks least-load-bearing first:
+ *   1. drop ocrSgp.legs (description still carries every leg line;
+ *      sgpReleasePlan keys on gate+description, never legs)
+ *   2. trim sample to 100 chars
+ *   3. trim ocrSgp.description to 1000 chars (modal prefill order of magnitude)
+ *   4. last resort: drop the ocrSgp block entirely — degrades to today's
+ *      plain-hold payload shape, which always fits.
+ */
+function fitHoldPayload(payload, budget = 3800) {
+  let p = payload;
+  const size = () => {
+    try { return JSON.stringify(p).length; } catch (_) { return budget + 1; }
+  };
+  if (size() <= budget) return p;
+  if (p.ocrSgp && typeof p.ocrSgp === 'object' && Array.isArray(p.ocrSgp.legs) && p.ocrSgp.legs.length) {
+    p = { ...p, ocrSgp: { ...p.ocrSgp, legs: [], legsOmitted: p.ocrSgp.legs.length } };
+    if (size() <= budget) return p;
+  }
+  if (typeof p.sample === 'string' && p.sample.length > 100) {
+    p = { ...p, sample: p.sample.slice(0, 100) };
+    if (size() <= budget) return p;
+  }
+  if (p.ocrSgp && typeof p.ocrSgp === 'object' && typeof p.ocrSgp.description === 'string' && p.ocrSgp.description.length > 1000) {
+    p = { ...p, ocrSgp: { ...p.ocrSgp, description: p.ocrSgp.description.slice(0, 1000) } };
+    if (size() <= budget) return p;
+  }
+  if (p.ocrSgp) {
+    const { ocrSgp, ...rest } = p;
+    p = rest;
+  }
+  return p;
+}
+
+/**
  * SHADOW — fire-and-forget. Returns the background promise (for tests to await),
  * but PRODUCTION CALLERS MUST NOT AWAIT IT. Never rejects; never touches the
  * staged bet. Emits exactly one `ocr_shadow_decision` per invocation.
@@ -819,6 +864,7 @@ module.exports = {
   runSgpWouldHold,
   runSgpDropToHold,
   sgpHoldLegLine,
+  fitHoldPayload,
   runCutover,
   ocrBetToInternalBets,
   compareToLive,

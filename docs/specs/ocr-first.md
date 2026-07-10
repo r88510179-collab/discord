@@ -339,11 +339,15 @@ Groq → `extractHeaderLegCount` → `evaluateSgpGate` chain (the PR 2a would-ho
 synchronously) at that seam; on a deterministic gate **PASS** the slip is staged as a
 `MANUAL_REVIEW_HOLD` carrying the gate's `normalizedBet` legs in an additive `ocrSgp`
 payload block, which the Release modal prefills from and releases as a real parlay
-(`services/holdReview.js` `sgpHoldPrefill` / `sgpReleasePlan`). The `ocrSgp` block is
-size-capped (description ≤ 1800 chars; past a ~2.8KB serialized budget the structured
-`legs` array is dropped and `legsOmitted` set) so the hold payload can never hit
-`safeJson`'s 4000-char slice and truncate to invalid JSON — `sgpReleasePlan` therefore
-keys on the `gate:'SGP_PASS'` stamp + description lines, never on `legs`.
+(`services/holdReview.js` `sgpHoldPrefill` / `sgpReleasePlan`). Two-level size guard so the
+hold payload can never hit `safeJson`'s 4000-char slice and truncate to invalid JSON (which
+would brick the hold's Release/recover flow): the `ocrSgp` block is capped at build time
+(description ≤ 1800 chars; past a ~2.8KB serialized budget the structured `legs` array is
+dropped and `legsOmitted` set), and the seam runs the FINAL payload — including `sample`
+and the link-reader `share_link` block — through `ocrFirstWiring.fitHoldPayload` (budget
+3800; shrinks legs → sample → description → drops `ocrSgp` as last resort, cloning at each
+step). `sgpReleasePlan` therefore keys on the `gate:'SGP_PASS'` stamp + description lines,
+never on `legs`.
 
 **Flag: `SGP_HOLD_MODE`** — deliberately **separate** from `OCR_FIRST_MODE`: the flip is
 gated on the SGP gate's own live validation (PR 2a split + `docs/regrades/sgp-audit-20260710.json`),

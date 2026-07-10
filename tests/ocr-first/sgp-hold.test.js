@@ -293,6 +293,48 @@ async function sectionA() {
     }
   });
 
+  await run('fitHoldPayload: under budget → same reference, untouched', () => {
+    const { fitHoldPayload } = wiring;
+    const p = { reason: 'ai_is_bet_false', sample: 'small', ocrSgp: { gate: 'SGP_PASS', legs: [{ entity: 'A', market: 'M', line: 'L' }], description: 'A L M' } };
+    assert.strictEqual(fitHoldPayload(p), p, 'no clone when it already fits');
+  });
+
+  await run('fitHoldPayload: oversized → shrinks legs → sample → description → ocrSgp, never mutates input', () => {
+    const { fitHoldPayload } = wiring;
+    const bigLegs = Array.from({ length: 30 }, (_, i) => ({ entity: `Player ${i} ${'x'.repeat(60)}`, market: 'HITS', line: 'Over 0.5', odds: null }));
+    const p = {
+      reason: 'ai_is_bet_false',
+      channelId: '1'.repeat(19),
+      capper: 'DatDude',
+      messageUrl: `https://discord.com/channels/${'1'.repeat(19)}/${'2'.repeat(19)}/${'3'.repeat(19)}`,
+      sample: 's'.repeat(400),
+      share_link: { kind: 'wrapper', url: 'u'.repeat(200), image: 'i'.repeat(300), bookUrl: 'b'.repeat(300) },
+      ocrSgp: { gate: 'SGP_PASS', legCount: 30, legs: bigLegs, description: bigLegs.map((l) => `${l.entity} Over 0.5 HITS`).join('\n').slice(0, 1800) },
+    };
+    const before = JSON.stringify(p);
+    const fitted = fitHoldPayload(p);
+    assert.ok(JSON.stringify(fitted).length <= 3800, 'fitted payload under the safeJson budget');
+    assert.strictEqual(JSON.stringify(p), before, 'input payload not mutated');
+    assert.ok(fitted.ocrSgp, 'ocrSgp block survives (legs drop first, not the block)');
+    assert.deepStrictEqual(fitted.ocrSgp.legs, [], 'legs dropped first');
+    assert.strictEqual(fitted.ocrSgp.legsOmitted, 30);
+    assert.strictEqual(fitted.ocrSgp.gate, 'SGP_PASS', 'gate stamp intact — release plan still keys on it');
+    assert.ok(fitted.ocrSgp.description.length > 0, 'description retained');
+    assert.strictEqual(fitted.reason, 'ai_is_bet_false');
+    assert.ok(fitted.share_link, 'share_link untouched');
+  });
+
+  await run('fitHoldPayload: pathological payload → drops ocrSgp entirely as last resort (plain-hold shape)', () => {
+    const { fitHoldPayload } = wiring;
+    // Force steps 1-3 to be insufficient: giant non-sgp field the fitter never
+    // trims, so only the final ocrSgp drop can matter (and the result is the
+    // plain-hold shape, whatever its size — the fitter never drops core fields).
+    const p = { reason: 'x', sample: 's'.repeat(400), huge: 'h'.repeat(5000), ocrSgp: { gate: 'SGP_PASS', legs: [{ entity: 'A' }], description: 'd' } };
+    const fitted = fitHoldPayload(p);
+    assert.strictEqual(fitted.ocrSgp, undefined, 'ocrSgp dropped as last resort');
+    assert.strictEqual(fitted.huge.length, 5000, 'non-hold fields are not the fitter\'s business');
+  });
+
   await run('no imageUrl → skip: zero calls, zero events', async () => {
     const deps = makeDeps({ decision: sgpBailDecision(SGP_SLIP10_OCR), groqParsed: SGP_SLIP10_GROQ });
     const spy = spyStage();
@@ -431,6 +473,9 @@ function loadHandlerWithMocks({ parseBetText, events, sgpMode, sgpResult, sgpCal
       resolveMode: () => 'off',
       resolveSgpHoldMode: () => sgpMode,
       eligibleImageCount: (imgs) => (Array.isArray(imgs) ? imgs.length : 0) || 1,
+      // Real fit logic is unit-tested in Section A; identity keeps seam
+      // assertions readable (payload asserted exactly as staged).
+      fitHoldPayload: (p) => p,
       applyOcrFirst: async ({ parsed }) => ({ parsed, ranOcr: false, shadowPromise: null }),
       runSgpDropToHold: async (args) => {
         if (sgpCalls) sgpCalls.push(args);
@@ -553,6 +598,18 @@ async function sectionC() {
     assert.ok(drop, 'existing PRE_FILTER_NO_BET_CONTENT drop preserved');
   });
 
+  await run('seam: shadow mode → wiring invoked but routing unchanged (skip-marker + drop, no hold)', async () => {
+    const { events, sgpCalls } = await runSeamMessage({
+      messageId: 'sgp_shadow_1', parsedShape: { is_bet: false }, sgpMode: 'shadow',
+      sgpResult: { hold: false, mode: 'shadow', shadowPromise: Promise.resolve() },
+    });
+    assert.strictEqual(sgpCalls.length, 1, 'shadow runs the wiring (measurement)');
+    assert.strictEqual(sgpCalls[0].mode, 'shadow');
+    assert.strictEqual(countStage(events, 'MANUAL_REVIEW_HOLD'), 0, 'shadow must never stage a hold');
+    assert.strictEqual(countStage(events, 'PURE_SLIP_SKIP_HOLD'), 1);
+    assert.ok(events.some(e => e.fn === 'drop' && e.dropReason === 'PRE_FILTER_NO_BET_CONTENT'), 'drop preserved in shadow');
+  });
+
   await run('seam: off mode → runSgpDropToHold never called; routing as today', async () => {
     const { events, sgpCalls } = await runSeamMessage({
       messageId: 'sgp_off_1', parsedShape: { is_bet: false }, sgpMode: 'off', sgpResult: PASS_SGP_RESULT,
@@ -606,7 +663,11 @@ async function main() {
   await sectionC();
 
   console.log(`\n${passed} passed, ${failed} failed`);
-  if (failed > 0) process.exit(1);
+  // Section C requires the real handlers/messageHandler.js, whose module-level
+  // alertCooldowns-prune setInterval (not unref'd) keeps the event loop alive
+  // forever — same trap tests/message-handler.integration.js documents. Force
+  // the exit so the npm run test:reliability &&-chain can proceed.
+  process.exit(failed > 0 ? 1 : 0);
 }
 
 main().catch((e) => {

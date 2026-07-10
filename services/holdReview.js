@@ -675,7 +675,12 @@ async function handleReleaseButton(interaction, ingestId) {
     const descInput = new TextInputBuilder()
       .setCustomId('description').setLabel('Description')
       .setStyle(TextInputStyle.Paragraph).setRequired(true)
-      .setValue((prefill.description || '').slice(0, 1000));
+      // 3000, not the old 1000: ocrSgp.description can be up to 1800 chars
+      // (runSgpDropToHold cap) and a 1000-char slice would silently drop legs
+      // from the released parlay (sgpReleasePlan builds legs from these lines).
+      // Discord paragraph inputs accept 4000. Plain holds (sample ≤ 400) are
+      // unaffected.
+      .setValue((prefill.description || '').slice(0, 3000));
 
     const oddsInput = new TextInputBuilder()
       .setCustomId('odds').setLabel('Odds')
