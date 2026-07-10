@@ -251,10 +251,12 @@ run('called with no args → fails closed, does not throw', () => {
 
 // ── glued "N-BetParlay" header → declared count reaches the gate ─────────────
 // Audit docs/regrades/sgp-audit-20260710.json: 3 of the 8 live would-hold FAILs
-// were SGP_NO_DECLARED_COUNT solely because RapidOCR glued the header
-// ("4-BetParlay") and extractHeaderLegCount missed it. OCR text below is
-// verbatim from audit slip 1 of 8; the legs are a complete well-formed parse of
-// it (every entity appears in the OCR, count matches the header).
+// were SGP_NO_DECLARED_COUNT because RapidOCR glued the header ("4-BetParlay")
+// and extractHeaderLegCount missed it. OCR text below is verbatim from audit
+// slip 1 of 8, as are the four REAL_AUDIT_LEGS Groq returned for it. NOTE the
+// header rescue does NOT force a PASS: the real parse's 4th leg (TOTAL CORNERS)
+// has no subject, so post-fix this slip advances to the more specific
+// SGP_LEG_MISSING_FIELD — only a complete parse (CORRECTED_LEGS) passes.
 const GLUED_HEADER_OCR = `Hard Rock
 BET
 SGP
@@ -275,15 +277,27 @@ TOTAL CORNERS
 Super Sub enabled. Bet continues and combines with the
 substitute'sperformance!`;
 
-run('glued "4-BetParlay" header (audit slip) → declared count 4 → gate PASS', () => {
-  const legs = [
-    { matchup: null, player: 'Lautaro Martinez', market: 'SHOTS ON TARGET', selection: 'Over 0.5', odds: null },
-    { matchup: null, player: 'Lionel Messi', market: 'SHOTS ON TARGET', selection: 'Over 1.5', odds: null },
-    { matchup: 'Argentina', player: null, market: 'TOTAL GOALS', selection: 'Over 2.5', odds: null },
-    { matchup: 'Argentina', player: null, market: 'TOTAL CORNERS', selection: 'Over 6.5', odds: null },
-  ];
+// Verbatim from the audit record (results[0].legs) — 4th leg lacks any subject.
+const REAL_AUDIT_LEGS = () => [
+  { matchup: null, player: 'LAUTARO MARTINEZ', market: 'SHOTS ON TARGET', selection: 'Over 0.5', odds: null, start_time: null },
+  { matchup: null, player: 'LIONEL MESSI', market: 'SHOTS ON TARGET', selection: 'Over 1.5', odds: null, start_time: null },
+  { matchup: 'ARGENTINA', player: null, market: 'TOTAL GOALS', selection: 'Over 2.5', odds: null, start_time: null },
+  { matchup: null, player: null, market: 'TOTAL CORNERS', selection: 'Over 6.5', odds: null, start_time: null },
+];
+
+run('glued "4-BetParlay" header + REAL audit parse → declared 4, gate advances to SGP_LEG_MISSING_FIELD', () => {
   const declared = extractHeaderLegCount(GLUED_HEADER_OCR);
   assert.strictEqual(declared, 4, 'glued header "4-BetParlay" must yield 4');
+  const r = evaluateSgpGate({ declaredLegCount: declared, parsedBet: { bet_type: 'sgp', total_odds: '+250', legs: REAL_AUDIT_LEGS() }, ocrText: GLUED_HEADER_OCR });
+  assert.strictEqual(r.pass, false);
+  assert.strictEqual(r.reason, SgpGateReason.LEG_MISSING_FIELD, `expected LEG_MISSING_FIELD (not NO_DECLARED_COUNT), got ${r.reason}`);
+  assert.strictEqual(r.detail.index, 3, 'the subject-less TOTAL CORNERS leg is the miss');
+});
+
+run('glued "4-BetParlay" header + complete parse (4th-leg subject restored) → gate PASS', () => {
+  const legs = REAL_AUDIT_LEGS();
+  legs[3].matchup = 'ARGENTINA'; // restore the subject the real parse dropped
+  const declared = extractHeaderLegCount(GLUED_HEADER_OCR);
   const r = evaluateSgpGate({ declaredLegCount: declared, parsedBet: { bet_type: 'sgp', total_odds: '+250', legs }, ocrText: GLUED_HEADER_OCR });
   assert.strictEqual(r.pass, true, `expected PASS, got ${r.reason}`);
   assert.strictEqual(r.normalizedBet.declaredLegCount, 4);
