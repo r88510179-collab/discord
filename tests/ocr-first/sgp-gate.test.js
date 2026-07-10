@@ -24,6 +24,7 @@
 
 const assert = require('assert');
 const { evaluateSgpGate, SgpGateReason } = require('../../services/sgpGate');
+const { extractHeaderLegCount } = require('../../services/ocrFirst');
 
 let passed = 0;
 let failed = 0;
@@ -246,6 +247,46 @@ run('called with no args → fails closed, does not throw', () => {
   const r = evaluateSgpGate();
   assert.strictEqual(r.pass, false);
   assert.strictEqual(r.reason, SgpGateReason.OCR_EMPTY);
+});
+
+// ── glued "N-BetParlay" header → declared count reaches the gate ─────────────
+// Audit docs/regrades/sgp-audit-20260710.json: 3 of the 8 live would-hold FAILs
+// were SGP_NO_DECLARED_COUNT solely because RapidOCR glued the header
+// ("4-BetParlay") and extractHeaderLegCount missed it. OCR text below is
+// verbatim from audit slip 1 of 8; the legs are a complete well-formed parse of
+// it (every entity appears in the OCR, count matches the header).
+const GLUED_HEADER_OCR = `Hard Rock
+BET
+SGP
+4-BetParlay
++250
+Wager
+Payout
+$5
+$17.50
+Over 0.5
+LAUTARO MARTiNEZ -SHOTS ON TARGET
+Over 1.5
+LIONEL MESSI- SHOTS ON TARGET
+Over 2.5
+ARGENTINA TOTAL GOALS
+Over 6.5
+TOTAL CORNERS
+Super Sub enabled. Bet continues and combines with the
+substitute'sperformance!`;
+
+run('glued "4-BetParlay" header (audit slip) → declared count 4 → gate PASS', () => {
+  const legs = [
+    { matchup: null, player: 'Lautaro Martinez', market: 'SHOTS ON TARGET', selection: 'Over 0.5', odds: null },
+    { matchup: null, player: 'Lionel Messi', market: 'SHOTS ON TARGET', selection: 'Over 1.5', odds: null },
+    { matchup: 'Argentina', player: null, market: 'TOTAL GOALS', selection: 'Over 2.5', odds: null },
+    { matchup: 'Argentina', player: null, market: 'TOTAL CORNERS', selection: 'Over 6.5', odds: null },
+  ];
+  const declared = extractHeaderLegCount(GLUED_HEADER_OCR);
+  assert.strictEqual(declared, 4, 'glued header "4-BetParlay" must yield 4');
+  const r = evaluateSgpGate({ declaredLegCount: declared, parsedBet: { bet_type: 'sgp', total_odds: '+250', legs }, ocrText: GLUED_HEADER_OCR });
+  assert.strictEqual(r.pass, true, `expected PASS, got ${r.reason}`);
+  assert.strictEqual(r.normalizedBet.declaredLegCount, 4);
 });
 
 run('every FAIL returns normalizedBet:null (only PASS yields a bet)', () => {

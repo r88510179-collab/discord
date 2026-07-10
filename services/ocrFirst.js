@@ -41,7 +41,11 @@ Schema (JSON):
 // SGP gate — same-game parlays route to Vision (run BEFORE Groq).
 const SGP_RE = /\b(?:SGP|SGPMAX|SAME\s+GAME(?:\s+PARLAY)?)\b/i;
 // Advisory N-Bet header, e.g. "3-Bet Parlay", "5-BetParlay", "4-Bet Parlay".
-const HEADER_RE = /(\d{1,2})\s*-?\s*bet\b/i;
+// RapidOCR drops inter-word spaces unpredictably, so the match is whitespace-
+// tolerant around the hyphen AND between "Bet" and "Parlay": the optional
+// glued-"Parlay" branch is what admits "4-BetParlay" — a bare trailing \b
+// rejects it (3/8 live FAILs in docs/regrades/sgp-audit-20260710.json).
+const HEADER_RE = /(\d{1,2})\s*-?\s*bet(?:\s*parlay)?\b/i;
 // OCR-artifact residue a correct parse would have cleaned.
 const ARTIFACT_RES = [
   /O0/,        // capital-O glued to zero: "O0ver0.5"

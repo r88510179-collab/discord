@@ -21,7 +21,7 @@ const path = require('path');
 
 const ocrFirst = require('../../services/ocrFirst');
 const localOcr = require('../../services/localOcr');
-const { extractViaOcr } = ocrFirst;
+const { extractViaOcr, extractHeaderLegCount } = ocrFirst;
 
 const FX = path.join(__dirname, 'fixtures');
 const readText = (f) => fs.readFileSync(path.join(FX, f), 'utf8');
@@ -226,6 +226,52 @@ async function main() {
     const r = await extractViaOcr('b64', 'image/webp', 'req-co', d);
     assertWellFormed(r, 'circuit-open');
     assert.strictEqual(r.reason, 'OCR_CIRCUIT_OPEN');
+  });
+
+  // ── extractHeaderLegCount — whitespace-tolerant N-Bet header ──
+  // The four header strings are VERBATIM from the live would-hold audit
+  // (docs/regrades/sgp-audit-20260710.json, 8 slips): RapidOCR emitted the
+  // glued "4-BetParlay" on 3 of the 8, and each of those failed the SGP gate
+  // with SGP_NO_DECLARED_COUNT despite the parse matching the header.
+  console.log('\nextractHeaderLegCount (N-Bet header, services/ocrFirst.js):');
+
+  await run('audit fixture "4-BetParlay" (glued, 3/8 audit FAILs) → 4', () => {
+    assert.strictEqual(extractHeaderLegCount('4-BetParlay'), 4);
+  });
+
+  await run('audit fixtures "2-Bet Parlay" → 2, "3-Bet Parlay" → 3, "4-Bet Parlay" → 4', () => {
+    assert.strictEqual(extractHeaderLegCount('2-Bet Parlay'), 2);
+    assert.strictEqual(extractHeaderLegCount('3-Bet Parlay'), 3);
+    assert.strictEqual(extractHeaderLegCount('4-Bet Parlay'), 4);
+  });
+
+  await run('full audit slip OCR (glued header amid +250 / $17.50) → 4, not an odds digit', () => {
+    // Verbatim ocrText of audit slip 1 of 8 — the standalone "BET" line and the
+    // odds/payout tokens precede-and-follow the header; the header must win.
+    const dump = 'Hard Rock\nBET\nSGP\n4-BetParlay\n+250\nWager\nPayout\n$5\n$17.50\n'
+      + 'Over 0.5\nLAUTARO MARTiNEZ -SHOTS ON TARGET\nOver 1.5\nLIONEL MESSI- SHOTS ON TARGET\n'
+      + 'Over 2.5\nARGENTINA TOTAL GOALS\nOver 6.5\nTOTAL CORNERS\n'
+      + "Super Sub enabled. Bet continues and combines with the\nsubstitute'sperformance!";
+    assert.strictEqual(extractHeaderLegCount(dump), 4);
+  });
+
+  await run('extra whitespace around hyphen / before Parlay ("4 - Bet  Parlay") → 4', () => {
+    assert.strictEqual(extractHeaderLegCount('4 - Bet  Parlay'), 4);
+    assert.strictEqual(extractHeaderLegCount('5-BetParlay'), 5);
+  });
+
+  await run('numbers in unrelated contexts do NOT match: "+250", "$17.50", "30%ProfitBoost" → null', () => {
+    assert.strictEqual(extractHeaderLegCount('+250'), null);
+    assert.strictEqual(extractHeaderLegCount('$17.50'), null);
+    assert.strictEqual(extractHeaderLegCount('30%ProfitBoost'), null);
+    // Header-less slip: a standalone "BET" line + odds must not fabricate a count.
+    assert.strictEqual(extractHeaderLegCount('Hard Rock\nBET\nSGP\n+300\nWager\nPayout\n$10\n$40.00'), null);
+  });
+
+  await run('return contract unchanged: bare "3-Bet" → 3, out-of-range "50-Bet Parlay" → null', () => {
+    assert.strictEqual(extractHeaderLegCount('3-Bet'), 3);
+    assert.strictEqual(extractHeaderLegCount('50-Bet Parlay'), null);
+    assert.strictEqual(extractHeaderLegCount(''), null);
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);
