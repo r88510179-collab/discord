@@ -154,8 +154,10 @@ odds, start_time }] }`.
   would have fixed: a stray leading capital-O glued to a digit (`O0ver0.5`, `/\bO\d/`,
   `/O0/`) or a middot `·` (U+00B7) where a `+` or digit belongs. Their presence means Groq
   passed the artifact through instead of correcting it → don't trust the parse.
-- **N-Bet header** is parsed from the OCR text via `/(\d{1,2})\s*-?\s*bet\b/i` (matches
-  `3-Bet Parlay`, `5-BetParlay`, `4-Bet Parlay`). It is **advisory**: only treated as
+- **N-Bet header** is parsed from the OCR text via `/(\d{1,2})\s*-?\s*bet(?:\s*parlay)?\b/i`
+  (matches `3-Bet Parlay`, `5-BetParlay`, `4-Bet Parlay` — the optional glued-`Parlay`
+  branch is what admits the space-dropped `5-BetParlay` form RapidOCR emits; the earlier
+  bare trailing `\b` rejected it, docs/regrades/sgp-audit-20260710.json). It is **advisory**: only treated as
   "confident" when it yields a clean integer in `[1, 30]`. If the header is **absent or
   itself OCR-corrupted**, the leg-count check is skipped — we do **not** block on it.
 
