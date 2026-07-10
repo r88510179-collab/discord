@@ -328,3 +328,37 @@ when only player names are present) is a later enhancement.
 runs against the Discord message text, not the OCR text — OCR slips rely on its
 `hasMedia:true` slip-exemption. Shadow must confirm OCR bets survive that validator before
 cutover.
+
+### 8.5 SGP drop→hold (`SGP_HOLD_MODE`, PR 2b — design D2, #41 Option A)
+
+SGP/SGPMAX slips bail to `FALLBACK_GEMINI` *before* Groq (§3 step 2), so when Vision then
+fails on one (`is_bet=false` / indeterminate) the outcome today is a legless
+`MANUAL_REVIEW_HOLD` (human channels) or `PURE_SLIP_SKIP_HOLD` → drop (pure-slip capper
+channels — the DatDude silent-drop path). `ocrFirstWiring.runSgpDropToHold` reruns the OCR →
+Groq → `extractHeaderLegCount` → `evaluateSgpGate` chain (the PR 2a would-hold chain,
+synchronously) at that seam; on a deterministic gate **PASS** the slip is staged as a
+`MANUAL_REVIEW_HOLD` carrying the gate's `normalizedBet` legs in an additive `ocrSgp`
+payload block, which the Release modal prefills from and releases as a real parlay
+(`services/holdReview.js` `sgpHoldPrefill` / `sgpReleasePlan`). The `ocrSgp` block is
+size-capped (description ≤ 1800 chars; past a ~2.8KB serialized budget the structured
+`legs` array is dropped and `legsOmitted` set) so the hold payload can never hit
+`safeJson`'s 4000-char slice and truncate to invalid JSON — `sgpReleasePlan` therefore
+keys on the `gate:'SGP_PASS'` stamp + description lines, never on `legs`.
+
+**Flag: `SGP_HOLD_MODE`** — deliberately **separate** from `OCR_FIRST_MODE`: the flip is
+gated on the SGP gate's own live validation (PR 2a split + `docs/regrades/sgp-audit-20260710.json`),
+not on the full cutover bar (§8.1). Read **per call** (flip without restart):
+
+| mode | behavior |
+|------|----------|
+| `off` (default) | zero calls, zero events — ingest byte-identical |
+| `shadow` | fire-and-forget: run the chain at the EXACT enforce seam, emit one `ocr_sgp_hold_shadow` (`kind=would_hold\|would_skip\|not_applicable`), never change routing |
+| `enforce` | gate PASS → hold-with-legs + one `ocr_sgp_hold` event; **FAIL / non-SGP / any error → today's behavior, no event** |
+
+Seam guards (both live modes, so shadow's population ≡ enforce's): `HUMAN_SUBMISSION_CHANNEL_IDS`
+channel only (holds are curated-channel review), ≥1 image, `eligibleImageCount ≤ 1` (Fix-3
+mirror — OCR sees only image[0]; PR 2a's pulse measured multi-image bails with an
+`image[0]_of_multi` scope, this seam skips them). The rescue path never throws into ingest
+(`runSgpWouldHold` swallow discipline) and only a PASS may change routing — fail-safe is
+always "what happens today". PR 2a's `ocr_sgp_would_hold` pulse (`services/sgpWouldHoldPulse.js`
++ its `runShadow` call) is **THROWAWAY** once this is live — tracked for a follow-up removal PR.

@@ -41,6 +41,30 @@ function resolveMode(raw) {
 }
 const MODE = resolveMode(process.env.OCR_FIRST_MODE);
 
+// ── SGP drop→hold mode (PR 2b, design D2) ──
+// Separate flag from OCR_FIRST_MODE ON PURPOSE: the drop→hold flip is gated on
+// the SGP gate's own shadow validation (PR 2a's ocr_sgp_would_hold split +
+// docs/regrades/sgp-audit-20260710.json), NOT on the full OCR-first cutover bar
+// (spec §8.1) — riding OCR_FIRST_MODE=cutover would couple the rescue to an
+// unrelated flip. Same tri-state idiom, but read PER CALL (the
+// EVENT_AWARE_RECHECK variant, not this module's read-at-load MODE) so ops can
+// flip without a restart and tests can toggle per case.
+//   off     (default) — no calls, no events, byte-identical ingest.
+//   shadow            — fire-and-forget: run the chain at the EXACT enforce
+//                       seam, emit one `ocr_sgp_hold_shadow` event, never
+//                       change routing. (PR 2a's ocr_sgp_would_hold measures a
+//                       different population — every SGP bail in runShadow —
+//                       and is THROWAWAY once 2b is live.)
+//   enforce           — on a gate PASS return { hold:true, sgp } so the caller
+//                       stages MANUAL_REVIEW_HOLD instead of the drop/skip; on
+//                       FAIL or ANY error return { hold:false } with no event —
+//                       fail-safe is always what happens today.
+const SGP_HOLD_MODES = new Set(['off', 'shadow', 'enforce']);
+function resolveSgpHoldMode(raw = process.env.SGP_HOLD_MODE) {
+  const m = String(raw == null ? '' : raw).trim().toLowerCase();
+  return SGP_HOLD_MODES.has(m) ? m : 'off';
+}
+
 // ── Wiring-level reason codes (distinct from ocrFirst's ReasonCode; surfaced in
 //    the shadow/cutover events so each fallback route is attributable). ──
 const WiringReason = Object.freeze({
@@ -432,6 +456,181 @@ async function runSgpWouldHold({ decision, scope, requestId, sourceRef, recordSt
   }
 }
 
+// One human-readable description line from a NORMALIZED sgpGate leg
+// ({ entity, market, line, odds } — evaluateSgpGate's normalizedBet shape, NOT
+// the raw Groq leg legLine() takes). Mirrors legLine's ordering + case-folded
+// dedup so the promoted market-in-selection case ("TO RECORD 1+ HITS" as both
+// market and line) renders once.
+function sgpHoldLegLine(leg) {
+  if (!leg || typeof leg !== 'object') return '';
+  const parts = [s(leg.entity), s(leg.line), s(leg.market)].filter(Boolean);
+  const seen = new Set();
+  const out = [];
+  for (const p of parts) {
+    const k = p.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(p);
+  }
+  return out.join(' ').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * The SGP drop→hold chain (shared verbatim by shadow and enforce so the shadow
+ * population ≡ the enforce population): fetch image bytes → extractViaOcr →
+ * REQUIRE the pre-Groq SGP bail (reason OCR_SGP_GATE — anything else means "not
+ * an SGP slip / OCR failed", not a gate FAIL) → Groq parse the bail's ocrText →
+ * declaredLegCount from the N-Bet header → evaluateSgpGate. Exactly the PR 2a
+ * would-hold chain (runSgpWouldHold), run synchronously with a fresh OCR pass
+ * because at the vision-failure seam the shadow decision is long gone.
+ *
+ * Returns { ran:false, reason } when the chain never reached the gate, else
+ * { ran:true, pass, gateReason, normalizedBet, sgpToken, declaredLegCount,
+ *   parsedLegCount, ocrMs }. May reject — callers wrap it.
+ */
+async function evaluateSgpHold({ imageUrl, mediaType, requestId, deps }) {
+  const fetchBytes = (deps && deps.fetchImageBytes) || fetchImageBytes;
+  const extract = (deps && deps.extractViaOcr) || extractViaOcr;
+  const groqParse = (deps && deps.callGroqParse) || callGroqParse;
+
+  const img = await fetchBytes(imageUrl, mediaType, baseTimeoutMs());
+  if (!img || img.ok !== true) {
+    return { ran: false, reason: (img && img.reason) || WiringReason.NO_IMAGE_BYTES };
+  }
+  const decision = await extract(img.base64, img.mediaType, requestId, deps);
+  if (!decision || decision.reason !== ReasonCode.SGP_GATE) {
+    // Non-SGP slip (any other reason incl. OCR_PARSE_OK) or OCR failure — the
+    // rescue is scoped to SGP/SGPMAX bails only. No Groq call is spent.
+    return { ran: false, reason: decision ? decision.reason : 'OCR_UNKNOWN' };
+  }
+  const ocrText = typeof decision.ocrText === 'string' ? decision.ocrText : '';
+  const parseRes = await groqParse(ocrText, requestId);
+  const parsedBet = parseRes && parseRes.ok === true && parseRes.parsed ? parseRes.parsed : null;
+  const parsedLegCount = parsedBet && Array.isArray(parsedBet.legs) ? parsedBet.legs.length : null;
+  const declaredLegCount = extractHeaderLegCount(ocrText);
+  const gate = evaluateSgpGate({ declaredLegCount, parsedBet, ocrText });
+  return {
+    ran: true,
+    pass: gate.pass === true && gate.normalizedBet != null,
+    gateReason: gate.reason,
+    normalizedBet: gate.normalizedBet,
+    sgpToken: decision.evidence ? decision.evidence.sgpToken : null,
+    declaredLegCount: declaredLegCount != null ? declaredLegCount : null,
+    parsedLegCount,
+    ocrMs: decision.timingsMs ? decision.timingsMs.total : null,
+  };
+}
+
+/**
+ * SGP drop→hold (PR 2b, design D2 — #41 Option A, at the vision-failure seam).
+ * The ONLY behavior change of the SGP-rescue arc: on a deterministic gate PASS
+ * the caller routes the slip to MANUAL_REVIEW_HOLD (carrying the OCR-parsed
+ * legs) instead of today's hold-without-legs / PURE_SLIP_SKIP_HOLD→drop.
+ *
+ * ALWAYS returns { hold, mode, sgp?, shadowPromise? } — NEVER throws, NEVER
+ * rejects. Guardrail (the #41 contract): ONLY a gate PASS may return hold:true;
+ * every FAIL, every guard skip, and every error returns { hold:false } so the
+ * caller falls through to today's behavior byte-identically (on those paths no
+ * event is emitted either — PENDING routing must stay indistinguishable from
+ * today; the shadow mode + PR 2a pulse are the measurement surfaces).
+ *
+ *   off     → { hold:false }, zero calls, zero events.
+ *   shadow  → { hold:false, shadowPromise } immediately; the chain + ONE
+ *             `ocr_sgp_hold_shadow` emit run off the request path (kind =
+ *             would_hold | would_skip | not_applicable). Callers MUST NOT await
+ *             shadowPromise (tests do).
+ *   enforce → awaited. Gate PASS → { hold:true, sgp } + ONE `ocr_sgp_hold`
+ *             event (à la cutover's ocr_used). sgp carries the gate's
+ *             normalizedBet fields + a precomputed newline-joined `description`
+ *             (the modal prefill / release-legs source, holdReview.js).
+ *
+ * Guards (both live modes, cheapest first): no imageUrl → skip; imageCount > 1
+ * → skip (Fix-3 mirror: OCR sees only image[0]; never hold a multi-image post
+ * on one image's legs). Deviation from PR 2a noted: the would-hold pulse ran on
+ * multi-image bails with scope=image[0]_of_multi; this seam skips them.
+ */
+async function runSgpDropToHold({ imageUrl, mediaType, imageCount, requestId, sourceRef, mode, deps, recordStageFn } = {}) {
+  const m = mode || resolveSgpHoldMode();
+  try {
+    if (m === 'off') return { hold: false, mode: m };
+    if (!imageUrl) return { hold: false, mode: m };
+    const count = Number(imageCount) > 0 ? Number(imageCount) : 1;
+    if (count > 1) return { hold: false, mode: m };
+
+    if (m === 'shadow') {
+      const shadowPromise = Promise.resolve()
+        .then(() => evaluateSgpHold({ imageUrl, mediaType, requestId, deps }))
+        .then((res) => {
+          emit(recordStageFn, 'ocr_sgp_hold_shadow', requestId, sourceRef, {
+            kind: !res || res.ran !== true ? 'not_applicable' : (res.pass ? 'would_hold' : 'would_skip'),
+            pass: !!(res && res.ran === true && res.pass),
+            reason: res ? (res.ran === true ? res.gateReason : res.reason) : 'OCR_UNKNOWN',
+            declaredLegCount: res && res.declaredLegCount != null ? res.declaredLegCount : null,
+            parsedLegCount: res && res.parsedLegCount != null ? res.parsedLegCount : null,
+            ocrMs: res && res.ocrMs != null ? res.ocrMs : null,
+            imageCount: count,
+          });
+        })
+        .catch((err) => {
+          // Measurement must NEVER affect ingest — swallow EVERYTHING.
+          try { console.warn(`[ocrFirst/sgpHold] shadow swallowed: ${err && err.message}`); } catch (_) { /* noop */ }
+        });
+      return { hold: false, mode: m, shadowPromise };
+    }
+
+    // enforce — synchronous: the caller is deciding hold-vs-drop right now.
+    // Every stage below is individually deadline-bounded (fetch abort, OCR
+    // abort, Groq 15s×2), so no extra wrapper timeout is needed.
+    const res = await evaluateSgpHold({ imageUrl, mediaType, requestId, deps });
+    if (!res || res.ran !== true || res.pass !== true || !res.normalizedBet) {
+      return { hold: false, mode: m }; // FAIL / not-SGP / OCR failure → today's behavior
+    }
+    const nb = res.normalizedBet;
+    const legs = Array.isArray(nb.legs) ? nb.legs : [];
+    // pipeline_events payloads are sliced at 4000 chars (safeJson) — an
+    // oversized hold payload would TRUNCATE to invalid JSON and break
+    // loadHoldEvent (Release modal + recovery read it). Keep the sgp block
+    // comfortably under that: cap the description, and past the budget drop
+    // the structured legs array — the description still carries every leg
+    // line, and sgpReleasePlan keys on gate+description lines, not legs.
+    const description = legs.map(sgpHoldLegLine).filter(Boolean).join('\n').slice(0, 1800);
+    // Gate PASS guarantees non-empty entity+market+line per leg; stay defensive.
+    if (!legs.length || !description) return { hold: false, mode: m };
+    let sgp = {
+      gate: res.gateReason, // SGP_PASS
+      sgpToken: res.sgpToken || null,
+      declaredLegCount: nb.declaredLegCount != null ? nb.declaredLegCount : res.declaredLegCount,
+      parsedLegCount: res.parsedLegCount != null ? res.parsedLegCount : null,
+      bet_type: nb.bet_type || null,
+      total_odds: nb.total_odds || null,
+      stake: nb.stake || null,
+      payout: nb.payout || null,
+      legCount: legs.length, // survives the legs-array cap below
+      legs,
+      description,
+      ocrMs: res.ocrMs != null ? res.ocrMs : null,
+    };
+    try {
+      if (JSON.stringify(sgp).length > 2800) sgp = { ...sgp, legs: [], legsOmitted: legs.length };
+    } catch (_) { sgp = { ...sgp, legs: [], legsOmitted: legs.length }; }
+    emit(recordStageFn, 'ocr_sgp_hold', requestId, sourceRef, {
+      pass: true,
+      reason: res.gateReason,
+      sgpToken: sgp.sgpToken,
+      declaredLegCount: sgp.declaredLegCount,
+      parsedLegCount: sgp.parsedLegCount,
+      legCount: legs.length,
+      ocrMs: sgp.ocrMs,
+      imageCount: count,
+    });
+    return { hold: true, mode: m, sgp };
+  } catch (err) {
+    // The added path must NEVER throw into ingest — runSgpWouldHold discipline.
+    try { console.warn(`[ocrFirst/sgpHold] swallowed: ${err && err.message}`); } catch (_) { /* noop */ }
+    return { hold: false, mode: m };
+  }
+}
+
 /**
  * SHADOW — fire-and-forget. Returns the background promise (for tests to await),
  * but PRODUCTION CALLERS MUST NOT AWAIT IT. Never rejects; never touches the
@@ -614,9 +813,12 @@ async function applyOcrFirst({ parsed, imageUrl, mediaType, imageCount, requestI
 module.exports = {
   MODE,
   resolveMode,
+  resolveSgpHoldMode,
   applyOcrFirst,
   runShadow,
   runSgpWouldHold,
+  runSgpDropToHold,
+  sgpHoldLegLine,
   runCutover,
   ocrBetToInternalBets,
   compareToLive,

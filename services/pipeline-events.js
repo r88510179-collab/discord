@@ -48,7 +48,9 @@ const EVENT_TYPES = [
   // OCR-first wiring event types (stage 'OCR_FIRST'). Additive/observational —
   // recordStage does not enforce the enum at the write boundary (see CODEMAP F-17).
   'ocr_shadow_decision', // shadow: one per slip — OCR decision compared to the live vision parse
-  'ocr_sgp_would_hold',  // shadow (PR 2a): SGP/SGPMAX would-fire measurement — Groq parse + evaluateSgpGate run on the OCR text the SGP bail produced; measurement-only, NOT in EXPECTED_STAGES, never gates behavior (PR 2b acts on a PASS)
+  'ocr_sgp_would_hold',  // shadow (PR 2a): SGP/SGPMAX would-fire measurement — Groq parse + evaluateSgpGate run on the OCR text the SGP bail produced; measurement-only, NOT in EXPECTED_STAGES, never gates behavior (PR 2b acts on a PASS). THROWAWAY once 2b (SGP_HOLD_MODE) is live — remove with sgpWouldHoldPulse in the follow-up PR.
+  'ocr_sgp_hold',        // enforce (PR 2b, SGP_HOLD_MODE): the deterministic SGP gate PASSed at the vision-failure seam and the slip was routed to MANUAL_REVIEW_HOLD (carrying the OCR legs) instead of the drop/skip — one per rescued slip, à la cutover's ocr_used (ocrFirstWiring.runSgpDropToHold). Gate FAILs emit NOTHING on this path (routing stays byte-identical to today); not in EXPECTED_STAGES.
+  'ocr_sgp_hold_shadow', // shadow (PR 2b, SGP_HOLD_MODE): would-hold measurement at the EXACT enforce seam (vision-failure branch, human channel, single-image) — kind=would_hold|would_skip|not_applicable. Distinct from PR 2a's ocr_sgp_would_hold, whose population is every SGP bail in runShadow (incl. slips vision staged fine + multi-image scopes). Measurement-only, never gates behavior; not in EXPECTED_STAGES.
   'ocr_used',            // cutover (dormant): OCR parse accepted, staged in place of Gemini
   'ocr_fallback',        // cutover (dormant): degraded to the live Gemini path
   'event_aware_shadow',  // shadow (Codex #3): EVENT_AWARE_RECHECK would-fire measurement — one row per recheck/defer decision (kind=would_window|would_defer) on stage 'GRADING_ENTER'. Additive/observational, never gates behavior (enforce acts via grading_next_attempt_at instead); not in EXPECTED_STAGES.
