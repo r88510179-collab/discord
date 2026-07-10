@@ -94,3 +94,18 @@ pipeline event on out-of-bounds event_date rejections. Code shipped v838 (#195);
 flag applied via `fly secrets deploy` after the v839 (#196) image deploy — the
 flydeploy push 502'd at registry AFTER the machine had already taken the image,
 so staged secret needed a separate secrets-deploy.
+
+## 2026-07-10 — SGP_HOLD_MODE introduced unset→enforce (code v856, #201+#202)
+New per-call tri-state flag (off default | shadow | enforce), NOT under OCR_FIRST_MODE
+(deviation rationale in PR #202 + spec §8.5). enforce: a gate-PASS SGP/SGPMAX slip at the
+vision-failure seam (is_bet=false + ai_indeterminate branches, incl. the pure-slip-channel
+silent-drop path) routes to MANUAL_REVIEW_HOLD carrying OCR legs in payload.ocrSgp; Release
+modal prefills legs and releases a real parlay. Gate FAIL / non-SGP / any error = byte-identical
+to prior behavior; the path never throws into ingest.
+Shadow phase deliberately skipped: PR 2a's ocr_sgp_would_hold measurement + the 8-slip live
+audit (docs/regrades/sgp-audit-20260710.json) served as shadow — zero false PASSes observed;
+fail-safe direction is today's behavior. #201 (glued "4-BetParlay" header regex) rode the same
+deploy: expect NO_DECLARED_COUNT −3/wk and PASS +1/wk in the would-hold split, hold volume
+~1-2/wk at current ~11 SGP events/wk.
+Flag applied via fly secrets set immediately after the image deploy; env-in-container verified
+(step 5.5). Follow-up queued: sgpWouldHoldPulse removal PR once enforce shows a clean week.
