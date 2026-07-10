@@ -248,10 +248,15 @@ function summarize(plan) {
 
 function parseArgs(argv) {
   const out = { mode: null, dbPath: null, allowNonprod: false, scrub: false, populate: false };
+  // 'conflict' is STICKY: once both modes have been seen, no later repeat of
+  // either flag may un-conflict the parse — any command line that contains
+  // --dry-run must never reach apply (e.g. `--scrub --dry-run --apply --apply`
+  // used to parse as a clean APPLY because the second --apply overwrote the
+  // sentinel). Same fix as scripts/reconcile-needs-review.js.
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--apply') out.mode = out.mode === 'dry-run' ? 'conflict' : 'apply';
-    else if (a === '--dry-run') out.mode = out.mode === 'apply' ? 'conflict' : 'dry-run';
+    if (a === '--apply') out.mode = (out.mode === 'dry-run' || out.mode === 'conflict') ? 'conflict' : 'apply';
+    else if (a === '--dry-run') out.mode = (out.mode === 'apply' || out.mode === 'conflict') ? 'conflict' : 'dry-run';
     else if (a === '--allow-nonprod') out.allowNonprod = true;
     else if (a === '--scrub') out.scrub = true;
     else if (a === '--populate') out.populate = true;

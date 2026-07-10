@@ -32,6 +32,8 @@ console.log('Section A — parseArgs + predicates');
 check('A1: default is dry-run', S.parseArgs(['--scrub']).mode === 'dry-run');
 check('A1: default db is prod', S.parseArgs(['--scrub']).dbPath === S.PROD_DB_PATH);
 check('A1: --apply --dry-run conflict', !!S.parseArgs(['--scrub', '--apply', '--dry-run']).error);
+check('A1: conflict is STICKY — --dry-run --apply --apply still errors', !!S.parseArgs(['--scrub', '--dry-run', '--apply', '--apply']).error);
+check('A1: conflict is STICKY — --apply --dry-run --dry-run still errors', !!S.parseArgs(['--scrub', '--apply', '--dry-run', '--dry-run']).error);
 check('A1: no op selected → error', !!S.parseArgs([]).error);
 check('A1: unknown arg → error', !!S.parseArgs(['--scrub', '--frobnicate']).error);
 check('A1: both ops parse', (() => { const a = S.parseArgs(['--scrub', '--populate']); return a.scrub && a.populate && !a.error; })());
