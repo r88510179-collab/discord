@@ -577,7 +577,12 @@ const V2_EXCLUDE_RX = /\bnrfi\b|\bnrsi\b|\bhr\s*\/\s*fs\b/i;
 // observed "Straight Bet" noise token ("Mark Vientos Straight Bet HR"),
 // collapse whitespace. Case is PRESERVED (all v2 patterns match /i) so the
 // extracted player keeps the slip's casing for evidence strings; an intra-name
-// hyphen ("Smith-Njigba") has no surrounding spaces and survives.
+// hyphen ("Smith-Njigba") has no surrounding spaces and survives. Known
+// residual: an OCR artifact that SPACES a surname hyphen ("Pete Crow -
+// Armstrong HR") is indistinguishable from a separator, collapses to "Crow
+// Armstrong", and the lastName lookup then misses — the leg refuses into
+// search unless the slate is provably final; accepted (needs the OCR artifact,
+// and off-mode behavior for it is null → search anyway).
 function v2Normalize(description) {
   return String(description == null ? '' : description)
     .replace(/^[\s•\-*]+/, '')
@@ -593,10 +598,40 @@ function v2Normalize(description) {
 // Inning..."), no direction/market vocabulary token, and the subject must not
 // canonicalize to a team ("Over 8.5 Los Angeles Dodgers Runs" stays a team
 // total → team grader).
+// Rejection is deliberately ASYMMETRIC-SAFE: a false REJECT returns null and
+// the bet falls through to the ESPN+AI/search chain — exactly today's
+// behavior — while a false ACCEPT routes a junk subject to gradeMlbPlayerProp,
+// whose provable-absence branch can mint a terminal FALSE VOID on a decided
+// bet (and, under shadow, counts the junk parse as a successful rescue in the
+// very metric that justifies the enforce flip). When unsure, REJECT.
 const V2_PLAYER_STOP_TOKENS = new Set([
+  // direction / market vocabulary
   'over', 'under', 'o', 'u',
-  'total', 'totals', 'inning', 'innings', 'team', 'game', 'alt',
+  'total', 'totals', 'inning', 'innings', 'team', 'teams', 'game', 'alt',
+  'combined', 'both', 'each', 'every',
+  // conjunctions / matchup glue — a multi-player or matchup subject is never
+  // gradeable as ONE box-score line ("Judge + Ohtani", "Trout and Judge")
+  'and', 'or', 'plus', 'vs', 'v',
+  // HR-market qualifiers — "Anytime HR" (adjacent market), "First Home Run"
+  // (FIRST-to-homer, different market), "No HR" (opposite direction)
+  'anytime', 'first', 'last', 'no',
+  // MLB club place-name tokens: canonicalize() only knows NICKNAME aliases, so
+  // a city-worded team total ("Tampa Bay Runs Over 4.5", "St. Louis Runs …")
+  // slips past the team guard with a null canonicalize. Closed list covering
+  // the 30 clubs' place names. Cost: a real player sharing one of these
+  // tokens (e.g. a first name "Louis"/"Diego") is REJECTED into the search
+  // path — the safe direction per the header note.
+  'tampa', 'bay', 'seattle', 'boston', 'chicago', 'houston', 'atlanta',
+  'arizona', 'colorado', 'cleveland', 'detroit', 'minnesota', 'milwaukee',
+  'cincinnati', 'pittsburgh', 'philadelphia', 'washington', 'miami', 'texas',
+  'kansas', 'city', 'oakland', 'sacramento', 'anaheim', 'vegas', 'toronto',
+  'baltimore', 'york', 'angeles', 'francisco', 'diego', 'louis',
 ]);
+// Name-shaped token: letters (incl. Latin-1 accents — statsapi fullNames carry
+// them, so an accented slip name still matches the box score), apostrophes,
+// periods, intra-token hyphens. Anything else ('+', '&', '/', digits) is not a
+// name and marks a compound/junk subject.
+const V2_NAME_TOKEN_RX = /^[A-Za-zÀ-ÖØ-öø-ÿ'’.\-]+$/;
 function v2PlayerPlausible(player) {
   const p = String(player == null ? '' : player).trim();
   if (!p) return false;
@@ -606,7 +641,7 @@ function v2PlayerPlausible(player) {
   // extracts the clean player.
   if (/\bto record\b|\bto hit a\b/i.test(p)) return false;
   for (const tok of p.split(/\s+/)) {
-    if (/\d/.test(tok)) return false;
+    if (!V2_NAME_TOKEN_RX.test(tok)) return false;
     if (V2_PLAYER_STOP_TOKENS.has(tok.toLowerCase().replace(/[.,]+$/, ''))) return false;
   }
   if (canonicalize(p)) return false;
@@ -633,12 +668,18 @@ function v2ResolveStatSuffix(text) {
   return best;
 }
 
-// Exact-key stat resolution for the v1-shaped v2 patterns (the stat capture is
-// the whole trailing text there, so exact — falling back to suffix for phrases
-// like "Pitching Outs" handled by exact keys anyway).
+// Exact-key stat resolution for the v1-shaped v2 patterns and verbose stat
+// captures (the stat capture is the whole trailing text there). Spaced
+// compounds are canonicalized first ("Hits + Runs + RBIs" → "hits+runs+rbis",
+// a COMPOUND_STATS key), and any OTHER conjunction-bearing stat text is
+// REFUSED outright: the suffix fallback would otherwise resolve only the LAST
+// component ("… Hits + Runs + RBIs" → rbi) and grade a clean player on the
+// wrong stat — a definite wrong WIN/LOSS, the worst failure class.
 function v2ResolveStatText(statText) {
   const key = String(statText == null ? '' : statText).toLowerCase().trim();
-  if (COMPOUND_STATS[key]) return { key, stat: 'compound', fields: COMPOUND_STATS[key] };
+  const compoundKey = key.replace(/\s*\+\s*/g, '+');
+  if (COMPOUND_STATS[compoundKey]) return { key, stat: 'compound', fields: COMPOUND_STATS[compoundKey] };
+  if (/[+&]|\band\b/i.test(key)) return null;
   if (STAT_MAP[key]) return { key, stat: STAT_MAP[key], fields: null };
   if (V2_STAT_ALIASES[key]) return { key, stat: V2_STAT_ALIASES[key], fields: null };
   return v2ResolveStatSuffix(key);
@@ -650,7 +691,12 @@ function v2ResolveStatText(statText) {
 // plain longest-suffix stat. Any threshold implied by a verbose phrase is
 // DISCARDED here — under Pattern D the leading threshold WINS (spec §1).
 function v2ResolveRemainder(remainder) {
-  const rem = String(remainder == null ? '' : remainder).trim();
+  // Canonicalize spaced compounds ("Hits + Runs + RBIs" → "hits+runs+rbis") so
+  // the suffix pass can hit a COMPOUND_STATS key; a junk '+' anywhere else
+  // ends up in the player slice, where v2PlayerPlausible's name-token check
+  // rejects it (never a partial-compound wrong-stat grade).
+  // (letter-to-letter joins only, so an N+ threshold token "1+ HITS" keeps its space)
+  const rem = String(remainder == null ? '' : remainder).trim().replace(/([A-Za-zÀ-ÖØ-öø-ÿ])\s*\+\s*(?=[A-Za-zÀ-ÖØ-öø-ÿ])/g, '$1+');
   let m = rem.match(/^(.+?)\s+to record (?:a hit|1\+ hits?)$/i);
   if (m) return { player: m[1], stat: 'hits', fields: null };
   m = rem.match(/^(.+?)\s+to record (\d+)\+\s+(.+)$/i);
@@ -685,11 +731,15 @@ function v2ResolveRemainder(remainder) {
 //   'verbose' — "To Record A Hit" / "To Record N+ <stat>" (N+ → over N-0.5,
 //               v1's N+ semantics) / "To Hit A Home Run" / trailing-direction
 //               "<player> <stat> Over N".
-//   'bare_hr' — CLOSED bare-noun set, HR ONLY: "<player> HR" / "<player> 1+
-//               HR" / "<player> Home Run(s)" → homeRuns over 0.5. The string
-//               must contain NOTHING besides player tokens + the HR token(s);
-//               single-token players allowed ("Drake HR"). DO NOT extend to
-//               bare hits/doubles/Ks (spec §3).
+//   'bare_hr' — CLOSED bare-noun set, HR ONLY: "<player> HR(s)" / "<player>
+//               1+ HR" / "<player> Home Run(s)" → homeRuns over 0.5 (the "HRs"
+//               plural is a deliberate one-token widening of the spec set,
+//               mirroring STAT_MAP's own hrs alias — still HR-only). The
+//               string must contain NOTHING besides player tokens + the HR
+//               token(s); single-token players allowed ("Drake HR"). DO NOT
+//               extend to bare hits/doubles/Ks (spec §3). HR-market
+//               qualifiers ("Anytime HR", "First Home Run", "No HR") are
+//               DIFFERENT markets and are rejected by the player stop-tokens.
 function parsePlayerPropV2(description) {
   const norm = v2Normalize(description);
   if (!norm || V2_EXCLUDE_RX.test(norm)) return null;
@@ -799,14 +849,13 @@ function emitPropParseV2Shadow(description, v2, recordStageFn) {
     const key = String(description).trim();
     if (_v2ShadowSeen.has(key)) return;
     if (_v2ShadowSeen.size >= V2_SHADOW_SEEN_MAX) _v2ShadowSeen.clear();
-    _v2ShadowSeen.add(key);
-    (recordStageFn || defaultRecordStage)({
+    const r = (recordStageFn || defaultRecordStage)({
       sourceType: 'grading',
       stage: 'GRADING_ENTER',
       eventType: 'prop_parse_v2_shadow',
       payload: {
         where: 'mlb.parsePlayerProp',
-        desc: String(description).slice(0, 90),
+        desc: key.slice(0, 90), // trimmed, consistent with the dedup key (its 90-char prefix)
         pattern: v2.pattern,
         player: v2.parsed.player,
         stat: v2.parsed.stat,
@@ -814,6 +863,15 @@ function emitPropParseV2Shadow(description, v2, recordStageFn) {
         direction: v2.parsed.direction,
       },
     });
+    // Consume the dedup key only AFTER the sink call returned: a sink that
+    // throws (e.g. the lazy require failing) leaves the key unconsumed, so the
+    // next parser hit of the same description retries instead of the shape
+    // being silently suppressed for the process lifetime.
+    _v2ShadowSeen.add(key);
+    // The real recordStage is synchronous fire-and-forget, but the test seam
+    // may hand us an async sink — swallow a late rejection so it can never
+    // surface as an unhandledRejection.
+    if (r && typeof r.catch === 'function') r.catch(() => {});
   } catch (_) { /* observability must never break grading */ }
 }
 

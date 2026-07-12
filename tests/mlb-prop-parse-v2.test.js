@@ -74,6 +74,11 @@ const POSITIVE = [
   { desc: 'Mark Vientos Straight Bet HR',                 player: 'Mark Vientos',     stat: 'homeRuns',   direction: 'over', threshold: 0.5, pattern: 'bare_hr', emits: true },
   { desc: 'Davis Schneider O 0.5 Doubles',                player: 'Davis Schneider',  stat: 'doubles',    direction: 'over', threshold: 0.5, pattern: 'v1ext',   emits: true },
   { desc: 'Ketel Marte O 0.5 Hits',                       player: 'Ketel Marte',      stat: 'hits',       direction: 'over', threshold: 0.5, pattern: null,      emits: false },
+  // Spaced-compound rescue (review finding: the suffix resolver must NEVER
+  // grade one component of an unrecognized compound; a RECOGNIZED spaced
+  // compound canonicalizes to the COMPOUND_STATS key instead).
+  { desc: 'Aaron Judge To Record 2+ Hits + Runs + RBIs',  player: 'Aaron Judge',      stat: 'compound',   direction: 'over', threshold: 1.5, pattern: 'verbose', emits: true, fields: ['hits', 'runs', 'rbi'] },
+  { desc: 'Over 1.5 Aaron Judge Hits + Runs + RBIs',      player: 'Aaron Judge',      stat: 'compound',   direction: 'over', threshold: 1.5, pattern: 'D',       emits: true, fields: ['hits', 'runs', 'rbi'] },
 ];
 
 // Negative: v2 must return null (parsePlayerProp null under enforce because v1
@@ -88,6 +93,23 @@ const NEGATIVE = [
   '4x MLB Data Sheets',
   'MLB Pick of the Day',
   'Stanton Rice Judge Trout SGP',
+  // review findings — junk/multi-player subjects must never become a
+  // gradeable single-player parse (false-VOID class under enforce)
+  'Over 0.5 Judge + Ohtani Hits',
+  'Mike Trout and Aaron Judge HR',
+  'Aaron Judge anytime HR',
+  'Shohei Ohtani First Home Run',
+  'Ohtani No HR',
+  // review findings — city-worded / game-total subjects bypass the nickname
+  // canonicalize; the place-token stop list must reject them
+  'Tampa Bay Runs Over 4.5',
+  'Over 4.5 Tampa Bay Runs',
+  'Seattle Runs Over 3.5',
+  'St. Louis Runs Over 4.5',
+  'Combined Runs Over 8.5',
+  // review finding — V2_EXCLUDE_RX must be load-bearing on its own (bare_hr
+  // would otherwise accept player "Mike Trout NRFI")
+  'Mike Trout NRFI HR',
 ];
 
 // v1-USABLE regression pins — must parse identically to parsePlayerPropV1
@@ -110,6 +132,15 @@ const V1_PINS = [
   check("'shadow' → 'shadow'", resolvePropParseV2Mode('shadow') === 'shadow');
   check("' ENFORCE ' → 'enforce'", resolvePropParseV2Mode(' ENFORCE ') === 'enforce');
   check('module default (env unset) is off', mlb._internal.PROP_PARSE_V2_MODE === 'off');
+  // read-ONCE pin: flipping the env var after module load must not change the
+  // default-mode behavior (kills a per-call env-read mutant)
+  process.env.PROP_PARSE_V2_MODE = 'enforce';
+  try {
+    check('env flip after load does not change default mode (read once at load)',
+      parsePlayerProp('Over 0.5 Yandy Diaz Hits') === null);
+  } finally {
+    delete process.env.PROP_PARSE_V2_MODE;
+  }
 
   // ── Event type registered (enum-drift tripwire stays quiet) ──
   const pe = require('../services/pipeline-events');
@@ -184,6 +215,37 @@ const V1_PINS = [
       result = parsePlayerProp('Over 0.5 Yandy Diaz Hits', { mode: 'shadow', recordStageFn: () => { throw new Error('sink boom'); } });
     } catch (_) { threw = true; }
     check('throwing recordStage sink never propagates (emit is try/caught)', !threw && result === null, `threw=${threw} result=${JSON.stringify(result)}`);
+
+    // …and a sink failure must NOT consume the dedup key: the next parser hit
+    // of the same description retries and the event still lands (review
+    // finding: add-before-sink permanently suppressed the shape)
+    const retrySpy = makeSpy();
+    parsePlayerProp('Over 0.5 Yandy Diaz Hits', { mode: 'shadow', recordStageFn: retrySpy.fn });
+    check('sink failure does not consume the dedup key (event lands on retry)',
+      retrySpy.events.length === 1, `${retrySpy.events.length} events`);
+
+    // an async-rejecting sink must not escape as an unhandledRejection
+    resetPropParseV2ShadowDedup();
+    let unhandled = null;
+    const onUnhandled = (err) => { unhandled = err; };
+    process.on('unhandledRejection', onUnhandled);
+    parsePlayerProp('Over 0.5 Yandy Diaz Hits', { mode: 'shadow', recordStageFn: async () => { throw new Error('async boom'); } });
+    await new Promise((r) => setImmediate(r));
+    process.removeListener('unhandledRejection', onUnhandled);
+    check('async-rejecting sink is swallowed (no unhandledRejection)', unhandled === null, String(unhandled));
+
+    // >90-char rescued description: payload desc is the trimmed 90-char prefix
+    resetPropParseV2ShadowDedup();
+    const longDesc = '  Over 0.5 ' + 'Abcdefghij '.repeat(9) + 'Hits';
+    const longSpy = makeSpy();
+    const longParsed = parsePlayerProp(longDesc, { mode: 'shadow', recordStageFn: longSpy.fn });
+    check('>90-char shape still rescues in shadow (emits, returns v1 null)',
+      longParsed === null && longSpy.events.length === 1);
+    check('payload desc is exactly the trimmed 90-char prefix',
+      longSpy.events.length === 1
+        && longSpy.events[0].payload.desc === longDesc.trim().slice(0, 90)
+        && longSpy.events[0].payload.desc.length === 90,
+      longSpy.events[0] && JSON.stringify(longSpy.events[0].payload.desc));
   }
 
   // ── enforce: v2 parses the sampled failing shapes ──
@@ -195,7 +257,7 @@ const V1_PINS = [
       && got.stat === p.stat
       && got.direction === p.direction
       && got.threshold === p.threshold
-      && (got.fields == null);
+      && deepEq(got.fields || null, p.fields || null);
     check(`enforce: ${p.desc}`, ok, JSON.stringify(got));
   }
   console.log(' enforce — leading threshold WINS over the embedded verbose one:');
@@ -203,6 +265,16 @@ const V1_PINS = [
     const got = parsePlayerProp('Over 0.5 JACKSON CHOURIO - TO RECORD 1+ HITS', { mode: 'enforce' });
     check('embedded "1+" is stat-phrase text, not a second parse (threshold 0.5, not 0.5-from-1+)',
       got && got.threshold === 0.5 && got.player === 'JACKSON CHOURIO', JSON.stringify(got));
+  }
+  console.log(' enforce — unrecognized compound never grades one component:');
+  {
+    // "Hits + Runs" is NOT a COMPOUND_STATS key: v2 must refuse (fall back to
+    // the v1 result, byte-identical to off) rather than suffix-resolve to
+    // 'runs' and grade a clean player on the wrong stat.
+    const d = 'Aaron Judge To Record 2+ Hits + Runs';
+    const got = parsePlayerProp(d, { mode: 'enforce' });
+    check('partial compound falls back to the v1 parse (no rbi/runs-only wrong grade)',
+      deepEq(got, parsePlayerPropV1(d)) && !(got && got.player === 'Aaron Judge'), JSON.stringify(got));
   }
 
   // ── enforce: negatives stay null / non-prop ──
