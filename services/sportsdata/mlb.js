@@ -423,7 +423,10 @@ function findPlayerInBoxscore(boxscore, playerLastName, playerFirstName = null) 
 //   "Aaron Judge 2+ H+R+RBI" → { player: "Aaron Judge", stat: 'compound', fields: [hits,runs,rbi], direction: 'over', threshold: 1.5 (2+ → over 1.5) }
 //   "Tarik Skubal O 17.5 Pitching Outs" → { player: "Tarik Skubal", stat: 'outs', direction: 'over', threshold: 17.5 }
 //   "Aaron Judge 1+ Home Runs" → { player: "Aaron Judge", stat: 'homeRuns', direction: 'over', threshold: 0.5 }
-function parsePlayerProp(description) {
+// This is the V1 grammar — the live parser. PROP_PARSE_V2_MODE (below) wraps it:
+// public parsePlayerProp delegates here first under every mode, and this body
+// must stay byte-identical (off-mode behavior is pinned to it).
+function parsePlayerPropV1(description) {
   const desc = description.trim();
 
   // Pattern A: "Player Name O|U 17.5 Stat" (e.g. "Skubal O 17.5 Pitching Outs")
@@ -485,8 +488,8 @@ function parsePlayerProp(description) {
 // greedily ("Los Angeles Dodgers Over 8.5 Runs" → {player:"Los Angeles Dodgers",
 // stat:"runs"}), so if the subject before the O/U resolves to a known team, this is a
 // team total — route it to the team grader, not the prop grader.
-function looksLikePlayerProp(description) {
-  const parsed = parsePlayerProp(description);
+function looksLikePlayerProp(description, v2opts) {
+  const parsed = parsePlayerProp(description, v2opts); // v2opts: test-only seam (see parsePlayerProp)
   if (!parsed) return false;
   if (parsed.stat === null && !parsed.fields) return false; // no gradeable stat
   if (canonicalize(parsed.player)) return false;            // subject is a team → team total
@@ -501,6 +504,334 @@ function resolveStat(statText) {
     if (key.includes(alias)) return field;
   }
   return null;
+}
+
+// ═══════════════════════════════════════════════════════════
+// PROP_PARSE_V2 — flag-gated v2 prop grammar (Build 2 blocker 2, MLB slice)
+//
+// 51 live MLB rows sit in review_status='auto_void_no_searchable_data' with
+// player-prop descriptions the v1 grammar above cannot USABLY parse: leading
+// Over/Under ("Over 0.5 Yandy Diaz Hits"), verbose stat phrasing ("Aaron Judge
+// To Record A Hit", "Nick Kurtz To Hit A Home Run"), trailing-direction ("IVAN
+// HERRERA - HITS Over 0.5") and bare home-run nouns ("Mike Trout HR").
+// looksLikePlayerProp delegates to parsePlayerProp AND gates live routing (the
+// grading.js structured pre-check via sportsdata/index.js isPropBet), so ALL
+// new grammar is flag-gated, shadow-first:
+//
+//   PROP_PARSE_V2_MODE = off | shadow | enforce   (unset/garbage → off; read
+//   ONCE at module load, mirroring slateResplit.js resolveMode)
+//     off      (default) — v1 parser only; the v2 code paths are unreachable.
+//                          MERGING THIS CHANGES NOTHING.
+//     shadow             — route/grade on v1: every routing decision is
+//                          byte-identical to off. When v2 parses a description
+//                          v1 could not, emit ONE `prop_parse_v2_shadow`
+//                          pipeline event per DISTINCT description (per-process
+//                          dedup — the parser is hit 2-3× per grading pass via
+//                          looksLikePlayerProp / looksLikeMisroutedPlayerProp /
+//                          gradeMlbPlayerProp, and re-hit on every recheck, so
+//                          without dedup one description would flood the
+//                          table). Emission is the ONLY side effect and can
+//                          never throw into grading (try/caught, lazy-required
+//                          sink so requiring this module never pulls in the DB).
+//     enforce            — parse with v2 = v1 grammar + the additions below,
+//                          tried only AFTER v1 misses; a v1-usable parse is
+//                          returned UNTOUCHED under every mode (pinned by
+//                          tests/mlb-prop-parse-v2.test.js).
+//
+// "v1 miss" deliberately includes v1 parses that MATCH a regex but can never
+// grade: v1's lazy (.+?) captures leave separator/verbose debris in the player
+// field for the live failing shapes ("Kyle Harrison - Over 6.5 Strikeouts" →
+// player "Kyle Harrison -"; "Michael Harris II - TO RECORD 1+ HITS" → player
+// "Michael Harris II - TO RECORD"), so the box-score lookup keys on lastName
+// '-' / 'RECORD' and always falls through to search → auto-void. Those parses
+// count as v1 MISSES for v2 gating (see v1ParseUsable); v1 parses with a clean
+// player are the population the v1-identical invariant protects.
+const PROP_PARSE_V2_VALID_MODES = new Set(['off', 'shadow', 'enforce']);
+function resolvePropParseV2Mode(raw) {
+  const m = String(raw == null ? '' : raw).trim().toLowerCase();
+  return PROP_PARSE_V2_VALID_MODES.has(m) ? m : 'off';
+}
+const PROP_PARSE_V2_MODE = resolvePropParseV2Mode(process.env.PROP_PARSE_V2_MODE);
+
+// v2-ONLY stat aliases. Deliberately NOT merged into STAT_MAP: resolveStat is
+// shared with the v1 patterns, so adding 'doubles' there would flip live
+// routing under mode=off ("Aaron Judge O 1.5 Doubles" is pinned → false by
+// tests/sportsdata-prop-routing.test.js), violating the off-is-byte-identical
+// invariant. The v2 resolvers consult STAT_MAP first, then this table.
+const V2_STAT_ALIASES = {
+  'double': 'doubles',
+  'doubles': 'doubles',
+};
+
+// Explicit v2 EXCLUSIONS — must return null from the v2 attempt (spec §4):
+//   NRFI/NRSI    — game markets, not player props.
+//   "HR / FS"    — compound-alternate leg ("Carter Jensen HR / FS"): two
+//                  markets on one line; grading either alone would misgrade.
+// The other spec'd exclusions (direction-less numerics, inning totals,
+// headers/promo, SGP name-lists) fall out of the grammar naturally — no v2
+// pattern admits them — and are pinned by negative tests instead of listed here.
+const V2_EXCLUDE_RX = /\bnrfi\b|\bnrsi\b|\bhr\s*\/\s*fs\b/i;
+
+// Pre-normalization, applied ONLY within the v2 attempt (the v1 path is
+// untouched): strip leading bullets, collapse spaced-dash separators, strip the
+// observed "Straight Bet" noise token ("Mark Vientos Straight Bet HR"),
+// collapse whitespace. Case is PRESERVED (all v2 patterns match /i) so the
+// extracted player keeps the slip's casing for evidence strings; an intra-name
+// hyphen ("Smith-Njigba") has no surrounding spaces and survives.
+function v2Normalize(description) {
+  return String(description == null ? '' : description)
+    .replace(/^[\s•\-*]+/, '')
+    .replace(/\s+[-–—]+\s+/g, ' ')
+    .replace(/\bstraight bet\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Player-field plausibility — the SAME router guards v1's looksLikePlayerProp
+// applies, enforced INSIDE every v2 pattern so v2 never emits/returns a parse
+// the router would have to reject: non-empty, no digit-bearing token ("1st
+// Inning..."), no direction/market vocabulary token, and the subject must not
+// canonicalize to a team ("Over 8.5 Los Angeles Dodgers Runs" stays a team
+// total → team grader).
+const V2_PLAYER_STOP_TOKENS = new Set([
+  'over', 'under', 'o', 'u',
+  'total', 'totals', 'inning', 'innings', 'team', 'game', 'alt',
+]);
+function v2PlayerPlausible(player) {
+  const p = String(player == null ? '' : player).trim();
+  if (!p) return false;
+  // Verbose noise is never part of a name — rejecting it here makes the v1ext
+  // B-shape candidate for "Michael Harris II TO RECORD 1+ HITS" (whose lazy
+  // capture swallows "TO RECORD") fall through to the verbose family, which
+  // extracts the clean player.
+  if (/\bto record\b|\bto hit a\b/i.test(p)) return false;
+  for (const tok of p.split(/\s+/)) {
+    if (/\d/.test(tok)) return false;
+    if (V2_PLAYER_STOP_TOKENS.has(tok.toLowerCase().replace(/[.,]+$/, ''))) return false;
+  }
+  if (canonicalize(p)) return false;
+  return true;
+}
+
+// Longest whole-word SUFFIX match against COMPOUND_STATS + STAT_MAP +
+// V2_STAT_ALIASES. Deliberately NOT v1's resolveStat: its substring scan
+// resolves a stray LETTER inside a name ('r' in "Tarik" → runs — see
+// PLAYER_STAT_TOKEN_RX's header), which is unusable when the stat text sits at
+// the END of a free remainder; requiring the alias to be the space-delimited
+// tail is the tight form. Returns { key, stat, fields } or null.
+function v2ResolveStatSuffix(text) {
+  const s = String(text == null ? '' : text).toLowerCase().trim();
+  let best = null;
+  const consider = (key, stat, fields) => {
+    if ((s === key || s.endsWith(' ' + key)) && (!best || key.length > best.key.length)) {
+      best = { key, stat, fields: fields || null };
+    }
+  };
+  for (const [key, fields] of Object.entries(COMPOUND_STATS)) consider(key, 'compound', fields);
+  for (const [key, stat] of Object.entries(STAT_MAP)) consider(key, stat, null);
+  for (const [key, stat] of Object.entries(V2_STAT_ALIASES)) consider(key, stat, null);
+  return best;
+}
+
+// Exact-key stat resolution for the v1-shaped v2 patterns (the stat capture is
+// the whole trailing text there, so exact — falling back to suffix for phrases
+// like "Pitching Outs" handled by exact keys anyway).
+function v2ResolveStatText(statText) {
+  const key = String(statText == null ? '' : statText).toLowerCase().trim();
+  if (COMPOUND_STATS[key]) return { key, stat: 'compound', fields: COMPOUND_STATS[key] };
+  if (STAT_MAP[key]) return { key, stat: STAT_MAP[key], fields: null };
+  if (V2_STAT_ALIASES[key]) return { key, stat: V2_STAT_ALIASES[key], fields: null };
+  return v2ResolveStatSuffix(key);
+}
+
+// Resolve a Pattern-D remainder ("<player> <stat phrase>") into player + stat.
+// Verbose phrase families FIRST (so "JACKSON CHOURIO TO RECORD 1+ HITS" yields
+// player "JACKSON CHOURIO", not "JACKSON CHOURIO TO RECORD 1+"), then the
+// plain longest-suffix stat. Any threshold implied by a verbose phrase is
+// DISCARDED here — under Pattern D the leading threshold WINS (spec §1).
+function v2ResolveRemainder(remainder) {
+  const rem = String(remainder == null ? '' : remainder).trim();
+  let m = rem.match(/^(.+?)\s+to record (?:a hit|1\+ hits?)$/i);
+  if (m) return { player: m[1], stat: 'hits', fields: null };
+  m = rem.match(/^(.+?)\s+to record (\d+)\+\s+(.+)$/i);
+  if (m) {
+    const hit = v2ResolveStatText(m[3]);
+    if (hit) return { player: m[1], stat: hit.stat, fields: hit.fields };
+    return null;
+  }
+  m = rem.match(/^(.+?)\s+to hit a home run$/i);
+  if (m) return { player: m[1], stat: 'homeRuns', fields: null };
+  const hit = v2ResolveStatSuffix(rem);
+  if (hit) {
+    return {
+      player: rem.slice(0, rem.length - hit.key.length).trim(),
+      stat: hit.stat,
+      fields: hit.fields,
+    };
+  }
+  return null;
+}
+
+// The v2 additions, tried in order AFTER v1 misses (each candidate must pass
+// v2PlayerPlausible or it falls through to the next pattern). Returns
+// { parsed: { player, stat, fields, direction, threshold }, pattern } or null.
+// Patterns:
+//   'v1ext'   — the v1 B/C shapes re-run on the NORMALIZED text with the v2
+//               stat table ("Kyle Harrison - Over 6.5 Strikeouts" → clean
+//               player via dash-collapse; "Davis Schneider O 0.5 Doubles" via
+//               the doubles alias). Not in the spec's D/verbose/bare_hr enum —
+//               added because two positive fixtures are reachable no other way.
+//   'D'       — leading Over/Under: "Over 0.5 Yandy Diaz Hits".
+//   'verbose' — "To Record A Hit" / "To Record N+ <stat>" (N+ → over N-0.5,
+//               v1's N+ semantics) / "To Hit A Home Run" / trailing-direction
+//               "<player> <stat> Over N".
+//   'bare_hr' — CLOSED bare-noun set, HR ONLY: "<player> HR" / "<player> 1+
+//               HR" / "<player> Home Run(s)" → homeRuns over 0.5. The string
+//               must contain NOTHING besides player tokens + the HR token(s);
+//               single-token players allowed ("Drake HR"). DO NOT extend to
+//               bare hits/doubles/Ks (spec §3).
+function parsePlayerPropV2(description) {
+  const norm = v2Normalize(description);
+  if (!norm || V2_EXCLUDE_RX.test(norm)) return null;
+
+  const mk = (pattern, player, hit, direction, threshold) => ({
+    parsed: {
+      player: String(player).trim(),
+      stat: hit.fields ? 'compound' : hit.stat,
+      fields: hit.fields || null,
+      direction,
+      threshold,
+    },
+    pattern,
+  });
+
+  // v1ext — Pattern B shape: "<player> N+ <stat>"
+  let m = norm.match(/^(.+?)\s+(\d+(?:\.\d+)?)\+\s+(.+)$/i);
+  if (m && v2PlayerPlausible(m[1])) {
+    const hit = v2ResolveStatText(m[3]);
+    if (hit) return mk('v1ext', m[1], hit, 'over', parseFloat(m[2]) - 0.5);
+  }
+  // v1ext — Pattern C shape: "<player> O|U|Over|Under N <stat>"
+  m = norm.match(/^(.+?)\s+(over|under|o|u)\s+(\d+(?:\.\d+)?)\s+(.+)$/i);
+  if (m && v2PlayerPlausible(m[1])) {
+    const hit = v2ResolveStatText(m[4]);
+    if (hit) return mk('v1ext', m[1], hit, m[2].toLowerCase().startsWith('o') ? 'over' : 'under', parseFloat(m[3]));
+  }
+  // Pattern D — leading Over/Under: direction+threshold lead, remainder is
+  // "<player> <stat phrase>". A remainder whose stat resolves but whose
+  // subject is implausible (no player tokens left, digit/market tokens, or a
+  // team) is REJECTED — "Under 0.5 1st Inning Total Runs" stays null.
+  m = norm.match(/^(over|under|o|u)\s+(\d+(?:\.\d+)?)\s+(.+)$/i);
+  if (m) {
+    const res = v2ResolveRemainder(m[3]);
+    if (res && v2PlayerPlausible(res.player)) {
+      return mk('D', res.player, res, m[1].toLowerCase().startsWith('o') ? 'over' : 'under', parseFloat(m[2]));
+    }
+  }
+  // verbose — "<player> to record a hit" / "to record 1+ hits" → hits over 0.5
+  m = norm.match(/^(.+?)\s+to record (?:a hit|1\+ hits?)$/i);
+  if (m && v2PlayerPlausible(m[1])) {
+    return mk('verbose', m[1], { stat: 'hits', fields: null }, 'over', 0.5);
+  }
+  // verbose — "<player> to record N+ <stat>" → that stat, over N-0.5
+  m = norm.match(/^(.+?)\s+to record (\d+)\+\s+(.+)$/i);
+  if (m && v2PlayerPlausible(m[1])) {
+    const hit = v2ResolveStatText(m[3]);
+    if (hit) return mk('verbose', m[1], hit, 'over', parseFloat(m[2]) - 0.5);
+  }
+  // verbose — "<player> to hit a home run" → homeRuns over 0.5
+  m = norm.match(/^(.+?)\s+to hit a home run$/i);
+  if (m && v2PlayerPlausible(m[1])) {
+    return mk('verbose', m[1], { stat: 'homeRuns', fields: null }, 'over', 0.5);
+  }
+  // verbose — trailing-direction: "<player> <stat> Over N" (stat BEFORE the
+  // O/U token, threshold at end-of-string): "IVAN HERRERA - HITS Over 0.5"
+  m = norm.match(/^(.+?)\s+(over|under|o|u)\s+(\d+(?:\.\d+)?)$/i);
+  if (m) {
+    const hit = v2ResolveStatSuffix(m[1]);
+    if (hit) {
+      const player = m[1].slice(0, m[1].length - hit.key.length).trim();
+      if (v2PlayerPlausible(player)) {
+        return mk('verbose', player, hit, m[2].toLowerCase().startsWith('o') ? 'over' : 'under', parseFloat(m[3]));
+      }
+    }
+  }
+  // bare_hr — closed enumeration, HR only
+  m = norm.match(/^([A-Za-z][A-Za-z'’.\-]*(?:\s+[A-Za-z][A-Za-z'’.\-]*)*)\s+(?:1\+\s+)?(?:hrs?|home\s+runs?)$/i);
+  if (m && v2PlayerPlausible(m[1])) {
+    return mk('bare_hr', m[1], { stat: 'homeRuns', fields: null }, 'over', 0.5);
+  }
+  return null;
+}
+
+// A v1 parse is USABLE only when it resolved a stat (or compound fields) AND
+// its player field is a plausible name: no separator debris (standalone or
+// leading/trailing -/–/—/•/*), no digits, no direction word, no verbose-noise
+// phrase. Anything else routes to the structured grader today only to fail the
+// box-score lookup (lastName '-' / 'RECORD') — a v1 MISS for v2 purposes. A
+// real working v1 parse ("Aaron Judge", "Tarik Skubal") never trips this.
+const V1_PLAYER_DEBRIS_RX =
+  /(?:^|\s)[-–—•*](?:\s|$)|^[-–—•*]|[-–—•*]$|\d|\b(?:over|under)\b|\bto record\b|\bstraight bet\b|\bto hit a\b/i;
+function v1ParseUsable(parsed) {
+  if (!parsed) return false;
+  if (parsed.stat === null && !parsed.fields) return false;
+  if (V1_PLAYER_DEBRIS_RX.test(String(parsed.player == null ? '' : parsed.player))) return false;
+  return true;
+}
+
+// ── prop_parse_v2_shadow emitter ──
+// Lazy-required sink (requiring pipeline-events pulls in database.js — tests
+// require this module DB-free, and slateResplit sets the same precedent);
+// injectable via the v2opts.recordStageFn test seam. sourceType 'grading' +
+// stage 'GRADING_ENTER' because the parser runs inside grading passes and has
+// no ingest identity (writeRow requires ingestId for every other sourceType);
+// betId is unknown at parser level → NULL, the event is keyed by desc.
+let _recordStageLazy = null;
+function defaultRecordStage(evt) {
+  if (!_recordStageLazy) _recordStageLazy = require('../pipeline-events').recordStage;
+  return _recordStageLazy(evt);
+}
+// ONE event per distinct description per process (see the mode header).
+const _v2ShadowSeen = new Set();
+const V2_SHADOW_SEEN_MAX = 5000; // memory backstop; a clear() re-emits at worst one extra row per shape
+function emitPropParseV2Shadow(description, v2, recordStageFn) {
+  try {
+    const key = String(description).trim();
+    if (_v2ShadowSeen.has(key)) return;
+    if (_v2ShadowSeen.size >= V2_SHADOW_SEEN_MAX) _v2ShadowSeen.clear();
+    _v2ShadowSeen.add(key);
+    (recordStageFn || defaultRecordStage)({
+      sourceType: 'grading',
+      stage: 'GRADING_ENTER',
+      eventType: 'prop_parse_v2_shadow',
+      payload: {
+        where: 'mlb.parsePlayerProp',
+        desc: String(description).slice(0, 90),
+        pattern: v2.pattern,
+        player: v2.parsed.player,
+        stat: v2.parsed.stat,
+        threshold: v2.parsed.threshold,
+        direction: v2.parsed.direction,
+      },
+    });
+  } catch (_) { /* observability must never break grading */ }
+}
+
+// Public parser — the PROP_PARSE_V2_MODE wrapper around the v1 grammar.
+// v2opts is a TEST-ONLY seam ({ mode, recordStageFn }); production callers
+// pass nothing and get the module-load mode + the real pipeline-events sink.
+function parsePlayerProp(description, v2opts) {
+  const mode = (v2opts && v2opts.mode) || PROP_PARSE_V2_MODE;
+  const v1 = parsePlayerPropV1(description);
+  if (mode !== 'shadow' && mode !== 'enforce') return v1; // off: v2 unreachable
+  if (v1ParseUsable(v1)) return v1; // v1-parseable → identical under v2
+  const v2 = parsePlayerPropV2(description);
+  if (!v2) return v1;
+  if (mode === 'shadow') {
+    emitPropParseV2Shadow(description, v2, v2opts && v2opts.recordStageFn);
+    return v1; // routing byte-identical to off — emission is the only side effect
+  }
+  return v2.parsed; // enforce
 }
 
 // Find the gamePk for a specific player on a date by checking the schedule for any game they played in.
@@ -547,7 +878,7 @@ async function findPlayerGame(playerLastName, dateYMD, playerFirstName = null) {
 // opts.absenceVoidAllowed (default true): the caller may forbid the provable-
 // absence VOID when the bet's date is ambiguous (see tryStructured date gate).
 async function gradeMlbPlayerProp(description, dateYMD, opts = {}) {
-  const parsed = parsePlayerProp(description);
+  const parsed = parsePlayerProp(description, opts.propParseV2); // opts.propParseV2: test-only seam
   if (!parsed) return { resolved: false, reason: 'unparseable_player_prop' };
   if (parsed.stat === null && !parsed.fields) {
     return { resolved: false, reason: 'unknown_stat' };
@@ -631,5 +962,15 @@ module.exports = {
   looksLikeMisroutedPlayerProp,
   rewriteMatchupPrefixedProp,
   canonicalize,
-  _internal: { TEAM_ALIASES, STAT_MAP, COMPOUND_STATS },
+  resolvePropParseV2Mode,
+  _internal: {
+    TEAM_ALIASES, STAT_MAP, COMPOUND_STATS,
+    // PROP_PARSE_V2 test seams
+    V2_STAT_ALIASES,
+    PROP_PARSE_V2_MODE,
+    parsePlayerPropV1,
+    parsePlayerPropV2,
+    v1ParseUsable,
+    resetPropParseV2ShadowDedup() { _v2ShadowSeen.clear(); },
+  },
 };
