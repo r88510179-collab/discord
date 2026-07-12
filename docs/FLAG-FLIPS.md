@@ -109,3 +109,10 @@ deploy: expect NO_DECLARED_COUNT −3/wk and PASS +1/wk in the would-hold split,
 ~1-2/wk at current ~11 SGP events/wk.
 Flag applied via fly secrets set immediately after the image deploy; env-in-container verified
 (step 5.5). Follow-up queued: sgpWouldHoldPulse removal PR once enforce shows a clean week.
+
+## 2026-07-12 — PROP_PARSE_V2_MODE unset→shadow (post-#205 deploy)
+MLB prop-parser v2 grammar (leading-O/U, verbose TO RECORD forms, bare-HR closed
+set) shipped #205 behind PROP_PARSE_V2_MODE (unset→off). Flipped to shadow same
+day: routing byte-identical to off; emits prop_parse_v2_shadow per v2-only parse.
+Enforce gated on ~1wk shadow review (false-positive scan, esp. near-team-name
+subjects) — folded into the ~07-17 recheck probe. Env-in-container verified.
