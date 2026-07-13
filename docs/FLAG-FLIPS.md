@@ -116,3 +116,12 @@ set) shipped #205 behind PROP_PARSE_V2_MODE (unset→off). Flipped to shadow sam
 day: routing byte-identical to off; emits prop_parse_v2_shadow per v2-only parse.
 Enforce gated on ~1wk shadow review (false-positive scan, esp. near-team-name
 subjects) — folded into the ~07-17 recheck probe. Env-in-container verified.
+
+## 2026-07-13 — retro: UNITS_SANITY_MODE (ledger gap backfill)
+Tripwire shipped 2026-07-03 (#171, d39792d). Enforce was set env-side (fly secrets) at an untracked point between 2026-07-03 and 2026-07-09 — no ledger entry was written at the time; exact flip date/release unrecoverable. Live check 2026-07-09: zero UNITS_SANITY_WOULD_FIRE warns. Observability remains console.warn-only (see BACKLOG "UNITS_SANITY_MODE=enforce is live with console.warn-only observability").
+
+## 2026-07-13 — retro: EVENT_AWARE_RECHECK shadow→enforce ≈2026-07-04 (ledger gap backfill)
+Flip inferred from telemetry: event_aware_shadow emissions ceased 2026-07-04 (enforce emits none — BACKLOG §Codex #3); the secrets-side flip was untracked. Note: the flip preceded the POST_EVENT_SWEEP_SETTLE_MS settle window (#194, 3d8ae60, shipped 2026-07-08) by ~4 days. Exposure window scanned 2026-07-13 (readonly probe): 78 terminal void/loss graded 07-04..07-08, 29 at age>=6.5d, 0 matching the collision signature (age>=6.5d AND event passed <=36h before grade). Window clean; no remediation needed.
+
+## 2026-07-13 — correction: event_settling sweep-hold gating (amends the 2026-07-08 REAPER entry)
+The 2026-07-08 entry states the event_settling sweep-hold is "gated on REAPER_MODE=enforce" with chain REAPER enforce → EVENT_AWARE enforce. Code disagrees: both the event_pending defer-hold and the event_settling settle window are gated on eventAwareRecheckMode() === 'enforce' alone (services/grading.js ~2186–2200); REAPER_MODE appears nowhere in that path. REAPER enforce's actual role here is the terminal exit for settle-protected bets that exhaust to quarantine (zombie sweep). EVENT_AWARE_RECHECK=enforce is safe with REAPER_MODE=shadow; verified live 2026-07-13 (window scan clean, no multi-day defers in the pending population).
