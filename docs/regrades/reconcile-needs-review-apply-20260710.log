@@ -1,0 +1,13 @@
+reconcile-needs-review — APPLY against /data/bettracker.db
+selection: review_status = 'needs_review' AND result IN ('win', 'loss', 'push', 'void')
+write:     review_status → 'confirmed' (the approveBet completed-review value); no other column, no other table
+
+total selected: 0 (expected ≈ 161)
+per-cohort breakdown (created_at era):
+grader_version breakdown (cross-check):
+Σ profit_units across selection: +0u (already live in ROI — unchanged by this script)
+
+BEFORE-STATE JSON (archive this):
+[]
+
+APPLIED: rows changed = 0 (one transaction, committed).

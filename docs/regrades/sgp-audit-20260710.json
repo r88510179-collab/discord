@@ -1,0 +1,1219 @@
+{
+  "generatedAt": "2026-07-10T16:58:58.093Z",
+  "dbPath": "/data/bettracker.db",
+  "ids": [
+    "1522665209058164746",
+    "1522717290624323685",
+    "1523038383780270195",
+    "1520859560825327666",
+    "1523743668622856250",
+    "1523743764038942950",
+    "1523831106103934996",
+    "1523831184268722238"
+  ],
+  "env": {
+    "ocrServiceUrlSet": true,
+    "groqApiKeySet": true,
+    "ocrParseModel": "llama-3.3-70b-versatile"
+  },
+  "results": [
+    {
+      "messageId": "1522665209058164746",
+      "channelId": "1473341333325217950",
+      "channelName": "smokke-slips",
+      "attachmentCount": 1,
+      "imageCount": 2,
+      "ocrText": "Hard Rock\nBET\nSGP\n4-BetParlay\n+250\nWager\nPayout\n$5\n$17.50\nOver 0.5\nLAUTARO MARTiNEZ -SHOTS ON TARGET\nOver 1.5\nLIONEL MESSI- SHOTS ON TARGET\nOver 2.5\nARGENTINA TOTAL GOALS\nOver 6.5\nTOTAL CORNERS\nSuper Sub enabled. Bet continues and combines with the\nsubstitute'sperformance!",
+      "sgpToken": "SGP",
+      "declaredLegCount": null,
+      "parsedLegCount": 4,
+      "legs": [
+        {
+          "matchup": null,
+          "player": "LAUTARO MARTINEZ",
+          "market": "SHOTS ON TARGET",
+          "selection": "Over 0.5",
+          "odds": null,
+          "start_time": null
+        },
+        {
+          "matchup": null,
+          "player": "LIONEL MESSI",
+          "market": "SHOTS ON TARGET",
+          "selection": "Over 1.5",
+          "odds": null,
+          "start_time": null
+        },
+        {
+          "matchup": "ARGENTINA",
+          "player": null,
+          "market": "TOTAL GOALS",
+          "selection": "Over 2.5",
+          "odds": null,
+          "start_time": null
+        },
+        {
+          "matchup": null,
+          "player": null,
+          "market": "TOTAL CORNERS",
+          "selection": "Over 6.5",
+          "odds": null,
+          "start_time": null
+        }
+      ],
+      "gate": {
+        "pass": false,
+        "reason": "SGP_NO_DECLARED_COUNT",
+        "detail": {
+          "declaredLegCount": null
+        },
+        "normalizedBet": null
+      },
+      "images": [
+        {
+          "origin": "attachment",
+          "url": "https://cdn.discordapp.com/attachments/1473341333325217950/1522665209158959164/ReactNative-snapshot-image535397370082890615.jpg?ex=6a51ddbb&is=6a508c3b&hm=0cbef2e85b6371ce4486392c819640b9fd1b546667d0de3bc488988fe58c114b&",
+          "ocr": {
+            "ok": true,
+            "chars": 273,
+            "confidence": 0.974,
+            "latencyMs": 3918.2,
+            "imageHash": "76fc41831d5f9aa17821eb04e6b954a94286bff5d82e867a25e08b6b0d744c51"
+          },
+          "ocrText": "Hard Rock\nBET\nSGP\n4-BetParlay\n+250\nWager\nPayout\n$5\n$17.50\nOver 0.5\nLAUTARO MARTiNEZ -SHOTS ON TARGET\nOver 1.5\nLIONEL MESSI- SHOTS ON TARGET\nOver 2.5\nARGENTINA TOTAL GOALS\nOver 6.5\nTOTAL CORNERS\nSuper Sub enabled. Bet continues and combines with the\nsubstitute'sperformance!",
+          "sgpToken": "SGP",
+          "declaredLegCount": null,
+          "parsedBet": {
+            "book": "Hard Rock",
+            "bet_type": "sgp",
+            "total_odds": "+250",
+            "stake": "$5",
+            "payout": "$17.50",
+            "legs": [
+              {
+                "matchup": null,
+                "player": "LAUTARO MARTINEZ",
+                "market": "SHOTS ON TARGET",
+                "selection": "Over 0.5",
+                "odds": null,
+                "start_time": null
+              },
+              {
+                "matchup": null,
+                "player": "LIONEL MESSI",
+                "market": "SHOTS ON TARGET",
+                "selection": "Over 1.5",
+                "odds": null,
+                "start_time": null
+              },
+              {
+                "matchup": "ARGENTINA",
+                "player": null,
+                "market": "TOTAL GOALS",
+                "selection": "Over 2.5",
+                "odds": null,
+                "start_time": null
+              },
+              {
+                "matchup": null,
+                "player": null,
+                "market": "TOTAL CORNERS",
+                "selection": "Over 6.5",
+                "odds": null,
+                "start_time": null
+              }
+            ]
+          },
+          "parsedLegCount": 4,
+          "legs": [
+            {
+              "matchup": null,
+              "player": "LAUTARO MARTINEZ",
+              "market": "SHOTS ON TARGET",
+              "selection": "Over 0.5",
+              "odds": null,
+              "start_time": null
+            },
+            {
+              "matchup": null,
+              "player": "LIONEL MESSI",
+              "market": "SHOTS ON TARGET",
+              "selection": "Over 1.5",
+              "odds": null,
+              "start_time": null
+            },
+            {
+              "matchup": "ARGENTINA",
+              "player": null,
+              "market": "TOTAL GOALS",
+              "selection": "Over 2.5",
+              "odds": null,
+              "start_time": null
+            },
+            {
+              "matchup": null,
+              "player": null,
+              "market": "TOTAL CORNERS",
+              "selection": "Over 6.5",
+              "odds": null,
+              "start_time": null
+            }
+          ],
+          "gate": {
+            "pass": false,
+            "reason": "SGP_NO_DECLARED_COUNT",
+            "normalizedBet": null,
+            "detail": {
+              "declaredLegCount": null
+            }
+          }
+        },
+        {
+          "origin": "embed",
+          "url": "https://images-ext-1.discordapp.net/external/tP81V0oD8hvPt7RkqsBQZGm3m0vvLZ8LMHyuxC1UKBs/https/images.hardrocksportsbook.com/share/hrbicon.png",
+          "ocr": null,
+          "ocrText": "",
+          "sgpToken": null,
+          "declaredLegCount": null,
+          "parsedBet": null,
+          "parsedLegCount": null,
+          "legs": [],
+          "gate": {
+            "pass": false,
+            "reason": "SGP_OCR_EMPTY",
+            "normalizedBet": null,
+            "detail": {}
+          }
+        }
+      ],
+      "errors": [
+        "image_fetch(sgp-audit-1522665209058164746-img1): OCR_IMAGE_HOST_BLOCKED"
+      ]
+    },
+    {
+      "messageId": "1522717290624323685",
+      "channelId": "1355182920163262664",
+      "channelName": "datdude-slips",
+      "attachmentCount": 1,
+      "imageCount": 2,
+      "ocrText": "Hard Rock\nBET\nSGP\n2-Bet Parlay\n+1100\nWager\nBoosted Payout\n$20\n$306\n30%ProfitBoost applied+$66 added\nOver 2.5\nARGENTINA TOTAL GOALS\nArgentina by 2\nWINNING MARGIN",
+      "sgpToken": "SGP",
+      "declaredLegCount": 2,
+      "parsedLegCount": 2,
+      "legs": [
+        {
+          "matchup": null,
+          "player": null,
+          "market": "ARGENTINA TOTAL GOALS",
+          "selection": "Over 2.5",
+          "odds": null,
+          "start_time": null
+        },
+        {
+          "matchup": null,
+          "player": null,
+          "market": "WINNING MARGIN",
+          "selection": "Argentina by 2",
+          "odds": null,
+          "start_time": null
+        }
+      ],
+      "gate": {
+        "pass": false,
+        "reason": "SGP_LEG_MISSING_FIELD",
+        "detail": {
+          "index": 0,
+          "entity": null,
+          "hasMarket": true,
+          "hasLine": true
+        },
+        "normalizedBet": null
+      },
+      "images": [
+        {
+          "origin": "attachment",
+          "url": "https://cdn.discordapp.com/attachments/1355182920163262664/1522717290817392650/image.jpg?ex=6a520e3c&is=6a50bcbc&hm=e1512bbb175b2db051b778917bcea630982e981a803a8e7b247b3d96bcf2666d&",
+          "ocr": {
+            "ok": true,
+            "chars": 160,
+            "confidence": 0.9745,
+            "latencyMs": 2535.5,
+            "imageHash": "8bd3b3e4b368c0b44d0ef07c1cd2ca072ed20de8586960466eef5870efb70691"
+          },
+          "ocrText": "Hard Rock\nBET\nSGP\n2-Bet Parlay\n+1100\nWager\nBoosted Payout\n$20\n$306\n30%ProfitBoost applied+$66 added\nOver 2.5\nARGENTINA TOTAL GOALS\nArgentina by 2\nWINNING MARGIN",
+          "sgpToken": "SGP",
+          "declaredLegCount": 2,
+          "parsedBet": {
+            "book": "Hard Rock Bet",
+            "bet_type": "parlay",
+            "total_odds": "+1100",
+            "stake": "$20",
+            "payout": "$306",
+            "legs": [
+              {
+                "matchup": null,
+                "player": null,
+                "market": "ARGENTINA TOTAL GOALS",
+                "selection": "Over 2.5",
+                "odds": null,
+                "start_time": null
+              },
+              {
+                "matchup": null,
+                "player": null,
+                "market": "WINNING MARGIN",
+                "selection": "Argentina by 2",
+                "odds": null,
+                "start_time": null
+              }
+            ]
+          },
+          "parsedLegCount": 2,
+          "legs": [
+            {
+              "matchup": null,
+              "player": null,
+              "market": "ARGENTINA TOTAL GOALS",
+              "selection": "Over 2.5",
+              "odds": null,
+              "start_time": null
+            },
+            {
+              "matchup": null,
+              "player": null,
+              "market": "WINNING MARGIN",
+              "selection": "Argentina by 2",
+              "odds": null,
+              "start_time": null
+            }
+          ],
+          "gate": {
+            "pass": false,
+            "reason": "SGP_LEG_MISSING_FIELD",
+            "normalizedBet": null,
+            "detail": {
+              "index": 0,
+              "entity": null,
+              "hasMarket": true,
+              "hasLine": true
+            }
+          }
+        },
+        {
+          "origin": "embed",
+          "url": "https://images-ext-1.discordapp.net/external/tP81V0oD8hvPt7RkqsBQZGm3m0vvLZ8LMHyuxC1UKBs/https/images.hardrocksportsbook.com/share/hrbicon.png",
+          "ocr": null,
+          "ocrText": "",
+          "sgpToken": null,
+          "declaredLegCount": null,
+          "parsedBet": null,
+          "parsedLegCount": null,
+          "legs": [],
+          "gate": {
+            "pass": false,
+            "reason": "SGP_OCR_EMPTY",
+            "normalizedBet": null,
+            "detail": {}
+          }
+        }
+      ],
+      "errors": [
+        "image_fetch(sgp-audit-1522717290624323685-img1): OCR_IMAGE_HOST_BLOCKED"
+      ]
+    },
+    {
+      "messageId": "1523038383780270195",
+      "channelId": "1355182920163262664",
+      "channelName": "datdude-slips",
+      "attachmentCount": 1,
+      "imageCount": 2,
+      "ocrText": "Hard Rock\nBET\nSGP\n4-BetParlay\n+425\nWager\nPayout\n$20\n$105\nOver 2.5\nFRANCE TOTAL GOALS\nOver 1.5\nOUSMANE DEMBELE - SHOTS ON TARGET\nOver 1.5\nKYLIAN MBAPPE -SHOTS ON TARGET\nYes\nKYLIAN MBAPPE-TO SCORE OR ASSIST\nSuper Sub enabled.Bet continues and combines with the\nsubstitute'sperformance!",
+      "sgpToken": "SGP",
+      "declaredLegCount": null,
+      "parsedLegCount": 4,
+      "legs": [
+        {
+          "matchup": null,
+          "player": "FRANCE",
+          "market": "TOTAL GOALS",
+          "selection": "Over 2.5",
+          "odds": null,
+          "start_time": null
+        },
+        {
+          "matchup": null,
+          "player": "OUSMANE DEMBELE",
+          "market": "SHOTS ON TARGET",
+          "selection": "Over 1.5",
+          "odds": null,
+          "start_time": null
+        },
+        {
+          "matchup": null,
+          "player": "KYLIAN MBAPPE",
+          "market": "SHOTS ON TARGET",
+          "selection": "Over 1.5",
+          "odds": null,
+          "start_time": null
+        },
+        {
+          "matchup": null,
+          "player": "KYLIAN MBAPPE",
+          "market": "TO SCORE OR ASSIST",
+          "selection": "Yes",
+          "odds": null,
+          "start_time": null
+        }
+      ],
+      "gate": {
+        "pass": false,
+        "reason": "SGP_NO_DECLARED_COUNT",
+        "detail": {
+          "declaredLegCount": null
+        },
+        "normalizedBet": null
+      },
+      "images": [
+        {
+          "origin": "attachment",
+          "url": "https://cdn.discordapp.com/attachments/1355182920163262664/1523038384128266411/image.jpg?ex=6a51e7c7&is=6a509647&hm=9a6d0a81a3f72815b6269a395131643f35e2c4417968fd09318814987c98c1cb&",
+          "ocr": {
+            "ok": true,
+            "chars": 283,
+            "confidence": 0.9774,
+            "latencyMs": 2952.8,
+            "imageHash": "6da25f2d854e6b7b2b4ffb45b2e6e8f66ea1c40a63548fa42d8a5e3ac4b83035"
+          },
+          "ocrText": "Hard Rock\nBET\nSGP\n4-BetParlay\n+425\nWager\nPayout\n$20\n$105\nOver 2.5\nFRANCE TOTAL GOALS\nOver 1.5\nOUSMANE DEMBELE - SHOTS ON TARGET\nOver 1.5\nKYLIAN MBAPPE -SHOTS ON TARGET\nYes\nKYLIAN MBAPPE-TO SCORE OR ASSIST\nSuper Sub enabled.Bet continues and combines with the\nsubstitute'sperformance!",
+          "sgpToken": "SGP",
+          "declaredLegCount": null,
+          "parsedBet": {
+            "book": "Hard Rock",
+            "bet_type": "sgp",
+            "total_odds": "+425",
+            "stake": "$20",
+            "payout": "$105",
+            "legs": [
+              {
+                "matchup": null,
+                "player": "FRANCE",
+                "market": "TOTAL GOALS",
+                "selection": "Over 2.5",
+                "odds": null,
+                "start_time": null
+              },
+              {
+                "matchup": null,
+                "player": "OUSMANE DEMBELE",
+                "market": "SHOTS ON TARGET",
+                "selection": "Over 1.5",
+                "odds": null,
+                "start_time": null
+              },
+              {
+                "matchup": null,
+                "player": "KYLIAN MBAPPE",
+                "market": "SHOTS ON TARGET",
+                "selection": "Over 1.5",
+                "odds": null,
+                "start_time": null
+              },
+              {
+                "matchup": null,
+                "player": "KYLIAN MBAPPE",
+                "market": "TO SCORE OR ASSIST",
+                "selection": "Yes",
+                "odds": null,
+                "start_time": null
+              }
+            ]
+          },
+          "parsedLegCount": 4,
+          "legs": [
+            {
+              "matchup": null,
+              "player": "FRANCE",
+              "market": "TOTAL GOALS",
+              "selection": "Over 2.5",
+              "odds": null,
+              "start_time": null
+            },
+            {
+              "matchup": null,
+              "player": "OUSMANE DEMBELE",
+              "market": "SHOTS ON TARGET",
+              "selection": "Over 1.5",
+              "odds": null,
+              "start_time": null
+            },
+            {
+              "matchup": null,
+              "player": "KYLIAN MBAPPE",
+              "market": "SHOTS ON TARGET",
+              "selection": "Over 1.5",
+              "odds": null,
+              "start_time": null
+            },
+            {
+              "matchup": null,
+              "player": "KYLIAN MBAPPE",
+              "market": "TO SCORE OR ASSIST",
+              "selection": "Yes",
+              "odds": null,
+              "start_time": null
+            }
+          ],
+          "gate": {
+            "pass": false,
+            "reason": "SGP_NO_DECLARED_COUNT",
+            "normalizedBet": null,
+            "detail": {
+              "declaredLegCount": null
+            }
+          }
+        },
+        {
+          "origin": "embed",
+          "url": "https://images-ext-1.discordapp.net/external/tP81V0oD8hvPt7RkqsBQZGm3m0vvLZ8LMHyuxC1UKBs/https/images.hardrocksportsbook.com/share/hrbicon.png",
+          "ocr": null,
+          "ocrText": "",
+          "sgpToken": null,
+          "declaredLegCount": null,
+          "parsedBet": null,
+          "parsedLegCount": null,
+          "legs": [],
+          "gate": {
+            "pass": false,
+            "reason": "SGP_OCR_EMPTY",
+            "normalizedBet": null,
+            "detail": {}
+          }
+        }
+      ],
+      "errors": [
+        "image_fetch(sgp-audit-1523038383780270195-img1): OCR_IMAGE_HOST_BLOCKED"
+      ]
+    },
+    {
+      "messageId": "1520859560825327666",
+      "channelId": "1473347391284576469",
+      "channelName": "ig-dave-picks",
+      "attachmentCount": 1,
+      "imageCount": 2,
+      "ocrText": "Hard Rock\nBET\nSGPMAX\n3-Bet Parlay\n+524\nWager\nBoosted Payout\n$50\n$364.45\n20%Profit Boost applied +$52.41 added\n+177\nSGP\nPadres vs Dodgers\nToday,4:10pmEDT\nOver 1.5\nSHOHEI OHTANI-TOTAL BASES\nOver 0.5\nFERNANDO TATIS JR.-TO RECORD 1+ HITS\nOver 1.5\n+125\nPAUL GOLDSCHMIDT -TOTAL BASES\nRed Soxvs Yankees\nToday,7:20pmEDT",
+      "sgpToken": "SGPMAX",
+      "declaredLegCount": 3,
+      "parsedLegCount": 4,
+      "legs": [
+        {
+          "matchup": "Padres vs Dodgers",
+          "player": "SHOHEI OHTANI",
+          "market": "TOTAL BASES",
+          "selection": "Over 0.5",
+          "odds": null,
+          "start_time": "Today, 4:10pm EDT"
+        },
+        {
+          "matchup": "Padres vs Dodgers",
+          "player": "FERNANDO TATIS JR.",
+          "market": "TO RECORD 1+ HITS",
+          "selection": "Over 1.5",
+          "odds": null,
+          "start_time": "Today, 4:10pm EDT"
+        },
+        {
+          "matchup": "Padres vs Dodgers",
+          "player": "PAUL GOLDSCHMIDT",
+          "market": "TOTAL BASES",
+          "selection": "Over 1.5",
+          "odds": "+125",
+          "start_time": "Today, 4:10pm EDT"
+        },
+        {
+          "matchup": "Red Sox vs Yankees",
+          "player": null,
+          "market": null,
+          "selection": null,
+          "odds": null,
+          "start_time": "Today, 7:20pm EDT"
+        }
+      ],
+      "gate": {
+        "pass": false,
+        "reason": "SGP_COUNT_MISMATCH",
+        "detail": {
+          "declared": 3,
+          "parsed": 4,
+          "rawLegCount": 4,
+          "excluded": 0
+        },
+        "normalizedBet": null
+      },
+      "images": [
+        {
+          "origin": "attachment",
+          "url": "https://cdn.discordapp.com/attachments/1473347391284576469/1520859560955609399/image.jpg?ex=6a51e397&is=6a509217&hm=b3fb10a9cc3d69ccc6947ccb490683547ec4965dc7cafbf14595a2e8bf31165c&",
+          "ocr": {
+            "ok": true,
+            "chars": 311,
+            "confidence": 0.9669,
+            "latencyMs": 3305.4,
+            "imageHash": "b82cf9b3c27b9d9cb935d5bb6b37b6947405e39df2305acee774410d551e2471"
+          },
+          "ocrText": "Hard Rock\nBET\nSGPMAX\n3-Bet Parlay\n+524\nWager\nBoosted Payout\n$50\n$364.45\n20%Profit Boost applied +$52.41 added\n+177\nSGP\nPadres vs Dodgers\nToday,4:10pmEDT\nOver 1.5\nSHOHEI OHTANI-TOTAL BASES\nOver 0.5\nFERNANDO TATIS JR.-TO RECORD 1+ HITS\nOver 1.5\n+125\nPAUL GOLDSCHMIDT -TOTAL BASES\nRed Soxvs Yankees\nToday,7:20pmEDT",
+          "sgpToken": "SGPMAX",
+          "declaredLegCount": 3,
+          "parsedBet": {
+            "book": "Hard Rock",
+            "bet_type": "sgpmax",
+            "total_odds": "+524",
+            "stake": "$50",
+            "payout": "$364.45",
+            "legs": [
+              {
+                "matchup": "Padres vs Dodgers",
+                "player": "SHOHEI OHTANI",
+                "market": "TOTAL BASES",
+                "selection": "Over 0.5",
+                "odds": null,
+                "start_time": "Today, 4:10pm EDT"
+              },
+              {
+                "matchup": "Padres vs Dodgers",
+                "player": "FERNANDO TATIS JR.",
+                "market": "TO RECORD 1+ HITS",
+                "selection": "Over 1.5",
+                "odds": null,
+                "start_time": "Today, 4:10pm EDT"
+              },
+              {
+                "matchup": "Padres vs Dodgers",
+                "player": "PAUL GOLDSCHMIDT",
+                "market": "TOTAL BASES",
+                "selection": "Over 1.5",
+                "odds": "+125",
+                "start_time": "Today, 4:10pm EDT"
+              },
+              {
+                "matchup": "Red Sox vs Yankees",
+                "player": null,
+                "market": null,
+                "selection": null,
+                "odds": null,
+                "start_time": "Today, 7:20pm EDT"
+              }
+            ]
+          },
+          "parsedLegCount": 4,
+          "legs": [
+            {
+              "matchup": "Padres vs Dodgers",
+              "player": "SHOHEI OHTANI",
+              "market": "TOTAL BASES",
+              "selection": "Over 0.5",
+              "odds": null,
+              "start_time": "Today, 4:10pm EDT"
+            },
+            {
+              "matchup": "Padres vs Dodgers",
+              "player": "FERNANDO TATIS JR.",
+              "market": "TO RECORD 1+ HITS",
+              "selection": "Over 1.5",
+              "odds": null,
+              "start_time": "Today, 4:10pm EDT"
+            },
+            {
+              "matchup": "Padres vs Dodgers",
+              "player": "PAUL GOLDSCHMIDT",
+              "market": "TOTAL BASES",
+              "selection": "Over 1.5",
+              "odds": "+125",
+              "start_time": "Today, 4:10pm EDT"
+            },
+            {
+              "matchup": "Red Sox vs Yankees",
+              "player": null,
+              "market": null,
+              "selection": null,
+              "odds": null,
+              "start_time": "Today, 7:20pm EDT"
+            }
+          ],
+          "gate": {
+            "pass": false,
+            "reason": "SGP_COUNT_MISMATCH",
+            "normalizedBet": null,
+            "detail": {
+              "declared": 3,
+              "parsed": 4,
+              "rawLegCount": 4,
+              "excluded": 0
+            }
+          }
+        },
+        {
+          "origin": "embed",
+          "url": "https://images-ext-1.discordapp.net/external/tP81V0oD8hvPt7RkqsBQZGm3m0vvLZ8LMHyuxC1UKBs/https/images.hardrocksportsbook.com/share/hrbicon.png",
+          "ocr": null,
+          "ocrText": "",
+          "sgpToken": null,
+          "declaredLegCount": null,
+          "parsedBet": null,
+          "parsedLegCount": null,
+          "legs": [],
+          "gate": {
+            "pass": false,
+            "reason": "SGP_OCR_EMPTY",
+            "normalizedBet": null,
+            "detail": {}
+          }
+        }
+      ],
+      "errors": [
+        "image_fetch(sgp-audit-1520859560825327666-img1): OCR_IMAGE_HOST_BLOCKED"
+      ]
+    },
+    {
+      "messageId": "1523743668622856250",
+      "channelId": "1473341333325217950",
+      "channelName": "smokke-slips",
+      "attachmentCount": 1,
+      "imageCount": 2,
+      "ocrText": "Hard Rock\nBET\nSGP\n4-BetParlay\n+175\nWager\nPayout\n$10\n$27.50\nOver 7.5\nTOTAL CORNERS\nSpain\nTO ADVANCE\nOver 0.5\nLAMINE YAMAL -SHOTS ON TARGET\nOver 0.5\nMIKEL OYARZABAL - SHOTS ON TARGET\nSuper Sub enabled. Bet continues and combines with the\nsubstitute'sperformance!",
+      "sgpToken": "SGP",
+      "declaredLegCount": null,
+      "parsedLegCount": 3,
+      "legs": [
+        {
+          "matchup": "Spain",
+          "player": null,
+          "market": "TOTAL CORNERS",
+          "selection": "Over 7.5",
+          "odds": null,
+          "start_time": null
+        },
+        {
+          "matchup": null,
+          "player": "LAMINE YAMAL",
+          "market": "SHOTS ON TARGET",
+          "selection": "Over 0.5",
+          "odds": null,
+          "start_time": null
+        },
+        {
+          "matchup": null,
+          "player": "MIKEL OYARZABAL",
+          "market": "SHOTS ON TARGET",
+          "selection": "Over 0.5",
+          "odds": null,
+          "start_time": null
+        }
+      ],
+      "gate": {
+        "pass": false,
+        "reason": "SGP_NO_DECLARED_COUNT",
+        "detail": {
+          "declaredLegCount": null
+        },
+        "normalizedBet": null
+      },
+      "images": [
+        {
+          "origin": "attachment",
+          "url": "https://cdn.discordapp.com/attachments/1473341333325217950/1523743668765327432/ReactNative-snapshot-image877737057759097563.jpg?ex=6a51d5a0&is=6a508420&hm=28ffced728b89d57c1be28a8b9bdbd4a785d057c3bdb699335554509d6303b28&",
+          "ocr": {
+            "ok": true,
+            "chars": 260,
+            "confidence": 0.9712,
+            "latencyMs": 3413.1,
+            "imageHash": "f2c66d6329bd9a470de260b54d577a51f0f96f72b6d95d17c2f0d0a101cdbc0d"
+          },
+          "ocrText": "Hard Rock\nBET\nSGP\n4-BetParlay\n+175\nWager\nPayout\n$10\n$27.50\nOver 7.5\nTOTAL CORNERS\nSpain\nTO ADVANCE\nOver 0.5\nLAMINE YAMAL -SHOTS ON TARGET\nOver 0.5\nMIKEL OYARZABAL - SHOTS ON TARGET\nSuper Sub enabled. Bet continues and combines with the\nsubstitute'sperformance!",
+          "sgpToken": "SGP",
+          "declaredLegCount": null,
+          "parsedBet": {
+            "book": "Hard Rock Bet",
+            "bet_type": "parlay",
+            "total_odds": "+175",
+            "stake": "$10",
+            "payout": "$27.50",
+            "legs": [
+              {
+                "matchup": "Spain",
+                "player": null,
+                "market": "TOTAL CORNERS",
+                "selection": "Over 7.5",
+                "odds": null,
+                "start_time": null
+              },
+              {
+                "matchup": null,
+                "player": "LAMINE YAMAL",
+                "market": "SHOTS ON TARGET",
+                "selection": "Over 0.5",
+                "odds": null,
+                "start_time": null
+              },
+              {
+                "matchup": null,
+                "player": "MIKEL OYARZABAL",
+                "market": "SHOTS ON TARGET",
+                "selection": "Over 0.5",
+                "odds": null,
+                "start_time": null
+              }
+            ]
+          },
+          "parsedLegCount": 3,
+          "legs": [
+            {
+              "matchup": "Spain",
+              "player": null,
+              "market": "TOTAL CORNERS",
+              "selection": "Over 7.5",
+              "odds": null,
+              "start_time": null
+            },
+            {
+              "matchup": null,
+              "player": "LAMINE YAMAL",
+              "market": "SHOTS ON TARGET",
+              "selection": "Over 0.5",
+              "odds": null,
+              "start_time": null
+            },
+            {
+              "matchup": null,
+              "player": "MIKEL OYARZABAL",
+              "market": "SHOTS ON TARGET",
+              "selection": "Over 0.5",
+              "odds": null,
+              "start_time": null
+            }
+          ],
+          "gate": {
+            "pass": false,
+            "reason": "SGP_NO_DECLARED_COUNT",
+            "normalizedBet": null,
+            "detail": {
+              "declaredLegCount": null
+            }
+          }
+        },
+        {
+          "origin": "embed",
+          "url": "https://images-ext-1.discordapp.net/external/tP81V0oD8hvPt7RkqsBQZGm3m0vvLZ8LMHyuxC1UKBs/https/images.hardrocksportsbook.com/share/hrbicon.png",
+          "ocr": null,
+          "ocrText": "",
+          "sgpToken": null,
+          "declaredLegCount": null,
+          "parsedBet": null,
+          "parsedLegCount": null,
+          "legs": [],
+          "gate": {
+            "pass": false,
+            "reason": "SGP_OCR_EMPTY",
+            "normalizedBet": null,
+            "detail": {}
+          }
+        }
+      ],
+      "errors": [
+        "image_fetch(sgp-audit-1523743668622856250-img1): OCR_IMAGE_HOST_BLOCKED"
+      ]
+    },
+    {
+      "messageId": "1523743764038942950",
+      "channelId": "1473341333325217950",
+      "channelName": "smokke-slips",
+      "attachmentCount": 1,
+      "imageCount": 2,
+      "ocrText": "Hard Rock\nBET\nSGPMAX\n4-Bet Parlay\n+235\nWager\nPayout\n$10\n$33.47\nSGP\nPortugal vs Spain\n-105\nToday,3:00pm EDT\nYes\nBOTH TEAMS TO SCORE\nPortugal +1.5\nSPREAD\nUSA vs Belgium\n-140\nSGP\nToday,8:00pmEDT\nBelgium +1.5\nSPREAD\nYes\nBOTH TEAMS TO SCORE",
+      "sgpToken": "SGPMAX",
+      "declaredLegCount": 4,
+      "parsedLegCount": 2,
+      "legs": [
+        {
+          "matchup": "Portugal vs Spain",
+          "player": null,
+          "market": "BOTH TEAMS TO SCORE",
+          "selection": "Yes",
+          "odds": "-105",
+          "start_time": "3:00pm EDT"
+        },
+        {
+          "matchup": "USA vs Belgium",
+          "player": null,
+          "market": "BOTH TEAMS TO SCORE",
+          "selection": "Yes",
+          "odds": "-140",
+          "start_time": "8:00pm EDT"
+        }
+      ],
+      "gate": {
+        "pass": false,
+        "reason": "SGP_COUNT_MISMATCH",
+        "detail": {
+          "declared": 4,
+          "parsed": 2,
+          "rawLegCount": 2,
+          "excluded": 0
+        },
+        "normalizedBet": null
+      },
+      "images": [
+        {
+          "origin": "attachment",
+          "url": "https://cdn.discordapp.com/attachments/1473341333325217950/1523743764131221596/ReactNative-snapshot-image8953006361811051932.jpg?ex=6a51d5b7&is=6a508437&hm=c0793404e7e29f0ca0852da48c7186f820c5649a2eca175ef94aa9909afa448f&",
+          "ocr": {
+            "ok": true,
+            "chars": 235,
+            "confidence": 0.9627,
+            "latencyMs": 3054.5,
+            "imageHash": "4a21f5b7365f03dc0a18dfbeee1de597424b3188a55d1888be75f723acd3459c"
+          },
+          "ocrText": "Hard Rock\nBET\nSGPMAX\n4-Bet Parlay\n+235\nWager\nPayout\n$10\n$33.47\nSGP\nPortugal vs Spain\n-105\nToday,3:00pm EDT\nYes\nBOTH TEAMS TO SCORE\nPortugal +1.5\nSPREAD\nUSA vs Belgium\n-140\nSGP\nToday,8:00pmEDT\nBelgium +1.5\nSPREAD\nYes\nBOTH TEAMS TO SCORE",
+          "sgpToken": "SGPMAX",
+          "declaredLegCount": 4,
+          "parsedBet": {
+            "book": "Hard Rock",
+            "bet_type": "sgpmax",
+            "total_odds": "+235",
+            "stake": "$10",
+            "payout": "$33.47",
+            "legs": [
+              {
+                "matchup": "Portugal vs Spain",
+                "player": null,
+                "market": "BOTH TEAMS TO SCORE",
+                "selection": "Yes",
+                "odds": "-105",
+                "start_time": "3:00pm EDT"
+              },
+              {
+                "matchup": "USA vs Belgium",
+                "player": null,
+                "market": "BOTH TEAMS TO SCORE",
+                "selection": "Yes",
+                "odds": "-140",
+                "start_time": "8:00pm EDT"
+              }
+            ]
+          },
+          "parsedLegCount": 2,
+          "legs": [
+            {
+              "matchup": "Portugal vs Spain",
+              "player": null,
+              "market": "BOTH TEAMS TO SCORE",
+              "selection": "Yes",
+              "odds": "-105",
+              "start_time": "3:00pm EDT"
+            },
+            {
+              "matchup": "USA vs Belgium",
+              "player": null,
+              "market": "BOTH TEAMS TO SCORE",
+              "selection": "Yes",
+              "odds": "-140",
+              "start_time": "8:00pm EDT"
+            }
+          ],
+          "gate": {
+            "pass": false,
+            "reason": "SGP_COUNT_MISMATCH",
+            "normalizedBet": null,
+            "detail": {
+              "declared": 4,
+              "parsed": 2,
+              "rawLegCount": 2,
+              "excluded": 0
+            }
+          }
+        },
+        {
+          "origin": "embed",
+          "url": "https://images-ext-1.discordapp.net/external/tP81V0oD8hvPt7RkqsBQZGm3m0vvLZ8LMHyuxC1UKBs/https/images.hardrocksportsbook.com/share/hrbicon.png",
+          "ocr": null,
+          "ocrText": "",
+          "sgpToken": null,
+          "declaredLegCount": null,
+          "parsedBet": null,
+          "parsedLegCount": null,
+          "legs": [],
+          "gate": {
+            "pass": false,
+            "reason": "SGP_OCR_EMPTY",
+            "normalizedBet": null,
+            "detail": {}
+          }
+        }
+      ],
+      "errors": [
+        "image_fetch(sgp-audit-1523743764038942950-img1): OCR_IMAGE_HOST_BLOCKED"
+      ]
+    },
+    {
+      "messageId": "1523831106103934996",
+      "channelId": "1473341333325217950",
+      "channelName": "smokke-slips",
+      "attachmentCount": 1,
+      "imageCount": 2,
+      "ocrText": "Hard Rock\nBET\n2-Bet Parlay\nSGP\n+300\nWager\nPayout\n$5\n$20\nBelgium\nTO ADVANCE\nUnder 2.5\nTOTAL GOALS",
+      "sgpToken": "SGP",
+      "declaredLegCount": 2,
+      "parsedLegCount": 2,
+      "legs": [
+        {
+          "matchup": "Belgium",
+          "player": null,
+          "market": "TO ADVANCE",
+          "selection": null,
+          "odds": null,
+          "start_time": null
+        },
+        {
+          "matchup": null,
+          "player": null,
+          "market": "TOTAL GOALS",
+          "selection": "Under 2.5",
+          "odds": null,
+          "start_time": null
+        }
+      ],
+      "gate": {
+        "pass": false,
+        "reason": "SGP_LEG_MISSING_FIELD",
+        "detail": {
+          "index": 0,
+          "entity": "Belgium",
+          "hasMarket": true,
+          "hasLine": false
+        },
+        "normalizedBet": null
+      },
+      "images": [
+        {
+          "origin": "attachment",
+          "url": "https://cdn.discordapp.com/attachments/1473341333325217950/1523831106196078642/ReactNative-snapshot-image5949929005725057619.jpg?ex=6a52270f&is=6a50d58f&hm=e58491bd780c462e3163d8de7acc347c3f963219719784dea7d9527debf47fd8&",
+          "ocr": {
+            "ok": true,
+            "chars": 96,
+            "confidence": 0.9795,
+            "latencyMs": 1990.3,
+            "imageHash": "27321a16fa50999f0ef7a71e5b24bc29de56f73c3535fe34bd197fe01c3b58bc"
+          },
+          "ocrText": "Hard Rock\nBET\n2-Bet Parlay\nSGP\n+300\nWager\nPayout\n$5\n$20\nBelgium\nTO ADVANCE\nUnder 2.5\nTOTAL GOALS",
+          "sgpToken": "SGP",
+          "declaredLegCount": 2,
+          "parsedBet": {
+            "book": "Hard Rock",
+            "bet_type": "parlay",
+            "total_odds": "+300",
+            "stake": "$5",
+            "payout": "$20",
+            "legs": [
+              {
+                "matchup": "Belgium",
+                "player": null,
+                "market": "TO ADVANCE",
+                "selection": null,
+                "odds": null,
+                "start_time": null
+              },
+              {
+                "matchup": null,
+                "player": null,
+                "market": "TOTAL GOALS",
+                "selection": "Under 2.5",
+                "odds": null,
+                "start_time": null
+              }
+            ]
+          },
+          "parsedLegCount": 2,
+          "legs": [
+            {
+              "matchup": "Belgium",
+              "player": null,
+              "market": "TO ADVANCE",
+              "selection": null,
+              "odds": null,
+              "start_time": null
+            },
+            {
+              "matchup": null,
+              "player": null,
+              "market": "TOTAL GOALS",
+              "selection": "Under 2.5",
+              "odds": null,
+              "start_time": null
+            }
+          ],
+          "gate": {
+            "pass": false,
+            "reason": "SGP_LEG_MISSING_FIELD",
+            "normalizedBet": null,
+            "detail": {
+              "index": 0,
+              "entity": "Belgium",
+              "hasMarket": true,
+              "hasLine": false
+            }
+          }
+        },
+        {
+          "origin": "embed",
+          "url": "https://images-ext-1.discordapp.net/external/tP81V0oD8hvPt7RkqsBQZGm3m0vvLZ8LMHyuxC1UKBs/https/images.hardrocksportsbook.com/share/hrbicon.png",
+          "ocr": null,
+          "ocrText": "",
+          "sgpToken": null,
+          "declaredLegCount": null,
+          "parsedBet": null,
+          "parsedLegCount": null,
+          "legs": [],
+          "gate": {
+            "pass": false,
+            "reason": "SGP_OCR_EMPTY",
+            "normalizedBet": null,
+            "detail": {}
+          }
+        }
+      ],
+      "errors": [
+        "image_fetch(sgp-audit-1523831106103934996-img1): OCR_IMAGE_HOST_BLOCKED"
+      ]
+    },
+    {
+      "messageId": "1523831184268722238",
+      "channelId": "1473341333325217950",
+      "channelName": "smokke-slips",
+      "attachmentCount": 1,
+      "imageCount": 2,
+      "ocrText": "Hard Rock\nBET\n2-Bet Parlay\nSGP\n+300\nWager\nPayout\n$5\n$20\nBelgium\nTO ADVANCE\nUnder 2.5\nTOTAL GOALS",
+      "sgpToken": "SGP",
+      "declaredLegCount": 2,
+      "parsedLegCount": 2,
+      "legs": [
+        {
+          "matchup": "Belgium",
+          "player": null,
+          "market": "TO ADVANCE",
+          "selection": null,
+          "odds": null,
+          "start_time": null
+        },
+        {
+          "matchup": null,
+          "player": null,
+          "market": "TOTAL GOALS",
+          "selection": "Under 2.5",
+          "odds": null,
+          "start_time": null
+        }
+      ],
+      "gate": {
+        "pass": false,
+        "reason": "SGP_LEG_MISSING_FIELD",
+        "detail": {
+          "index": 0,
+          "entity": "Belgium",
+          "hasMarket": true,
+          "hasLine": false
+        },
+        "normalizedBet": null
+      },
+      "images": [
+        {
+          "origin": "attachment",
+          "url": "https://cdn.discordapp.com/attachments/1473341333325217950/1523831184340287549/ReactNative-snapshot-image7751544722546467799.jpg?ex=6a522721&is=6a50d5a1&hm=556ad0477e65a6e70ba58d9915f89a18945ae03ccad2adae36df97bd70549ed2&",
+          "ocr": {
+            "ok": true,
+            "chars": 96,
+            "confidence": 0.9795,
+            "latencyMs": 1878.8,
+            "imageHash": "27321a16fa50999f0ef7a71e5b24bc29de56f73c3535fe34bd197fe01c3b58bc"
+          },
+          "ocrText": "Hard Rock\nBET\n2-Bet Parlay\nSGP\n+300\nWager\nPayout\n$5\n$20\nBelgium\nTO ADVANCE\nUnder 2.5\nTOTAL GOALS",
+          "sgpToken": "SGP",
+          "declaredLegCount": 2,
+          "parsedBet": {
+            "book": "Hard Rock",
+            "bet_type": "parlay",
+            "total_odds": "+300",
+            "stake": "$5",
+            "payout": "$20",
+            "legs": [
+              {
+                "matchup": "Belgium",
+                "player": null,
+                "market": "TO ADVANCE",
+                "selection": null,
+                "odds": null,
+                "start_time": null
+              },
+              {
+                "matchup": null,
+                "player": null,
+                "market": "TOTAL GOALS",
+                "selection": "Under 2.5",
+                "odds": null,
+                "start_time": null
+              }
+            ]
+          },
+          "parsedLegCount": 2,
+          "legs": [
+            {
+              "matchup": "Belgium",
+              "player": null,
+              "market": "TO ADVANCE",
+              "selection": null,
+              "odds": null,
+              "start_time": null
+            },
+            {
+              "matchup": null,
+              "player": null,
+              "market": "TOTAL GOALS",
+              "selection": "Under 2.5",
+              "odds": null,
+              "start_time": null
+            }
+          ],
+          "gate": {
+            "pass": false,
+            "reason": "SGP_LEG_MISSING_FIELD",
+            "normalizedBet": null,
+            "detail": {
+              "index": 0,
+              "entity": "Belgium",
+              "hasMarket": true,
+              "hasLine": false
+            }
+          }
+        },
+        {
+          "origin": "embed",
+          "url": "https://images-ext-1.discordapp.net/external/tP81V0oD8hvPt7RkqsBQZGm3m0vvLZ8LMHyuxC1UKBs/https/images.hardrocksportsbook.com/share/hrbicon.png",
+          "ocr": null,
+          "ocrText": "",
+          "sgpToken": null,
+          "declaredLegCount": null,
+          "parsedBet": null,
+          "parsedLegCount": null,
+          "legs": [],
+          "gate": {
+            "pass": false,
+            "reason": "SGP_OCR_EMPTY",
+            "normalizedBet": null,
+            "detail": {}
+          }
+        }
+      ],
+      "errors": [
+        "image_fetch(sgp-audit-1523831184268722238-img1): OCR_IMAGE_HOST_BLOCKED"
+      ]
+    }
+  ]
+}
