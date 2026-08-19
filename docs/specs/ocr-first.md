@@ -331,10 +331,10 @@ cutover.
 
 ### 8.5 SGP drop→hold (`SGP_HOLD_MODE`, PR 2b — design D2, #41 Option A)
 
-SGP/SGPMAX slips bail to `FALLBACK_GEMINI` *before* Groq (§3 step 2), so when Vision then
-fails on one (`is_bet=false` / indeterminate) the outcome today is a legless
-`MANUAL_REVIEW_HOLD` (human channels) or `PURE_SLIP_SKIP_HOLD` → drop (pure-slip capper
-channels — the DatDude silent-drop path). `ocrFirstWiring.runSgpDropToHold` reruns the OCR →
+SGP/SGPMAX slips bail to `FALLBACK_GEMINI` *before* Groq (§3 step 2). When Vision then
+fails on one (`is_bet=false` / indeterminate), base routing now preserves an image-bearing
+pure-slip post as a generic `MANUAL_REVIEW_HOLD` (text-only pure-slip failures retain the
+`PURE_SLIP_SKIP_HOLD` → drop route). `ocrFirstWiring.runSgpDropToHold` reruns the OCR →
 Groq → `extractHeaderLegCount` → `evaluateSgpGate` chain (the PR 2a would-hold chain,
 synchronously) at that seam; on a deterministic gate **PASS** the slip is staged as a
 `MANUAL_REVIEW_HOLD` carrying the gate's `normalizedBet` legs in an additive `ocrSgp`
@@ -355,14 +355,14 @@ not on the full cutover bar (§8.1). Read **per call** (flip without restart):
 
 | mode | behavior |
 |------|----------|
-| `off` (default) | zero calls, zero events — ingest byte-identical |
+| `off` (default) | zero SGP calls/events; caller uses its base failure route |
 | `shadow` | fire-and-forget: run the chain at the EXACT enforce seam, emit one `ocr_sgp_hold_shadow` (`kind=would_hold\|would_skip\|not_applicable`), never change routing |
-| `enforce` | gate PASS → hold-with-legs + one `ocr_sgp_hold` event; **FAIL / non-SGP / any error → today's behavior, no event** |
+| `enforce` | gate PASS → hold-with-legs + one `ocr_sgp_hold` event; **FAIL / non-SGP / any error → base routing, no SGP event** |
 
 Seam guards (both live modes, so shadow's population ≡ enforce's): `HUMAN_SUBMISSION_CHANNEL_IDS`
 channel only (holds are curated-channel review), ≥1 image, `eligibleImageCount ≤ 1` (Fix-3
 mirror — OCR sees only image[0]; PR 2a's pulse measured multi-image bails with an
 `image[0]_of_multi` scope, this seam skips them). The rescue path never throws into ingest
-(`runSgpWouldHold` swallow discipline) and only a PASS may change routing — fail-safe is
-always "what happens today". PR 2a's `ocr_sgp_would_hold` pulse (`services/sgpWouldHoldPulse.js`
+(`runSgpWouldHold` swallow discipline) and only a PASS may replace the base route with an
+OCR-enriched hold. PR 2a's `ocr_sgp_would_hold` pulse (`services/sgpWouldHoldPulse.js`
 + its `runShadow` call) is **THROWAWAY** once this is live — tracked for a follow-up removal PR.

@@ -1276,20 +1276,18 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
       }
 
       // ═══ SGP 2b (design D2, #41 Option A): drop→hold on a gate PASS ═══
-      // Vision failed on this message (is_bet=false / indeterminate below) — the
-      // outcome today is a legless hold (human channel) or PURE_SLIP_SKIP_HOLD →
-      // drop (pure-slip capper channels, the DatDude silent-drop path). When the
-      // slip is an SGP/SGPMAX HRB slip whose OCR→Groq parse clears the
+      // Vision failed on this message (is_bet=false / indeterminate below). When
+      // the slip is an SGP/SGPMAX HRB slip whose OCR→Groq parse clears the
       // deterministic gate (services/sgpGate.js, validated live via PR 2a's
       // ocr_sgp_would_hold split + docs/regrades/sgp-audit-20260710.json), hold
       // it for human review carrying the OCR-parsed legs instead.
       //
       // Gated on SGP_HOLD_MODE (off default | shadow | enforce, read per call in
       // ocrFirstWiring.resolveSgpHoldMode). Returns true ONLY when the slip was
-      // staged as a hold (enforce + gate PASS) — the caller then returns and the
-      // branch's existing routing never runs. EVERY other outcome (off, shadow,
-      // non-human channel, no/multi image, gate FAIL, any error) returns false
-      // and the branch proceeds byte-identically to today. NEVER throws into
+      // staged as an enriched hold (enforce + gate PASS) — the caller then
+      // returns and the branch's base routing never runs. EVERY other outcome
+      // (off, shadow, non-human channel, no/multi image, gate FAIL, any error)
+      // returns false and falls through to that base routing. NEVER throws into
       // ingest — same swallow discipline as runSgpWouldHold.
       const trySgpDropToHold = async (holdReason, holdExtra, aiVerdict) => {
         try {
@@ -1352,13 +1350,17 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
       // instead of silent drop, since a real human posted to a curated capper channel.
       // All other surfaces: existing PRE_FILTER_NO_BET_CONTENT drop is correct.
       if (parsed.is_bet === false) {
-        // SGP 2b: gate-PASS SGP slips hold (with legs) instead of the routing
-        // below; anything else falls through unchanged.
+        // SGP 2b: gate-PASS SGP slips hold with legs; anything else falls
+        // through to the base routing below.
         if (await trySgpDropToHold('ai_is_bet_false', {}, 'ignore (is_bet=false)')) return;
         const humanChannelIds = (process.env.HUMAN_SUBMISSION_CHANNEL_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
         const isHumanChannel = humanChannelIds.includes(message.channel.id);
-        // pureSlipChannelIds / isPureSlip hoisted to the top of processAggregatedMessage.
-        if (isHumanChannel && !isPureSlip) {
+        // Image-bearing failures in curated pure-slip channels are candidates,
+        // not noise. Preserve them in the existing recoverable hold queue rather
+        // than losing the original message at PURE_SLIP_SKIP_HOLD → drop. Keep
+        // the old skip/drop behavior for text-only pure-slip chatter.
+        const holdPureSlipImage = isPureSlip && imageUrls.length > 0;
+        if (isHumanChannel && (!isPureSlip || holdPureSlipImage)) {
           // Phase A link-reader (shadow): attachShareLink is a no-op when
           // LINK_READER_MODE is unset/off (hold payload byte-identical aside
           // from the sample bump); in shadow it adds an additive `share_link`
@@ -1371,8 +1373,10 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
             sample: cleanText.slice(0, 400),
           };
           linkReader.attachShareLink(holdPayload, cleanText);
-          // PRE_FILTER (shadow/enforce gate)
-          const mode = process.env.PRE_FILTER_MODE || 'off';
+          // PRE_FILTER remains a text-noise gate for ordinary human channels.
+          // Do not let wrapper copy ("load here", promos, etc.) delete an actual
+          // image from a channel explicitly designated for slip images.
+          const mode = isPureSlip ? 'off' : (process.env.PRE_FILTER_MODE || 'off');
           const enf = (process.env.PRE_FILTER_ENFORCE_BUCKETS || '').split(',').map(s => s.trim()).filter(Boolean);
           const preDecision = preFilterDecision(cleanText, mode, enf);
           if (preDecision.action === 'drop') {
@@ -1411,13 +1415,12 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
               messageUrl: message.url,
             });
           } catch (e) { console.log(`[ManualReviewNotice] Failed: ${e.message}`); }
-          console.log(`[Filter] Human-channel slip held for review (ai_is_bet_false): ${cleanText.substring(0, 60)}...`);
+          console.log(`[Filter] ${holdPureSlipImage ? 'Pure-slip image' : 'Human-channel slip'} held for review (ai_is_bet_false): ${cleanText.substring(0, 60)}...`);
           return;
         }
         if (isHumanChannel && isPureSlip) {
-          // Pure-slip channel: skip the hold. Record a trace-only marker (STAGE_ENTER, not a
-          // DROP — stays out of /admin pipeline-drops-24h) and fall through to the existing
-          // PRE_FILTER_NO_BET_CONTENT drop/return below, unchanged.
+          // Text-only pure-slip message: keep the existing skip/drop behavior so
+          // ordinary chatter cannot flood the review queue.
           stageAll('PURE_SLIP_SKIP_HOLD', {
             reason: 'ai_is_bet_false',
             channelId: message.channel.id,
@@ -1449,7 +1452,7 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
       // AI indeterminate (no is_bet=true, no usable bets).
       // Same human-channel hold pattern as the is_bet=false branch above.
       if (parsed.is_bet !== true && (!parsed.bets || parsed.bets.length === 0)) {
-        // SGP 2b: same gate-PASS drop→hold as the is_bet=false branch above.
+        // SGP 2b: same gate-PASS hold enrichment as the branch above.
         if (await trySgpDropToHold(
           'ai_indeterminate_no_bets',
           {
@@ -1461,8 +1464,10 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
         )) return;
         const humanChannelIds = (process.env.HUMAN_SUBMISSION_CHANNEL_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
         const isHumanChannel = humanChannelIds.includes(message.channel.id);
-        // pureSlipChannelIds / isPureSlip hoisted to the top of processAggregatedMessage.
-        if (isHumanChannel && !isPureSlip) {
+        // Mirror the explicit-false branch: preserve image-bearing pure-slip
+        // failures for recovery, while text-only pure-slip chatter still drops.
+        const holdPureSlipImage = isPureSlip && imageUrls.length > 0;
+        if (isHumanChannel && (!isPureSlip || holdPureSlipImage)) {
           // Phase A link-reader (shadow): no-op off; additive `share_link` in
           // shadow mode. Same off-mode-byte-identical contract as the
           // ai_is_bet_false branch above.
@@ -1477,8 +1482,10 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
             sample: cleanText.slice(0, 400),
           };
           linkReader.attachShareLink(holdPayload, cleanText);
-          // PRE_FILTER (shadow/enforce gate)
-          const mode = process.env.PRE_FILTER_MODE || 'off';
+          // PRE_FILTER still removes text-only promo/recap/sweat noise from
+          // ordinary human channels. A curated pure-slip image bypasses that
+          // text heuristic so wrapper copy cannot delete the attached candidate.
+          const mode = isPureSlip ? 'off' : (process.env.PRE_FILTER_MODE || 'off');
           const enf = (process.env.PRE_FILTER_ENFORCE_BUCKETS || '').split(',').map(s => s.trim()).filter(Boolean);
           const preDecision = preFilterDecision(cleanText, mode, enf);
           if (preDecision.action === 'drop') {
@@ -1517,13 +1524,12 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
               messageUrl: message.url,
             });
           } catch (e) { console.log(`[ManualReviewNotice] Failed: ${e.message}`); }
-          console.log(`[Filter] Human-channel slip held for review (ai_indeterminate_no_bets): is_bet=${parsed.is_bet}, bets=${parsed.bets?.length || 0}`);
+          console.log(`[Filter] ${holdPureSlipImage ? 'Pure-slip image' : 'Human-channel slip'} held for review (ai_indeterminate_no_bets): is_bet=${parsed.is_bet}, bets=${parsed.bets?.length || 0}`);
           return;
         }
         if (isHumanChannel && isPureSlip) {
-          // Pure-slip channel: skip the hold. Record a trace-only marker (STAGE_ENTER, not a
-          // DROP — stays out of /admin pipeline-drops-24h) and fall through to the existing
-          // PRE_FILTER_AI_EMPTY_RESULT drop/return below, unchanged.
+          // Text-only pure-slip message: keep the existing skip/drop behavior so
+          // ordinary chatter cannot flood the review queue.
           stageAll('PURE_SLIP_SKIP_HOLD', {
             reason: 'ai_indeterminate_no_bets',
             is_bet_value: parsed.is_bet === undefined ? 'undefined' : String(parsed.is_bet),
