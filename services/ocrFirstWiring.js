@@ -49,16 +49,16 @@ const MODE = resolveMode(process.env.OCR_FIRST_MODE);
 // unrelated flip. Same tri-state idiom, but read PER CALL (the
 // EVENT_AWARE_RECHECK variant, not this module's read-at-load MODE) so ops can
 // flip without a restart and tests can toggle per case.
-//   off     (default) — no calls, no events, byte-identical ingest.
+//   off     (default) — no SGP calls or events; caller uses its base routing.
 //   shadow            — fire-and-forget: run the chain at the EXACT enforce
 //                       seam, emit one `ocr_sgp_hold_shadow` event, never
 //                       change routing. (PR 2a's ocr_sgp_would_hold measures a
 //                       different population — every SGP bail in runShadow —
 //                       and is THROWAWAY once 2b is live.)
 //   enforce           — on a gate PASS return { hold:true, sgp } so the caller
-//                       stages MANUAL_REVIEW_HOLD instead of the drop/skip; on
+//                       stages an OCR-enriched MANUAL_REVIEW_HOLD; on
 //                       FAIL or ANY error return { hold:false } with no event —
-//                       fail-safe is always what happens today.
+//                       caller falls through to its base routing.
 const SGP_HOLD_MODES = new Set(['off', 'shadow', 'enforce']);
 function resolveSgpHoldMode(raw = process.env.SGP_HOLD_MODE) {
   const m = String(raw == null ? '' : raw).trim().toLowerCase();
@@ -525,14 +525,13 @@ async function evaluateSgpHold({ imageUrl, mediaType, requestId, deps }) {
  * SGP drop→hold (PR 2b, design D2 — #41 Option A, at the vision-failure seam).
  * The ONLY behavior change of the SGP-rescue arc: on a deterministic gate PASS
  * the caller routes the slip to MANUAL_REVIEW_HOLD (carrying the OCR-parsed
- * legs) instead of today's hold-without-legs / PURE_SLIP_SKIP_HOLD→drop.
+ * legs) instead of the caller's generic failure route.
  *
  * ALWAYS returns { hold, mode, sgp?, shadowPromise? } — NEVER throws, NEVER
  * rejects. Guardrail (the #41 contract): ONLY a gate PASS may return hold:true;
  * every FAIL, every guard skip, and every error returns { hold:false } so the
- * caller falls through to today's behavior byte-identically (on those paths no
- * event is emitted either — PENDING routing must stay indistinguishable from
- * today; the shadow mode + PR 2a pulse are the measurement surfaces).
+ * caller falls through to its base routing (on those paths no SGP event is
+ * emitted; the shadow mode + PR 2a pulse are the measurement surfaces).
  *
  *   off     → { hold:false }, zero calls, zero events.
  *   shadow  → { hold:false, shadowPromise } immediately; the chain + ONE
@@ -583,7 +582,7 @@ async function runSgpDropToHold({ imageUrl, mediaType, imageCount, requestId, so
     // abort, Groq 15s×2), so no extra wrapper timeout is needed.
     const res = await evaluateSgpHold({ imageUrl, mediaType, requestId, deps });
     if (!res || res.ran !== true || res.pass !== true || !res.normalizedBet) {
-      return { hold: false, mode: m }; // FAIL / not-SGP / OCR failure → today's behavior
+      return { hold: false, mode: m }; // FAIL / not-SGP / OCR failure → caller's base route
     }
     const nb = res.normalizedBet;
     const legs = Array.isArray(nb.legs) ? nb.legs : [];
@@ -636,7 +635,7 @@ async function runSgpDropToHold({ imageUrl, mediaType, imageCount, requestId, so
  *
  * safeJson truncates serialized payloads at 4000 chars — a truncated payload is
  * INVALID JSON, loadHoldEvent then returns null, and the hold's Release /
- * recover flow is bricked (strictly worse than today's legless hold). The
+ * recover flow is bricked (strictly worse than a plain hold). The
  * ocrSgp block is budgeted at build time (runSgpDropToHold), but the FINAL
  * staged payload also carries reason/channelId/capper/messageUrl, a 400-char
  * sample, and (LINK_READER_MODE=shadow) an additive share_link block — the sum
@@ -648,8 +647,8 @@ async function runSgpDropToHold({ imageUrl, mediaType, imageCount, requestId, so
  *      sgpReleasePlan keys on gate+description, never legs)
  *   2. trim sample to 100 chars
  *   3. trim ocrSgp.description to 1000 chars (modal prefill order of magnitude)
- *   4. last resort: drop the ocrSgp block entirely — degrades to today's
- *      plain-hold payload shape, which always fits.
+ *   4. last resort: drop the ocrSgp block entirely — degrades to the plain-hold
+ *      payload shape, which always fits.
  */
 function fitHoldPayload(payload, budget = 3800) {
   let p = payload;

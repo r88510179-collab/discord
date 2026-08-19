@@ -96,6 +96,7 @@ function makeMessage({
     embeds: [],
     reference: null,
     createdTimestamp: Date.now(),
+    url: `https://discord.com/channels/guild_1/${channelId}/${messageId}`,
     author: {
       id: authorId,
       bot,
@@ -250,13 +251,14 @@ async function testNearSimultaneousReplaySingleSideEffects() {
   assert.strictEqual(staged.length, 1, 'concurrent replay should stage War Room embed once');
 }
 
-// ── PR #2: pure-slip channel hold-skip gate ─────────────────────────────────
+// ── Pure-slip failure routing ────────────────────────────────────────────────
 // Channel is in HUMAN_SUBMISSION_CHANNEL_IDS (authorizes it + enables the hold path).
-// PURE_SLIP_CHANNEL_IDS toggles the skip. Content is a normal pick so GUARD 5 buffers it;
-// the mocked parseBetText forces which branch (is_bet=false / indeterminate / valid) hits.
+// Image-bearing failures are preserved as recoverable holds; text-only messages keep
+// the legacy skip/drop route so normal channel chatter cannot flood manual review.
+// The mocked parseBetText forces which branch (is_bet=false / indeterminate / valid) hits.
 
-// 1. Bypass channel + is_bet=false → no MANUAL_REVIEW_HOLD, one PURE_SLIP_SKIP_HOLD, drop runs.
-async function testPureSlipSkipsHoldOnIsBetFalse() {
+// 1. Text-only pure-slip + is_bet=false → skip marker + existing drop.
+async function testPureSlipTextOnlySkipsHoldOnIsBetFalse() {
   process.env.HUMAN_SUBMISSION_CHANNEL_IDS = 'channel_1';
   process.env.PURE_SLIP_CHANNEL_IDS = 'channel_1';
 
@@ -283,8 +285,8 @@ async function testPureSlipSkipsHoldOnIsBetFalse() {
   assert.strictEqual(writer.insertedCount(), 0, 'pure-slip is_bet=false must not persist a bet');
 }
 
-// 2. Bypass channel + ai_indeterminate → no hold, one PURE_SLIP_SKIP_HOLD, drop runs.
-async function testPureSlipSkipsHoldOnIndeterminate() {
+// 2. Text-only pure-slip + ai_indeterminate → skip marker + existing drop.
+async function testPureSlipTextOnlySkipsHoldOnIndeterminate() {
   process.env.HUMAN_SUBMISSION_CHANNEL_IDS = 'channel_1';
   process.env.PURE_SLIP_CHANNEL_IDS = 'channel_1';
 
@@ -309,7 +311,84 @@ async function testPureSlipSkipsHoldOnIndeterminate() {
   assert.strictEqual(writer.insertedCount(), 0, 'pure-slip indeterminate must not persist a bet');
 }
 
-// 3. Bypass channel + valid bets → unchanged from baseline (persists, no hold, no skip).
+// 3. Image-bearing pure-slip + is_bet=false → recoverable hold. PRE_FILTER is
+// deliberately enforced with promo copy to prove wrapper text cannot delete the image.
+async function testPureSlipImageHoldsOnIsBetFalse() {
+  process.env.HUMAN_SUBMISSION_CHANNEL_IDS = 'channel_1';
+  process.env.PURE_SLIP_CHANNEL_IDS = 'channel_1';
+  process.env.SGP_HOLD_MODE = 'off';
+  delete process.env.ADMIN_LOG_CHANNEL_ID;
+  const previousMode = process.env.PRE_FILTER_MODE;
+  const previousBuckets = process.env.PRE_FILTER_ENFORCE_BUCKETS;
+  process.env.PRE_FILTER_MODE = 'enforce';
+  process.env.PRE_FILTER_ENFORCE_BUCKETS = 'promo';
+
+  try {
+    const events = [];
+    const writer = dedupeWriter();
+    const { handleMessage } = loadHandlerWithMocks({
+      parseBetText: async () => ({ is_bet: false }),
+      parseBetSlipImage: async () => ({ bets: [] }),
+      createBetWithLegs: writer,
+      sendStagingEmbed: async () => {},
+      events,
+    });
+
+    const msg = makeMessage({
+      messageId: 'pureslip_image_nobet_1',
+      withImage: true,
+      content: 'Tail my bank builder: profit boost on FanDuel, load here',
+    });
+    await handleMessage(msg);
+    await new Promise((resolve) => setTimeout(resolve, 4500));
+
+    assert.strictEqual(countStage(events, 'MANUAL_REVIEW_HOLD'), 1, 'image-bearing pure-slip failure must be held');
+    const hold = events.find(e => e.stage === 'MANUAL_REVIEW_HOLD');
+    assert.strictEqual(hold.payload.reason, 'ai_is_bet_false');
+    assert.strictEqual(hold.payload.messageUrl, msg.url, 'hold keeps the original message for Recover/View Original');
+    assert.strictEqual(countStage(events, 'PURE_SLIP_SKIP_HOLD'), 0, 'image-bearing failure must not emit the loss marker');
+    assert.strictEqual(countStage(events, 'PRE_FILTER_WOULD_DROP'), 0, 'pure-slip image bypasses the text-only pre-filter');
+    assert.ok(!events.some(e => e.fn === 'drop'), 'image-bearing failure must not be dropped');
+    assert.strictEqual(writer.insertedCount(), 0, 'hold routing must not auto-create an unverified bet');
+  } finally {
+    if (previousMode === undefined) delete process.env.PRE_FILTER_MODE;
+    else process.env.PRE_FILTER_MODE = previousMode;
+    if (previousBuckets === undefined) delete process.env.PRE_FILTER_ENFORCE_BUCKETS;
+    else process.env.PRE_FILTER_ENFORCE_BUCKETS = previousBuckets;
+  }
+}
+
+// 4. Image-bearing pure-slip + ai_indeterminate → same recoverable hold route.
+async function testPureSlipImageHoldsOnIndeterminate() {
+  process.env.HUMAN_SUBMISSION_CHANNEL_IDS = 'channel_1';
+  process.env.PURE_SLIP_CHANNEL_IDS = 'channel_1';
+  process.env.SGP_HOLD_MODE = 'off';
+  delete process.env.ADMIN_LOG_CHANNEL_ID;
+
+  const events = [];
+  const writer = dedupeWriter();
+  const { handleMessage } = loadHandlerWithMocks({
+    parseBetText: async () => ({ type: 'bet', bets: [] }),
+    parseBetSlipImage: async () => ({ bets: [] }),
+    createBetWithLegs: writer,
+    sendStagingEmbed: async () => {},
+    events,
+  });
+
+  const msg = makeMessage({ messageId: 'pureslip_image_indeterm_1', withImage: true });
+  await handleMessage(msg);
+  await new Promise((resolve) => setTimeout(resolve, 4500));
+
+  assert.strictEqual(countStage(events, 'MANUAL_REVIEW_HOLD'), 1, 'indeterminate image-bearing pure-slip failure must be held');
+  const hold = events.find(e => e.stage === 'MANUAL_REVIEW_HOLD');
+  assert.strictEqual(hold.payload.reason, 'ai_indeterminate_no_bets');
+  assert.strictEqual(hold.payload.messageUrl, msg.url);
+  assert.strictEqual(countStage(events, 'PURE_SLIP_SKIP_HOLD'), 0);
+  assert.ok(!events.some(e => e.fn === 'drop'), 'indeterminate image-bearing failure must not be dropped');
+  assert.strictEqual(writer.insertedCount(), 0);
+}
+
+// 5. Pure-slip channel + valid bets → unchanged from baseline (persists, no hold, no skip).
 async function testPureSlipValidBetsUnchanged() {
   process.env.HUMAN_SUBMISSION_CHANNEL_IDS = 'channel_1';
   process.env.PURE_SLIP_CHANNEL_IDS = 'channel_1';
@@ -335,7 +414,7 @@ async function testPureSlipValidBetsUnchanged() {
   assert.strictEqual(staged.length, 1, 'valid bets stage one War Room embed');
 }
 
-// 4. Non-bypass channel (not in PURE_SLIP_CHANNEL_IDS), is_bet=false → baseline hold, no skip.
+// 6. Non-pure human channel, is_bet=false → baseline hold, no skip.
 async function testNonBypassChannelStillHolds() {
   process.env.HUMAN_SUBMISSION_CHANNEL_IDS = 'channel_1';
   process.env.PURE_SLIP_CHANNEL_IDS = 'some_other_channel';
@@ -358,7 +437,7 @@ async function testNonBypassChannelStillHolds() {
   assert.strictEqual(countStage(events, 'MANUAL_REVIEW_HOLD'), 1, 'non-bypass human channel must stage MANUAL_REVIEW_HOLD as baseline');
 }
 
-// 5. Empty PURE_SLIP_CHANNEL_IDS → gate disabled, baseline hold, no skip.
+// 7. Empty PURE_SLIP_CHANNEL_IDS → baseline hold, no skip.
 async function testEmptyPureSlipUnchanged() {
   process.env.HUMAN_SUBMISSION_CHANNEL_IDS = 'channel_1';
   process.env.PURE_SLIP_CHANNEL_IDS = '';
@@ -733,8 +812,10 @@ async function testPureSlipReclassifiesResultToStagedBet() {
   await testReplayNoDuplicateSideEffects();
   await testTextAndImageSinglePersistedSet();
   await testNearSimultaneousReplaySingleSideEffects();
-  await testPureSlipSkipsHoldOnIsBetFalse();
-  await testPureSlipSkipsHoldOnIndeterminate();
+  await testPureSlipTextOnlySkipsHoldOnIsBetFalse();
+  await testPureSlipTextOnlySkipsHoldOnIndeterminate();
+  await testPureSlipImageHoldsOnIsBetFalse();
+  await testPureSlipImageHoldsOnIndeterminate();
   await testPureSlipValidBetsUnchanged();
   await testNonBypassChannelStillHolds();
   await testEmptyPureSlipUnchanged();

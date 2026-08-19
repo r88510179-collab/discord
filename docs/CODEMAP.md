@@ -191,13 +191,13 @@ one-time-per-process startup log (`logTerminalStateDriftOnce`/`countTerminalStat
 | War-room channel fetch | 667 (env L665, guard L666) |
 | ADMIN_LOG send (path A) | 779 (STRICT_MODE gate L775) |
 | RecapSlip auto-grade branch | 1081 (header L1079) |
-| **is_bet=false branch** | 1128 |
-| MANUAL_REVIEW_HOLD stageAll (is_bet=false) | 1132 |
-| sendHoldReviewEmbed call (is_bet=false) | 1140 |
-| PRE_FILTER_NO_BET_CONTENT drop (non-human) | 1153 |
-| **ai_indeterminate branch** | 1173 |
-| MANUAL_REVIEW_HOLD stageAll (ai_indeterminate) | 1177 |
-| sendHoldReviewEmbed call (ai_indeterminate) | 1188 |
+| **is_bet=false branch** | 1352 |
+| MANUAL_REVIEW_HOLD stageAll (is_bet=false) | 1407 |
+| sendHoldReviewEmbed call (is_bet=false) | 1409 |
+| PRE_FILTER_NO_BET_CONTENT drop (non-human or text-only pure-slip) | 1434 |
+| **ai_indeterminate branch** | 1454 |
+| MANUAL_REVIEW_HOLD stageAll (ai_indeterminate) | 1516 |
+| sendHoldReviewEmbed call (ai_indeterminate) | 1518 |
 | Multi-image merge | 960 (loop), 995–1020 (merge) |
 | `getImageAttachments` — collects slip images; tags `origin` (`'attachment'` = real `message.attachments[]`/forwarded snapshot upload; `'embed'` = share-card/link-preview thumbnail incl. `message.embeds[].image`/`.thumbnail`). Exported. | 413 |
 | `SLIP_IMAGE_CAP` (= 4) | 584 |
@@ -205,7 +205,7 @@ one-time-per-process startup log (`logTerminalStateDriftOnce`/`countTerminalStat
 | `slipImageIngestId(base, i)` — first selected image keeps the base ingestId (single-image path unchanged, incl. its pipeline-events/holds id); each subsequent → `${base}-img${i}` (i≥1) to avoid event/hold id collisions. Pure + exported. | 600 |
 | `handleSlipFeed` (gated to `SLIP_FEED_CHANNEL_ID`) — loops `selectSlipImages(images)`, one `processSlipImage` per image with the same other args; overflow past the cap is `console.warn`-only (no new drop enum). Only N≥2 real attachments changes behavior. | 605 (fn); per-image loop 635 |
 | OCR-first slip seam (`processAggregatedMessage`): `imageCount = ocrFirstWiring.eligibleImageCount(combinedImages)` — counts REAL attachments only so an HRB slip+embed = 1 (scope=single), a true 2-attachment post = 2. Fails safe to total. | 1076 (guard), 1077 (call), 1084 (count); helper `services/ocrFirstWiring.js:176` |
-| **SGP 2b drop→hold seam** (`trySgpDropToHold` closure in `processAggregatedMessage`): behind `SGP_HOLD_MODE` (off default \| shadow \| enforce, read PER CALL — deliberately NOT `OCR_FIRST_MODE`; `ocrFirstWiring.resolveSgpHoldMode`), called at the entry of BOTH vision-failure branches (`is_bet=false` + `ai_indeterminate`). Seam guards: human channel + ≥1 image; `runSgpDropToHold` adds single-image (`eligibleImageCount ≤ 1`) + the chain (fetch → `extractViaOcr` SGP bail → Groq → `evaluateSgpGate`). Enforce PASS → `MANUAL_REVIEW_HOLD` with additive `payload.ocrSgp` (legs/description/total_odds; FINAL payload run through `fitHoldPayload` budget 3800 so `safeJson`'s 4000-char slice can never truncate it to invalid JSON) + one `ocr_sgp_hold` event + return (pure-slip channels: this REPLACES `PURE_SLIP_SKIP_HOLD`+drop); EVERYTHING else (off/shadow/FAIL/error/non-human/multi-image) falls through byte-identically — shadow emits `ocr_sgp_hold_shadow` (kind=would_hold\|would_skip\|not_applicable) off the request path. Never throws (runSgpWouldHold swallow discipline). Release modal reads `ocrSgp` via `holdReview.js` `sgpHoldPrefill`/`sgpReleasePlan` (≥2 desc lines → parlay-with-legs release, else today's straight). Spec §8.5; tests `tests/ocr-first/sgp-hold.test.js`. PR 2a pulse (`sgpWouldHoldPulse.js` + `runShadow`'s `runSgpWouldHold`) is THROWAWAY once enforce is live | helper defined just before the `is_bet===false` branch (~1282); wiring `services/ocrFirstWiring.js` `runSgpDropToHold` |
+| **SGP 2b hold-enrichment seam** (`trySgpDropToHold` closure in `processAggregatedMessage`): behind `SGP_HOLD_MODE` (off default \| shadow \| enforce, read PER CALL — deliberately NOT `OCR_FIRST_MODE`; `ocrFirstWiring.resolveSgpHoldMode`), called at the entry of BOTH vision-failure branches (`is_bet=false` + `ai_indeterminate`). Seam guards: human channel + ≥1 image; `runSgpDropToHold` adds single-image (`eligibleImageCount ≤ 1`) + the chain (fetch → `extractViaOcr` SGP bail → Groq → `evaluateSgpGate`). Enforce PASS → `MANUAL_REVIEW_HOLD` with additive `payload.ocrSgp` (legs/description/total_odds; FINAL payload run through `fitHoldPayload` budget 3800 so `safeJson`'s 4000-char slice can never truncate it to invalid JSON) + one `ocr_sgp_hold` event + return. Every other outcome falls through to base routing: image-bearing pure-slip failures become generic `MANUAL_REVIEW_HOLD`; text-only pure-slip failures keep `PURE_SLIP_SKIP_HOLD` + existing drop; non-human failures keep the existing drop. Shadow emits `ocr_sgp_hold_shadow` (kind=would_hold\|would_skip\|not_applicable) off the request path. Never throws (runSgpWouldHold swallow discipline). Release modal reads `ocrSgp` via `holdReview.js` `sgpHoldPrefill`/`sgpReleasePlan` (≥2 desc lines → parlay-with-legs release, else today's straight). Spec §8.5; tests `tests/ocr-first/sgp-hold.test.js`. PR 2a pulse (`sgpWouldHoldPulse.js` + `runShadow`'s `runSgpWouldHold`) is THROWAWAY once enforce is live | helper defined just before the `is_bet===false` branch (~1282); wiring `services/ocrFirstWiring.js` `runSgpDropToHold` |
 | ADMIN_LOG send (path B) | 1313 (guard L1311) |
 | **DubClub split bypass — author-agnostic (#84)** — gates on channel membership ALONE (`isDubclubSplitChannel`); both webhook/bot AND human authors bypass GUARD 5. `isWebhookOrBot` now only selects `bypassImages` (webhook → `[]`, human → real `images`). Routes straight to `processAggregatedMessage` | 945 (`if (isDubclubSplitChannel)`; channel-list L943, `isWebhookOrBot`/`bypassImages` L944/951, `processAggregatedMessage` call L954) |
 | **GUARD 5 signal gate (#84)** — drops a message scoring `looksLikePick` <2 signals with no celebration + no images, now as `GUARD5_INSUFFICIENT_SIGNALS` (was the misleading `PRE_FILTER_NO_BET_CONTENT`) | 965 (`if (!textIsPick && !textIsCelebration && !hasImages)`); `recordDrop` emit 972; `looksLikePick` def 231 (`signals >= 2` L237) |
@@ -643,14 +643,14 @@ Pre-filter drops between RECEIVED and PARSED emit DROPPED (not a named stage): `
 
 ## Channels — ingestion routing (verified 2026-05-21 via `fly ssh`)
 
-ZoneTracker routes Discord messages through two env-var-gated channel allow-lists. The lists work together to control which channels are authorized for ingestion and which of those skip the `MANUAL_REVIEW_HOLD` staging step.
+ZoneTracker routes Discord messages through two env-var-gated channel allow-lists. The lists work together to control which channels are authorized for ingestion and which are curated image-first slip channels. In a pure-slip channel, failed image parses are preserved in the existing review queue; only text-only failures skip that queue.
 
 ### Env vars
 
 | Env var | What it does | Set on | Live count |
 |---|---|---|---|
 | `HUMAN_SUBMISSION_CHANNEL_IDS` | Authorizes a channel for human-posted bet ingestion. Messages from channels NOT in this list are dropped pre-pipeline. | Fly secret | 17 |
-| `PURE_SLIP_CHANNEL_IDS` | Subset of `HUMAN_SUBMISSION_CHANNEL_IDS`. When a parser result returns `is_bet=false` or `ai_indeterminate`, channels in THIS list skip the `MANUAL_REVIEW_HOLD` staging and fall through to the existing `PRE_FILTER_NO_BET_CONTENT` / `PRE_FILTER_AI_EMPTY_RESULT` drop. | Fly secret | 13 |
+| `PURE_SLIP_CHANNEL_IDS` | Subset of `HUMAN_SUBMISSION_CHANNEL_IDS` identifying image-first capper channels. On `is_bet=false` / `ai_indeterminate`: a selected slip image routes to `MANUAL_REVIEW_HOLD` (and bypasses the text PRE_FILTER); a text-only message keeps the `PURE_SLIP_SKIP_HOLD` → existing `PRE_FILTER_*` drop route. | Fly secret | 13 |
 | `ADMIN_LOG_CHANNEL_ID` | Channel where hold-review embeds and other admin notices post. | Fly secret | `1486825605105192960` (#admin-log) |
 
 ### Subset invariant
@@ -663,19 +663,20 @@ fly ssh console -a bettracker-discord-bot -C 'node -e "const p=(process.env.PURE
 
 ### Behavior matrix
 
-| Channel in HUMAN | Channel in PURE_SLIP | Parser result | Outcome |
+| Channel in HUMAN | Channel in PURE_SLIP | Parser result / media | Outcome |
 |---|---|---|---|
 | Yes | Yes | Valid bets | Bets stage normally |
-| Yes | Yes | `is_bet=false` or `ai_indeterminate` | Skip hold → emit `PURE_SLIP_SKIP_HOLD` trace → drop as existing `PRE_FILTER_*` |
+| Yes | Yes | `is_bet=false` or `ai_indeterminate` + selected slip image | Stage recoverable `MANUAL_REVIEW_HOLD`; do not run the text PRE_FILTER. An SGP enforce-PASS hold also carries `ocrSgp` legs. |
+| Yes | Yes | `is_bet=false` or `ai_indeterminate` + no selected slip image | Emit `PURE_SLIP_SKIP_HOLD` trace → existing `PRE_FILTER_*` drop |
 | Yes | No | Valid bets | Bets stage normally |
-| Yes | No | `is_bet=false` or `ai_indeterminate` | Stage `MANUAL_REVIEW_HOLD` for human review |
+| Yes | No | `is_bet=false` or `ai_indeterminate` | Stage `MANUAL_REVIEW_HOLD` for human review, subject to PRE_FILTER mode |
 | No | n/a | n/a | Dropped pre-pipeline (channel not authorized) |
 
-Gate code lives at `handlers/messageHandler.js` — search for `PURE_SLIP_CHANNEL_IDS` to find the two inline reads at the `is_bet=false` and `ai_indeterminate` branches.
+Gate code lives at `handlers/messageHandler.js` — search for `holdPureSlipImage` at the `is_bet=false` and `ai_indeterminate` branches.
 
-### Pure-slip channels — bypass MANUAL_REVIEW_HOLD (13)
+### Pure-slip channels — lossless image holds / text-only hold bypass (13)
 
-Cappers who post slip images, not text picks. Vision extraction (`parseBetSlipImage`) handles the bet; text-parser holds here are structurally unrescueable.
+Cappers who post slip images, not text picks. Vision extraction handles the normal path. If vision fails, the image-bearing message is held with its original `messageUrl`, so dashboard/Discord Recover can re-fetch and re-run the existing `vision_slip` path. Text-only failures still bypass holds to keep chatter out of the queue.
 
 | Channel | ID | Capper |
 |---|---|---|

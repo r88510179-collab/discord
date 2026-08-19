@@ -16,8 +16,8 @@
 //   C. handlers/messageHandler — the vision-failure seam driven through the
 //      real buffer path (message-handler.integration.js harness pattern) with
 //      ocrFirstWiring mocked: enforce+PASS stages MANUAL_REVIEW_HOLD carrying
-//      payload.ocrSgp (and skips PURE_SLIP_SKIP_HOLD + the drop); FAIL / off /
-//      thrown wiring / non-human channel keep today's routing byte-identically.
+//      payload.ocrSgp; FAIL / off / thrown wiring fall through to the generic
+//      image hold, while a non-human channel keeps its existing drop.
 //
 // Fixtures mirror reports/sgp-content-spotcheck.json slip-10 (PASS) and
 // slip-12 (phantom-leg SGP_COUNT_MISMATCH FAIL), same as wiring.test.js.
@@ -587,46 +587,48 @@ async function sectionC() {
     assert.ok(!events.some(e => e.fn === 'drop'), 'no drop — the slip was rescued');
   });
 
-  await run('seam: enforce + gate FAIL → byte-identical routing (skip-marker + drop, no hold)', async () => {
+  await run('seam: enforce + gate FAIL → generic image hold without OCR legs', async () => {
     const { events, sgpCalls } = await runSeamMessage({
       messageId: 'sgp_fail_1', parsedShape: { is_bet: false }, sgpMode: 'enforce', sgpResult: { hold: false, mode: 'enforce' },
     });
     assert.strictEqual(sgpCalls.length, 1);
-    assert.strictEqual(countStage(events, 'MANUAL_REVIEW_HOLD'), 0);
-    assert.strictEqual(countStage(events, 'PURE_SLIP_SKIP_HOLD'), 1);
-    const drop = events.find(e => e.fn === 'drop' && e.dropReason === 'PRE_FILTER_NO_BET_CONTENT');
-    assert.ok(drop, 'existing PRE_FILTER_NO_BET_CONTENT drop preserved');
+    assert.strictEqual(countStage(events, 'MANUAL_REVIEW_HOLD'), 1);
+    const hold = events.find(e => e.stage === 'MANUAL_REVIEW_HOLD');
+    assert.strictEqual(hold.payload.reason, 'ai_is_bet_false');
+    assert.strictEqual(hold.payload.ocrSgp, undefined, 'failed SGP gate must not fabricate OCR legs');
+    assert.strictEqual(countStage(events, 'PURE_SLIP_SKIP_HOLD'), 0);
+    assert.ok(!events.some(e => e.fn === 'drop'), 'base image route preserves the failed parse for recovery');
   });
 
-  await run('seam: shadow mode → wiring invoked but routing unchanged (skip-marker + drop, no hold)', async () => {
+  await run('seam: shadow mode → wiring measures, generic image hold remains', async () => {
     const { events, sgpCalls } = await runSeamMessage({
       messageId: 'sgp_shadow_1', parsedShape: { is_bet: false }, sgpMode: 'shadow',
       sgpResult: { hold: false, mode: 'shadow', shadowPromise: Promise.resolve() },
     });
     assert.strictEqual(sgpCalls.length, 1, 'shadow runs the wiring (measurement)');
     assert.strictEqual(sgpCalls[0].mode, 'shadow');
-    assert.strictEqual(countStage(events, 'MANUAL_REVIEW_HOLD'), 0, 'shadow must never stage a hold');
-    assert.strictEqual(countStage(events, 'PURE_SLIP_SKIP_HOLD'), 1);
-    assert.ok(events.some(e => e.fn === 'drop' && e.dropReason === 'PRE_FILTER_NO_BET_CONTENT'), 'drop preserved in shadow');
+    assert.strictEqual(countStage(events, 'MANUAL_REVIEW_HOLD'), 1, 'base routing stages the hold, not SGP shadow');
+    assert.strictEqual(countStage(events, 'PURE_SLIP_SKIP_HOLD'), 0);
+    assert.ok(!events.some(e => e.fn === 'drop'));
   });
 
-  await run('seam: off mode → runSgpDropToHold never called; routing as today', async () => {
+  await run('seam: off mode → no SGP call; generic image hold remains', async () => {
     const { events, sgpCalls } = await runSeamMessage({
       messageId: 'sgp_off_1', parsedShape: { is_bet: false }, sgpMode: 'off', sgpResult: PASS_SGP_RESULT,
     });
     assert.strictEqual(sgpCalls.length, 0, 'off-mode must not invoke the wiring at all');
-    assert.strictEqual(countStage(events, 'MANUAL_REVIEW_HOLD'), 0);
-    assert.strictEqual(countStage(events, 'PURE_SLIP_SKIP_HOLD'), 1);
-    assert.ok(events.some(e => e.fn === 'drop' && e.dropReason === 'PRE_FILTER_NO_BET_CONTENT'));
+    assert.strictEqual(countStage(events, 'MANUAL_REVIEW_HOLD'), 1);
+    assert.strictEqual(countStage(events, 'PURE_SLIP_SKIP_HOLD'), 0);
+    assert.ok(!events.some(e => e.fn === 'drop'));
   });
 
-  await run('seam: wiring throws → swallowed; routing unchanged (never throws into ingest)', async () => {
+  await run('seam: wiring throws → swallowed; generic image hold remains', async () => {
     const { events } = await runSeamMessage({
       messageId: 'sgp_throw_1', parsedShape: { is_bet: false }, sgpMode: 'enforce', sgpResult: new Error('boom-wiring'),
     });
-    assert.strictEqual(countStage(events, 'MANUAL_REVIEW_HOLD'), 0);
-    assert.strictEqual(countStage(events, 'PURE_SLIP_SKIP_HOLD'), 1);
-    assert.ok(events.some(e => e.fn === 'drop' && e.dropReason === 'PRE_FILTER_NO_BET_CONTENT'));
+    assert.strictEqual(countStage(events, 'MANUAL_REVIEW_HOLD'), 1);
+    assert.strictEqual(countStage(events, 'PURE_SLIP_SKIP_HOLD'), 0);
+    assert.ok(!events.some(e => e.fn === 'drop'));
     assert.ok(!events.some(e => e.fn === 'error'), 'no EXCEPTION_THROWN — the helper swallows');
   });
 
