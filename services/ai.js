@@ -679,6 +679,169 @@ function detectSport(t) {
   return matched[0];
 }
 
+// Relay posts often wrap one actionable player prop in a headline, emoji, or
+// tweet-attribution prompt. Vision/text models can then classify the whole post
+// as commentary even though the visible text contains an exact pick. Keep this
+// extractor deliberately narrow: one explicit O/U player prop, one known stat,
+// and an identifiable sport. Anything more complex remains an AI/review job.
+const RELAY_PROP_STAT_PATTERN = [
+  'points?\\s*(?:\\+|and)\\s*rebounds?\\s*(?:\\+|and)\\s*assists?',
+  'pts?\\s*(?:\\+|and)\\s*reb(?:ounds?)?\\s*(?:\\+|and)\\s*ast(?:s|ists?)?',
+  'points?\\s*(?:\\+|and)\\s*rebounds?',
+  'pts?\\s*(?:\\+|and)\\s*reb(?:ounds?)?',
+  "pra(?:'?s)?",
+  "pr(?:'?s)?",
+  'total\\s+bases?',
+  'shots?\\s+on\\s+goal',
+  'strikeouts?',
+  'rebounds?',
+  'assists?',
+  'points?',
+  'rebs?',
+  'asts?',
+  'pts?',
+  'hits?',
+  'saves?',
+  'goals?',
+  'sog',
+  'ks?',
+].join('|');
+
+const RELAY_PROP_LINE_RE = new RegExp(
+  `^([\\p{L}\\p{M}][\\p{L}\\p{M}.'’\\-]*(?:\\s+[\\p{L}\\p{M}][\\p{L}\\p{M}.'’\\-]*){0,3})`
+    + `\\s+(over|under|o|u)\\s*(\\d+(?:\\.\\d+)?)\\s+(${RELAY_PROP_STAT_PATTERN})(.*)$`,
+  'iu',
+);
+
+function canonicalRelayPropStat(rawStat) {
+  const stat = String(rawStat || '').trim();
+  if (/^pra(?:'?s)?$/i.test(stat)
+      || /^(?:points?|pts?)\s*(?:\+|and)\s*(?:rebounds?|rebs?)\s*(?:\+|and)\s*(?:assists?|asts?)$/i.test(stat)) {
+    return { label: 'PRA', category: 'points_rebounds_assists', maxLine: 100 };
+  }
+  if (/^pr(?:'?s)?$/i.test(stat)
+      || /^(?:points?|pts?)\s*(?:\+|and)\s*(?:rebounds?|rebs?)$/i.test(stat)) {
+    return { label: 'PTS + REB', category: 'points_rebounds', maxLine: 90 };
+  }
+  if (/^(?:points?|pts?)$/i.test(stat)) return { label: 'Points', category: 'points', maxLine: 60 };
+  if (/^(?:rebounds?|rebs?)$/i.test(stat)) return { label: 'Rebounds', category: 'rebounds', maxLine: 30 };
+  if (/^(?:assists?|asts?)$/i.test(stat)) return { label: 'Assists', category: 'assists', maxLine: 25 };
+  if (/^hits?$/i.test(stat)) return { label: 'Hits', category: 'hits', maxLine: 5.5 };
+  if (/^total\s+bases?$/i.test(stat)) return { label: 'Total Bases', category: 'total_bases', maxLine: 10 };
+  if (/^(?:strikeouts?|ks?)$/i.test(stat)) return { label: 'Strikeouts', category: 'strikeouts', maxLine: 20 };
+  if (/^saves?$/i.test(stat)) return { label: 'Saves', category: 'saves', maxLine: 60 };
+  if (/^(?:shots?\s+on\s+goal|sog)$/i.test(stat)) return { label: 'Shots on Goal', category: 'shots_on_goal', maxLine: 15 };
+  if (/^goals?$/i.test(stat)) return { label: 'Goals', category: 'goals', maxLine: 5 };
+  return null;
+}
+
+function parseRelayTextPropCandidate(text) {
+  if (typeof text !== 'string' || !text.trim()) return null;
+
+  // Do not collapse an advertised multi-leg product or promotional post into a
+  // straight merely because one prop-like line happens to be visible.
+  if (/\b(?:parlay|ladder|prizepicks|underdog fantasy|sleeper|power play|flex play)\b|\b\d+\s*(?:leg|pick)\b/i.test(text)) return null;
+  if (/\b(?:join vip|free pick|giveaway|link in bio|use code|subscribe|follow for picks)\b|\b\d+\s*%\s*off\b|\brt\s*&\s*reply\b/i.test(text)) return null;
+
+  const sport = detectSport(text);
+  if (!sport || sport === 'Unknown') return null;
+
+  const segments = text
+    .split(/\r?\n|\s+\/\s+/)
+    .map((part) => part.trim().replace(/^[^\p{L}\p{N}]+/u, '').trim())
+    .filter(Boolean);
+  const candidates = [];
+
+  for (const segment of segments) {
+    // Settlement markers apply to the candidate line, not the entire relay.
+    // That still permits a post to recap yesterday before publishing today's pick.
+    if (/✅|❌|✔|✓|☑|🔨|\b(?:won|lost|cashed|winner|settled|final)\b/i.test(segment)) continue;
+
+    const match = segment.match(RELAY_PROP_LINE_RE);
+    if (!match) continue;
+
+    const player = match[1].trim();
+    const direction = /^(?:over|o)$/i.test(match[2]) ? 'over' : 'under';
+    const line = Number(match[3]);
+    const stat = canonicalRelayPropStat(match[4]);
+    if (!stat || !Number.isFinite(line) || line <= 0 || line > stat.maxLine) continue;
+
+    // Team totals and header-like subjects are not player props.
+    if (Object.values(TEAM_MAP).some((teamRegex) => teamRegex.test(player))) continue;
+    const playerLower = player.toLowerCase();
+    const isModeledTeam = Object.values(SPORT_TEAM_MAP).some((keywords) => (
+      keywords.some((keyword) => keyword === playerLower && !isMarketPhrase(keyword))
+    ));
+    if (isModeledTeam || descNamesNationalTeam(player)) continue;
+    // A single ordinary title-case word is as likely to be a school/team name
+    // as a surname. Preserve distinctive nicknames (iHart, LeBron) but defer
+    // plain mononyms to the AI rather than asserting that they are players.
+    if (/^[\p{Lu}][\p{Ll}\p{M}'’\-]+$/u.test(player)) continue;
+    if (/\b(?:bet|pick|play|team|game|today|tonight|favorite|straight|total|nba|nfl|mlb|nhl)\b/i.test(player)) continue;
+
+    const extras = match[5] || '';
+    const extrasMatch = extras.match(/^\s*(?:\(\s*([+-]\d{3,4})\s*\)|([+-]\d{3,4}))?\s*(?:(\d+(?:\.\d+)?)\s*u(?:nits?)?)?\s*[^\p{L}\p{N}]*$/iu);
+    if (!extrasMatch) continue;
+
+    const oddsRaw = extrasMatch[1] || extrasMatch[2] || null;
+    const odds = oddsRaw == null ? null : Number(oddsRaw);
+    const units = extrasMatch[3] == null ? 1 : Number(extrasMatch[3]);
+    if ((odds != null && Math.abs(odds) < 100) || !Number.isFinite(units) || units <= 0 || units > 50) continue;
+
+    const lineText = String(line);
+    const directionLabel = direction === 'over' ? 'Over' : 'Under';
+    const description = `${player} ${directionLabel} ${lineText} ${stat.label}`;
+    candidates.push({ player, direction, directionLabel, line, lineText, stat, odds, units, description });
+  }
+
+  // More than one actionable line could be a sheet or parlay. Defer instead of
+  // silently choosing one or changing the wager structure.
+  if (candidates.length !== 1) return null;
+
+  const candidate = candidates[0];
+  return {
+    type: 'bet',
+    is_bet: true,
+    ticket_status: 'new',
+    bets: [{
+      sport,
+      league: sport,
+      bet_type: 'straight',
+      description: candidate.description,
+      odds: candidate.odds,
+      units: candidate.units,
+      wager: null,
+      payout: null,
+      event_date: null,
+      legs: [{
+        description: candidate.description,
+        odds: candidate.odds,
+        team: candidate.player,
+        line: `${candidate.directionLabel} ${candidate.lineText}`,
+        type: 'prop',
+      }],
+      props: [{
+        player_name: candidate.player,
+        stat_category: candidate.stat.category,
+        line: candidate.line,
+        direction: candidate.direction,
+        odds: candidate.odds,
+      }],
+    }],
+    _sourceText: text,
+    _parse_source: 'relay_text_prop_candidate',
+  };
+}
+
+function shouldUseRelayTextPropFallback(parsed, candidate) {
+  if (!candidate?.bets?.length) return false;
+  if (parsed?.type === 'result' || parsed?.type === 'untracked_win') return false;
+  const hasUsableBet = Array.isArray(parsed?.bets) && parsed.bets.some((bet) => (
+    bet && typeof bet === 'object' && String(bet.description || '').trim().length > 0
+  ));
+  return !hasUsableBet;
+}
+
 // ── Confidence assessment for parsed bets ───────────────────
 // Additive weighted scoring — each signal contributes a weight.
 // Total score >= AMBIGUITY_THRESHOLD → low confidence.
@@ -767,6 +930,9 @@ function regexParseBet(text) {
   // Natural-language multi-pick lists (no parlay/ladder token) — the LLM handles
   // these as multi-leg; regex would swallow the whole blob as one straight.
   if (looksLikeMultiPick(text)) return null;
+
+  const relayProp = parseRelayTextPropCandidate(text);
+  if (relayProp) return relayProp;
 
   const oddsMatch = text.match(/([+-]\d{3,4})/);
   const odds = oddsMatch ? parseInt(oddsMatch[1]) : -110;
@@ -1087,6 +1253,25 @@ function shouldFallbackToGemma(raw, primaryErrorClass, parsedLegs, verdictType) 
 }
 
 async function parseBetText(text, imageUrl, options = {}) {
+  const relayTextSource = typeof options.textFallbackSource === 'string'
+    ? options.textFallbackSource
+    : text;
+  const relayTextCandidate = parseRelayTextPropCandidate(relayTextSource);
+  const useRelayTextCandidate = (reason) => {
+    const sourceText = relayTextCandidate?._sourceText || relayTextSource;
+    const result = applyConfidenceGating(normalizeParsedBets(relayTextCandidate), sourceText);
+    result.type = 'bet';
+    result.is_bet = true;
+    result.ticket_status = 'new';
+    result._parse_source = 'relay_text_prop_fallback';
+    console.log(`[RelayTextFallback] accepted reason=${reason} sport=${result.bets[0]?.sport || 'unknown'}`);
+    return result;
+  };
+
+  // This exact-shape parser is safer than the generic regex fast path because
+  // it stores only the actionable line instead of the relay headline/wrapper.
+  if (!imageUrl && relayTextCandidate) return useRelayTextCandidate('text_fast_path');
+
   // If no image, try regex fast-path first
   if (!imageUrl) {
     const quick = regexParseBet(text);
@@ -1249,6 +1434,9 @@ Output strictly valid JSON. Do not include markdown formatting, do not include \
   }
 
   if (!raw) {
+    if (shouldUseRelayTextPropFallback(null, relayTextCandidate)) {
+      return useRelayTextCandidate('ai_unavailable');
+    }
     if (options.ingestId) {
       recordDrop({
         ingestId: options.ingestId,
@@ -1268,6 +1456,9 @@ Output strictly valid JSON. Do not include markdown formatting, do not include \
   }
   const parsed = parseJSON(raw);
   if (!parsed) {
+    if (shouldUseRelayTextPropFallback(null, relayTextCandidate)) {
+      return useRelayTextCandidate('ai_parse_failed');
+    }
     if (options.ingestId) {
       recordDrop({
         ingestId: options.ingestId,
@@ -1311,12 +1502,18 @@ Output strictly valid JSON. Do not include markdown formatting, do not include \
   // Type 4: Ignore (not a bet) — handle string "false" from AI
   const isBet = parsed.is_bet === true || String(parsed.is_bet).toLowerCase() === 'true';
   if (!isBet || parsed.type === 'ignore') {
+    if (shouldUseRelayTextPropFallback(parsed, relayTextCandidate)) {
+      return useRelayTextCandidate('ai_no_usable_bet');
+    }
     return { type: 'ignore', is_bet: false, bets: [] };
   }
 
   // Type 1: Bet
   const result = applyConfidenceGating(normalizeParsedBets(parsed), text);
   result.type = 'bet';
+  if (shouldUseRelayTextPropFallback(result, relayTextCandidate)) {
+    return useRelayTextCandidate('ai_empty_after_normalization');
+  }
   return result;
 }
 
@@ -2608,4 +2805,4 @@ function normalizeEventDate(raw) {
   return null;
 }
 
-module.exports = { parseBetText, parseBetSlipImage, processImageForAI, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, reassignDollarStakeUnits, evaluateTweet, validateParsedBet, validateLegSportConsistency, validateLegShape, PITCHER_RECORD_PATTERN, isSportsbookBrand, reclassifySport, inferLegSport, descNamesNationalTeam, disambiguateAmbiguousTeam, matchesKboTeam, normalizeKboLeg, declaredSportIncludesKbo, isInSeason, normalizeEventDate, AMBIGUITY_THRESHOLD, tryVisionGemma, parseGemmaOutputWithCerebras, runGemmaVisionFallback, logVisionFailure, GEMMA_SLIP_PROMPT, gemmaHealth, isGemmaHealthy, recordGemmaResult, callLLM, callLLMResult, callGemini, callOpenAI, AdapterError, FALLBACK_ELIGIBLE, resolveOdds, regexParseBet, looksLikeMultiPick };
+module.exports = { parseBetText, parseBetSlipImage, processImageForAI, gradeBetAI, parseTwitterPick, generateRecap, assessParseConfidence, extractPickFromTweet, reassignDollarStakeUnits, evaluateTweet, validateParsedBet, validateLegSportConsistency, validateLegShape, PITCHER_RECORD_PATTERN, isSportsbookBrand, reclassifySport, inferLegSport, descNamesNationalTeam, disambiguateAmbiguousTeam, matchesKboTeam, normalizeKboLeg, declaredSportIncludesKbo, isInSeason, normalizeEventDate, AMBIGUITY_THRESHOLD, tryVisionGemma, parseGemmaOutputWithCerebras, runGemmaVisionFallback, logVisionFailure, GEMMA_SLIP_PROMPT, gemmaHealth, isGemmaHealthy, recordGemmaResult, callLLM, callLLMResult, callGemini, callOpenAI, AdapterError, FALLBACK_ELIGIBLE, resolveOdds, regexParseBet, looksLikeMultiPick, parseRelayTextPropCandidate, shouldUseRelayTextPropFallback };

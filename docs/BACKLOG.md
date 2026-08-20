@@ -1499,7 +1499,11 @@ Rare, and `review-holds.js` already degrades gracefully when the message is gone
 
 **Tracking:** First flagged 2026-05-20. Park until shortlink expander ships, then revisit with concrete data-use case.
 
-## 🚨 P1 — Twitter-relay parser drops real picks (visible-text variant)
+## 🛠️ FIX READY — Twitter-relay parser drops real picks (visible-text variant)
+
+**Prepared 2026-08-19; pending review, merge, and deploy.** `services/ai.js` now has a deterministic fallback for exactly one explicit, sport-scoped player-prop line (`O`/`U` or `Over`/`Under` + numeric line + supported stat). It strips relay headlines/emojis from the stored description, preserves explicit odds/units, leaves missing odds `null`, and is used only when the AI tier returns no usable bet. Direct Twitter vision calls pass the original tweet through `textFallbackSource`, so the fallback never has to parse the appended vision instructions. A usable AI bet or explicit `result`/`untracked_win` verdict always wins.
+
+The fallback fails closed for promo copy, settled lines, directionless stats, team totals, missing sport context, multi-pick/parlay shapes, implausible stat lines, and ambiguous ordinary one-word subjects. Regression coverage is in `tests/relay-text-prop-fallback.test.js` and is wired into both repository gates.
 
 **Surfaced 2026-05-21** during PR #31 (pure-slip hold-skip gate) channel sampling. The 4 gambling-twitter-* channels were intentionally left un-bypassed because Cody and Harry post real picks that get held. Sampling confirmed those holds contain real bets the parser is fumbling — not promo, not shortlink-gated, the bet text is *right there in the tweet*.
 
@@ -1522,7 +1526,7 @@ This is a third bug: bet legs visible in tweet text, parser still returns `is_be
   - `🏀 NBA Pick of the Day… / Dylan Harper o19.5 PRA's`
   - `🏀 NBA Pick of the Day… / 👉🏼 iHart Over 8.5 Rebounds`
 
-**Hypotheses to test:**
+**Original hypotheses:**
 1. Emoji-prefixed lines confuse the parser's bet-detection heuristic (returns `is_bet=false`).
 2. Header phrasing like "Best Bet" / "Pick of the Day" / "favorite straight" is being read as marketing copy rather than bet framing.
 3. The 80-char sample preview in `pipeline_events` is a red herring — LLM gets the full text but may still bail on the line break between header and bet content.
@@ -1531,10 +1535,10 @@ This is a third bug: bet legs visible in tweet text, parser still returns `is_be
 
 **Why P1:** Active data loss. Memory tracks ~44 holds over 14 days across Cody+Harry alone, of which sampling suggests ~20% are real picks (≈9 lost picks/14d, ≈18/month).
 
-**Fix surface area:**
-- `services/ai.js` `parseBetText` system prompt — likely needs an explicit case for emoji-prefixed Twitter-style picks.
-- Or pre-processor that strips emoji/decorative chars before the LLM sees the text.
-- Verify by re-running the failing samples through a smoke test after any prompt change.
+**Implemented surface area (pending merge):**
+- `services/ai.js`: `parseRelayTextPropCandidate`, `shouldUseRelayTextPropFallback`, and the narrow `parseBetText` fallback seams.
+- `services/twitter-handler.js`: preserves the original tweet as `textFallbackSource` on image-bearing posts.
+- `tests/relay-text-prop-fallback.test.js`: the five confirmed player-prop shapes, direct production-path fallback, and false-positive fences.
 
 **Cross-references:**
 - PR #31 (commit a1b184b, 2026-05-21) — pure-slip hold-skip gate; explicitly chose NOT to bypass these 4 channels for this reason
