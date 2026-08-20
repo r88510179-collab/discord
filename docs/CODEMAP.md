@@ -244,10 +244,11 @@ Detects allow-listed sportsbook book/shortlink URLs in a message body before it 
 ### services/ai.js
 | What | Line(s) |
 | --- | --- |
-| `parseBetText` | 909 |
-| `parseBetSlipImage` | 1135 |
-| `evaluateTweet` | 1335 |
-| `validateParsedBet` | 1602 |
+| `parseBetText` — text-only exact relay candidates take the deterministic fast path; image-bearing candidates are fallback-only and never override a usable AI bet or explicit result/untracked-win verdict. `options.textFallbackSource` lets wrapped Twitter vision prompts preserve the original tweet for this decision. | 1255 |
+| `parseRelayTextPropCandidate(text)` / `shouldUseRelayTextPropFallback(parsed,candidate)` — conservative visible-text relay rescue: exactly one sport-scoped O/U player prop; canonical PR/PRA/stat shape; odds stay `null` when absent; team/promo/settled/multi-pick/ambiguous shapes fail closed. Exported for regression tests. | 738 / 836 |
+| `parseBetSlipImage` | 1520 |
+| `evaluateTweet` | 1756 |
+| `validateParsedBet` | 2346 |
 | `opts.now` on `validateParsedBet` — injectable date for the offseason check, threaded to `isInSeason(sport, now)` / `resolveInSeasonForOffseason(desc, now)` (mirrors `evaluateSweep(bet, now)`); production callers omit it (wall clock); tests pin it so season-state expectations are hermetic | `isInSeason` 1560; offseason check 2049 |
 | LLM waterfall start | 241 (`callLLMResult` dispatch); `PROVIDERS` L18, `getProviders` L68, `callLLM` L333 |
 | `slice(0, 250)` → bet_type-aware cap (v451) | 428 (`descCap = isParlay ? 2000 : 250`), in `normalizeBet` L421 |
@@ -707,7 +708,7 @@ Twitter relay channels. Bet content arrives as text via a relay bot; text-parser
 | #_-_-_gambling-twitter-harry | 1284620792713318472 | Harry |
 | #_-_-_gambling-twitter-gavin | 1284614717071032464 | Gavin |
 
-Active known issue: parser drops real picks shaped as `<emoji> <category> / <player> <line> <market>` from these channels (e.g. `🏀 NBA Best Bet / 🟠 OG Anunoby O20.5 PRs`). See BACKLOG.md.
+Pending merge/deploy: the narrow relay-text fallback in `services/ai.js` rescues exactly one explicit, sport-scoped player prop from `<emoji> <category> / <player> <line> <market>` posts (e.g. `🏀 NBA Best Bet / 🟠 OG Anunoby O20.5 PRs`). Promo, settled, directionless, team-total, multi-pick, and missing-sport shapes still defer/drop through the existing path. See BACKLOG.md.
 
 ### Admin
 

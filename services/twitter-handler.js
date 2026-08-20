@@ -182,7 +182,11 @@ async function handleTwitterWebhookPayload(payload, client) {
           const visionPrompt = `Tweet from @${displayName}: "${text}"\n\nRead the attached betting slip image and extract all bets. If the image shows "SGP", "Same Game Parlay", "Parlay", or multiple legs, return bet_type "parlay" with ALL legs in the legs array.`;
           // Thread tweetId + imageUrl so the Gemma vision fallback can log
           // any vision_failures row against the originating tweet.
-          const parsed = await parseBetText(visionPrompt, imageUrls[0], { tweetId, imageUrl: imageUrls[0] });
+          const parsed = await parseBetText(visionPrompt, imageUrls[0], {
+            tweetId,
+            imageUrl: imageUrls[0],
+            textFallbackSource: text,
+          });
 
           if (parsed && parsed.bets?.length > 0 && parsed.is_bet !== false && parsed.type !== 'ignore') {
             const bet = parsed.bets[0];
