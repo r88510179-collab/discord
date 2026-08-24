@@ -8,11 +8,11 @@ Submission (Inbox Zero): A capper drops a screenshot of a slip into #submit-pick
 
 The War Room: Admins review the staged bet in #war-room. They can click [Edit] to fix AI typos via a 5-field UI Modal, or [Approve] to push it live.
 
-Skin in the Game: Once live in #bet-dashboard, users can click [🔥 Tail]. A modal asks how many units they want to risk from their virtual 100.00u bankroll.
+Skin in the Game: Once live in #bet-dashboard, users can Tail a pick for a chosen risk or Fade it for the default 1u risk against their virtual 100.00u bankroll.
 
 Autonomous Grading: Every 15 minutes, Gemini 2.0 searches the web for live scores/results for any bet older than 4 hours.
 
-The Payout: When graded (WIN/LOSS/PUSH/VOID), the bot automatically calculates Vegas odds payouts, updates all tailer bankrolls, and posts a Live Ticker receipt.
+The Payout: When graded (WIN/LOSS/PUSH/VOID), the bot atomically settles every Tail and Fade at the pick's stored American price, updates each virtual bankroll, and posts a Live Ticker receipt. Corrections apply only the P/L difference; reverts reverse recorded community P/L.
 
 💻 Commands & UI
 User Commands:

@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { runMigrations } = require('./migrator');
 const { normalizeEventDateForStorage, resolveEventDateSanityMode } = require('./eventDate');
 const { canonicalizeSport } = require('./sportNormalize');
+const { reconcileUserBets, resetUserBetSettlements } = require('./userBetSettlement');
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'bettracker.db');
 
@@ -758,35 +759,47 @@ function gradeBetRecord(betId, result, profitUnits, grade, gradeReason, allowAut
   // legitimately MUST write to needs_review bets; a blanket gate would regress them.
   // On a 0-change no-op the early return below makes it benign, and the
   // allowAutoConfirm sub-write is never reached (so it can't confirm a parked bet).
-  const reviewGate = provenance.requireGraderEligible
-    ? ` AND (review_status IS NULL OR review_status NOT IN (${GRADER_HIDDEN_REVIEW_STATUSES.map(() => '?').join(', ')}))`
-    : '';
-  const info = db.prepare(`
-    UPDATE bets SET
-      result = ?, profit_units = ?, grade = ?, grade_reason = ?, graded_at = datetime('now'),
-      grading_state = 'done', grading_lock_until = NULL,
-      grader_version = COALESCE(?, grader_version),
-      evidence_hash = COALESCE(?, evidence_hash)
-    WHERE id = ?
-      AND (result = 'pending' OR result IS NULL)
-      AND (
-        bet_type NOT IN ('parlay','sgp')
-        OR (SELECT COUNT(*) FROM parlay_legs WHERE bet_id = bets.id AND result = 'pending') = 0
-      )${reviewGate}
-  `).run(result, profitUnits, grade, gradeReason,
-    provenance.graderVersion ?? null, provenance.evidenceHash ?? null, betId,
-    ...(provenance.requireGraderEligible ? GRADER_HIDDEN_REVIEW_STATUSES : []));
+  const gradeTx = db.transaction(() => {
+    const reviewGate = provenance.requireGraderEligible
+      ? ` AND (review_status IS NULL OR review_status NOT IN (${GRADER_HIDDEN_REVIEW_STATUSES.map(() => '?').join(', ')}))`
+      : '';
+    const info = db.prepare(`
+      UPDATE bets SET
+        result = ?, profit_units = ?, grade = ?, grade_reason = ?, graded_at = datetime('now'),
+        grading_state = 'done', grading_lock_until = NULL,
+        grader_version = COALESCE(?, grader_version),
+        evidence_hash = COALESCE(?, evidence_hash)
+      WHERE id = ?
+        AND (result = 'pending' OR result IS NULL)
+        AND (
+          bet_type NOT IN ('parlay','sgp')
+          OR (SELECT COUNT(*) FROM parlay_legs WHERE bet_id = bets.id AND result = 'pending') = 0
+        )${reviewGate}
+    `).run(result, profitUnits, grade, gradeReason,
+      provenance.graderVersion ?? null, provenance.evidenceHash ?? null, betId,
+      ...(provenance.requireGraderEligible ? GRADER_HIDDEN_REVIEW_STATUSES : []));
 
-  if (info.changes === 0) {
-    return { graded: false, reason: 'already_graded_or_pending_legs' };
-  }
+    if (info.changes === 0) {
+      return { graded: false, reason: 'already_graded_or_pending_legs' };
+    }
 
-  // Auto-confirm only on opt-in (trusted paths like capper celebration, manual grade)
-  if (allowAutoConfirm && result && result !== 'pending') {
-    db.prepare("UPDATE bets SET review_status = 'confirmed' WHERE id = ? AND review_status = 'needs_review'").run(betId);
-  }
+    // Auto-confirm only on opt-in (trusted paths like capper celebration, manual grade)
+    if (allowAutoConfirm && result && result !== 'pending') {
+      db.prepare("UPDATE bets SET review_status = 'confirmed' WHERE id = ? AND review_status = 'needs_review'").run(betId);
+    }
 
-  return { graded: true };
+    // Parent grade + community settlement are one atomic write. If any user
+    // bankroll/status update fails, SQLite rolls the parent grade back too.
+    const storedBet = stmts.getBet.get(betId);
+    const userSettlement = reconcileUserBets(db, {
+      betId,
+      parentResult: result,
+      odds: storedBet?.odds,
+    });
+    return { graded: true, userSettlement };
+  });
+
+  return gradeTx.immediate();
 }
 
 // Terminal review_status values that make a still-`pending` bet INVISIBLE to the
@@ -887,19 +900,23 @@ function getAllPendingBets() {
 // sport (incident 2026-06-12, bet 45cef7b2). Approve re-arms grading and
 // stamps the sweeper grace window.
 function revertBetToPending(betId, reason = 'reverted') {
-  const info = db.prepare(`
-    UPDATE bets SET
-      result = 'pending', profit_units = NULL, graded_at = NULL, grade = NULL,
-      grade_reason = ?,
-      review_status = 'needs_review',
-      grading_state = 'ready',
-      grading_attempts = 0,
-      grading_lock_until = NULL,
-      grading_next_attempt_at = NULL,
-      grading_last_failure_reason = NULL
-    WHERE id = ?
-  `).run(String(reason).slice(0, 500), betId);
-  return info.changes > 0;
+  const revertTx = db.transaction(() => {
+    const info = db.prepare(`
+      UPDATE bets SET
+        result = 'pending', profit_units = NULL, graded_at = NULL, grade = NULL,
+        grade_reason = ?,
+        review_status = 'needs_review',
+        grading_state = 'ready',
+        grading_attempts = 0,
+        grading_lock_until = NULL,
+        grading_next_attempt_at = NULL,
+        grading_last_failure_reason = NULL
+      WHERE id = ?
+    `).run(String(reason).slice(0, 500), betId);
+    if (info.changes > 0) resetUserBetSettlements(db, betId);
+    return info.changes > 0;
+  });
+  return revertTx.immediate();
 }
 
 function getRecentBets(capperId, limit = 10) {
@@ -1304,8 +1321,55 @@ function getCapperAnalytics(capperId) {
 // ── Export everything (same interface as old supabase.js) ────
 // ── User Bets (Tail/Fade tracking) ───────────────────────────
 function upsertUserBet(userId, betId, action, riskAmount = 1.0) {
-  db.prepare('INSERT INTO user_bets (user_id, bet_id, action, risk_amount) VALUES (?, ?, ?, ?) ON CONFLICT(user_id, bet_id) DO UPDATE SET action = excluded.action, risk_amount = excluded.risk_amount')
-    .run(userId, betId, action, riskAmount);
+  const normalizedAction = String(action || '').toLowerCase();
+  const risk = Number(riskAmount);
+  if (!['tail', 'fade'].includes(normalizedAction)) {
+    const err = new TypeError(`Invalid user-bet action: ${action}`);
+    err.code = 'INVALID_USER_BET_ACTION';
+    throw err;
+  }
+  if (!Number.isFinite(risk) || risk <= 0) {
+    const err = new TypeError(`Invalid user-bet risk: ${riskAmount}`);
+    err.code = 'INVALID_USER_BET_RISK';
+    throw err;
+  }
+
+  const upsertTx = db.transaction(() => {
+    const bet = db.prepare('SELECT result FROM bets WHERE id = ?').get(betId);
+    if (!bet) {
+      const err = new Error(`Bet not found: ${betId}`);
+      err.code = 'BET_NOT_FOUND';
+      throw err;
+    }
+    if (bet.result != null && bet.result !== 'pending') {
+      const err = new Error(`Bet is already settled: ${betId}`);
+      err.code = 'BET_ALREADY_SETTLED';
+      throw err;
+    }
+    const existing = db.prepare(`
+      SELECT s.user_bet_id
+      FROM user_bets ub
+      JOIN user_bet_settlements s ON s.user_bet_id = ub.id
+      WHERE ub.user_id = ? AND ub.bet_id = ?
+    `).get(userId, betId);
+    if (existing) {
+      const err = new Error(`Pending bet has a recorded community settlement: ${betId}`);
+      err.code = 'USER_BET_SETTLEMENT_CONFLICT';
+      throw err;
+    }
+
+    ensureUserExists(userId, null);
+    db.prepare(`
+      INSERT INTO user_bets (user_id, bet_id, action, risk_amount, status)
+      VALUES (?, ?, ?, ?, 'pending')
+      ON CONFLICT(user_id, bet_id) DO UPDATE SET
+        action = excluded.action,
+        risk_amount = excluded.risk_amount,
+        status = 'pending'
+    `).run(userId, betId, normalizedAction, risk);
+    return db.prepare('SELECT * FROM user_bets WHERE user_id = ? AND bet_id = ?').get(userId, betId);
+  });
+  return upsertTx.immediate();
 }
 
 function getSentimentCounts(betId) {
@@ -1327,37 +1391,61 @@ function getUserBankroll(userId) {
   return row ? row.bankroll : null;
 }
 
+function settleUserBets(betId, betOdds, result) {
+  const settleTx = db.transaction(() => reconcileUserBets(db, {
+    betId,
+    parentResult: result,
+    odds: betOdds,
+  }));
+  const summary = settleTx.immediate();
+  if (summary.total > 0) {
+    console.log(`[Bankroll] Settled ${summary.total} community position(s) for bet ${betId} (result: ${result}, delta: ${summary.bankrollDelta.toFixed(2)}u)`);
+  }
+  return summary;
+}
+
+// Backward-compatible wrapper for callers outside the current tree. New grade
+// paths receive the complete settlement summary from gradeBetRecord instead.
 function payoutTailers(betId, betOdds, result) {
-  const tailers = db.prepare("SELECT user_id, COALESCE(risk_amount, 1.0) as risk FROM user_bets WHERE bet_id = ? AND action = 'tail'").all(betId);
-  if (tailers.length === 0) return 0;
+  return settleUserBets(betId, betOdds, result).tailers;
+}
 
-  const txn = db.transaction(() => {
-    for (const t of tailers) {
-      ensureUserExists(t.user_id, null);
-      const risk = t.risk;
-      let payout = 0;
-      if (result === 'win') {
-        if (betOdds > 0) payout = risk + (risk * (betOdds / 100));
-        else if (betOdds < 0) payout = risk + (risk * (100 / Math.abs(betOdds)));
-        else payout = risk * 2;
-      } else if (result === 'push') {
-        payout = risk;
-      }
-      db.prepare('UPDATE users SET bankroll = bankroll - ? WHERE id = ?').run(risk, t.user_id);
-      db.prepare('UPDATE users SET bankroll = bankroll + ? WHERE id = ?').run(payout, t.user_id);
-    }
-  });
-  txn();
-
-  console.log(`[Bankroll] Paid out ${tailers.length} tailers for bet ${betId} (result: ${result})`);
-  return tailers.length;
+function getUserBetSettlementSummary(betId) {
+  const row = db.prepare(`
+    SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN ub.action = 'tail' THEN 1 ELSE 0 END) AS tailers,
+      SUM(CASE WHEN ub.action = 'fade' THEN 1 ELSE 0 END) AS faders,
+      SUM(CASE WHEN ub.status = 'won' THEN 1 ELSE 0 END) AS won,
+      SUM(CASE WHEN ub.status = 'lost' THEN 1 ELSE 0 END) AS lost,
+      SUM(CASE WHEN ub.status = 'push' THEN 1 ELSE 0 END) AS pushes,
+      COALESCE(SUM(CASE WHEN ub.action = 'tail' THEN s.profit_units ELSE 0 END), 0) AS tail_profit_units,
+      COALESCE(SUM(CASE WHEN ub.action = 'fade' THEN s.profit_units ELSE 0 END), 0) AS fade_profit_units,
+      COALESCE(SUM(s.profit_units), 0) AS total_profit_units
+    FROM user_bets ub
+    LEFT JOIN user_bet_settlements s ON s.user_bet_id = ub.id
+    WHERE ub.bet_id = ?
+  `).get(betId);
+  return {
+    total: row?.total || 0,
+    tailers: row?.tailers || 0,
+    faders: row?.faders || 0,
+    won: row?.won || 0,
+    lost: row?.lost || 0,
+    pushes: row?.pushes || 0,
+    tailProfitUnits: Number(row?.tail_profit_units || 0),
+    fadeProfitUnits: Number(row?.fade_profit_units || 0),
+    totalProfitUnits: Number(row?.total_profit_units || 0),
+  };
 }
 
 function getUserBets(userId) {
   return db.prepare(`
-    SELECT ub.*, b.description, b.sport, b.odds, b.units, b.result, b.profit_units,
+    SELECT ub.*, s.parent_result, s.profit_units,
+           b.description, b.sport, b.odds, b.units, b.result, b.profit_units AS bet_profit_units,
            c.display_name AS capper_name
     FROM user_bets ub
+    LEFT JOIN user_bet_settlements s ON s.user_bet_id = ub.id
     JOIN bets b ON ub.bet_id = b.id
     LEFT JOIN cappers c ON b.capper_id = c.id
     WHERE ub.user_id = ?
@@ -1428,7 +1516,9 @@ module.exports = {
   getSentimentCounts,
   ensureUserExists,
   getUserBankroll,
+  settleUserBets,
   payoutTailers,
+  getUserBetSettlementSummary,
   getUserBets,
   // Exported so tests/grader-gate-sync.test.js can assert this claim-time status
   // list stays in sync with grading.js GRADER_ELIGIBLE_WHERE — the inlined

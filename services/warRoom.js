@@ -589,7 +589,10 @@ async function handleWarRoomInteraction(interaction) {
         await interaction.followUp({ content: `🧊 You chose to **FADE** this bet!`, ephemeral: true });
       } catch (error) {
         console.error('[Sentiment Error]', error.message);
-        await interaction.reply({ content: 'Something went wrong.', ephemeral: true }).catch(() => {});
+        const message = error.code === 'BET_ALREADY_SETTLED'
+          ? 'That bet has already settled, so it can no longer be faded.'
+          : 'Something went wrong.';
+        await interaction.reply({ content: message, ephemeral: true }).catch(() => {});
       }
       return true;
     }
@@ -684,7 +687,10 @@ async function handleWarRoomInteraction(interaction) {
       await interaction.reply({ content: `🔥 You are tailing this bet for **${riskUnits}u**!`, ephemeral: true });
     } catch (error) {
       console.error('[Tail Modal Error]', error.message);
-      await interaction.reply({ content: 'Something went wrong.', ephemeral: true }).catch(() => {});
+      const message = error.code === 'BET_ALREADY_SETTLED'
+        ? 'That bet has already settled, so it can no longer be tailed.'
+        : 'Something went wrong.';
+      await interaction.reply({ content: message, ephemeral: true }).catch(() => {});
     }
     return true;
   }

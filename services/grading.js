@@ -1,7 +1,8 @@
 const crypto = require('crypto');
-const { getPendingBets, gradeBet, updateBankroll, saveDailySnapshot, getBankroll, findPendingBetsByCapperSubject, db, payoutTailers } = require('./database');
+const { getPendingBets, gradeBet, updateBankroll, saveDailySnapshot, getBankroll, findPendingBetsByCapperSubject, db } = require('./database');
 const { gradeBetAI } = require('./ai');
 const { canonicalizeSport } = require('./sportNormalize');
+const { reconcileUserBets } = require('./userBetSettlement');
 const bets = require('./bets');
 const pipelineEvents = require('./pipeline-events');
 const { buildEvidenceRecords, evaluateOffDate } = require('./evidenceRecords');
@@ -1429,6 +1430,7 @@ function scheduleRecheckAfterDenial(betId, reason, minutes = 30) {
       // (review-parked) must not emit a GRADE_BACKOFF_EXHAUSTED for a void that
       // never happened (false-success guard).
       if (info.changes > 0) {
+        reconcileUserBets(db, { betId, parentResult: 'void', odds: bet?.odds });
         bets.recordDrop({
           betId,
           stage: 'GRADING_DROPPED',
@@ -1613,20 +1615,27 @@ function autoVoidNoSearchableData(bet, info) {
   try {
     // `AND ${GRADER_ELIGIBLE_WHERE}`: skip if an operator reverted the bet to
     // needs_review after the grader claimed it (0-change no-op, left parked).
-    const res = db.prepare(`UPDATE bets SET
-      result = 'void',
-      profit_units = 0,
-      graded_at = datetime('now'),
-      grade = 'VOID',
-      grade_reason = ?,
-      review_status = 'auto_void_no_searchable_data',
-      grading_state = 'done',
-      grading_lock_until = NULL
-    WHERE id = ? AND (result = 'pending' OR result IS NULL)
-      AND ${GRADER_ELIGIBLE_WHERE}`).run(
-      `Auto-voided: ${info.attempts} consecutive PENDING attempts over ${info.hours}h — search data unavailable for this event`,
-      bet.id
-    );
+    const voidTx = db.transaction(() => {
+      const res = db.prepare(`UPDATE bets SET
+        result = 'void',
+        profit_units = 0,
+        graded_at = datetime('now'),
+        grade = 'VOID',
+        grade_reason = ?,
+        review_status = 'auto_void_no_searchable_data',
+        grading_state = 'done',
+        grading_lock_until = NULL
+      WHERE id = ? AND (result = 'pending' OR result IS NULL)
+        AND ${GRADER_ELIGIBLE_WHERE}`).run(
+        `Auto-voided: ${info.attempts} consecutive PENDING attempts over ${info.hours}h — search data unavailable for this event`,
+        bet.id
+      );
+      if (res.changes > 0) {
+        reconcileUserBets(db, { betId: bet.id, parentResult: 'void', odds: bet.odds });
+      }
+      return res;
+    });
+    const res = voidTx.immediate();
     if (res.changes === 0) {
       console.log(`[AutoGrade] Auto-void no-data no-op for ${bet.id} (review-parked or already settled) — left as-is`);
     } else if (reaperM === 'shadow') {
@@ -3575,20 +3584,27 @@ async function gradePropWithAI(bet) {
       // `voided` stays false so the DROP below is not recorded for a void that
       // never happened (this is the exact bet 453e0952 incident shape: a
       // needs_review pick auto-voided out of the war-room queue).
-      const info = db.prepare(`UPDATE bets SET
-        result = 'void',
-        profit_units = 0,
-        graded_at = datetime('now'),
-        grade = 'VOID',
-        grade_reason = ?,
-        review_status = 'auto_void_unscoped_bet',
-        grading_state = 'done',
-        grading_lock_until = NULL
-      WHERE id = ? AND (result = 'pending' OR result IS NULL)
-        AND ${GRADER_ELIGIBLE_WHERE}`).run(
-        `Auto-voided: sport=${bet.sport || 'null'} not in supported set`,
-        bet.id
-      );
+      const voidTx = db.transaction(() => {
+        const info = db.prepare(`UPDATE bets SET
+          result = 'void',
+          profit_units = 0,
+          graded_at = datetime('now'),
+          grade = 'VOID',
+          grade_reason = ?,
+          review_status = 'auto_void_unscoped_bet',
+          grading_state = 'done',
+          grading_lock_until = NULL
+        WHERE id = ? AND (result = 'pending' OR result IS NULL)
+          AND ${GRADER_ELIGIBLE_WHERE}`).run(
+          `Auto-voided: sport=${bet.sport || 'null'} not in supported set`,
+          bet.id
+        );
+        if (info.changes > 0) {
+          reconcileUserBets(db, { betId: bet.id, parentResult: 'void', odds: bet.odds });
+        }
+        return info;
+      });
+      const info = voidTx.immediate();
       voided = info.changes > 0;
       if (!voided) {
         console.log(`[AutoGrade] Auto-void unscoped no-op for ${bet.id} (review-parked or already settled) — left as-is`);
@@ -4605,8 +4621,7 @@ async function finalizeBetGrading(client, bet, status, evidence, opts = {}) {
     saveDailySnapshot(bet.capper_id);
   }
 
-  // Pay out community tailers (void = refund)
-  const tailerCount = payoutTailers(bet.id, bet.odds || -110, resultLower === 'void' ? 'push' : resultLower);
+  const userSettlement = gradeResult.userSettlement || { total: 0, tailers: 0, faders: 0, totalProfitUnits: 0 };
 
   // Post to #slip-receipts
   if (client) {
@@ -4614,17 +4629,17 @@ async function finalizeBetGrading(client, bet, status, evidence, opts = {}) {
     await postGradedResult(client, bet, resultLower, profitUnits, evidence);
   }
 
-  // Post ticker (community tailers)
-  if (tailerCount > 0 && client) {
-    await postResultTicker(client, bet, resultLower, tailerCount);
+  // Post ticker (all settled community positions)
+  if (userSettlement.total > 0 && client) {
+    await postResultTicker(client, bet, resultLower, userSettlement);
   }
 
-  console.log(`[AutoGrade] Finalized ${bet.id?.slice(0, 8)} → ${resultLower} (${profitUnits >= 0 ? '+' : ''}${profitUnits.toFixed(2)}u) | ${tailerCount} tailers paid`);
-  return { bet, result: resultLower, profitUnits, grade: { grade: resultLower === 'win' ? 'B' : 'D', reason: evidence } };
+  console.log(`[AutoGrade] Finalized ${bet.id?.slice(0, 8)} → ${resultLower} (${profitUnits >= 0 ? '+' : ''}${profitUnits.toFixed(2)}u) | ${userSettlement.total} community position(s) settled`);
+  return { bet, result: resultLower, profitUnits, userSettlement, grade: { grade: resultLower === 'win' ? 'B' : 'D', reason: evidence } };
 }
 
 // ── Result Ticker — announce graded bets to #slip-receipts ──
-async function postResultTicker(client, bet, status, tailerCount) {
+async function postResultTicker(client, bet, status, settlement) {
   try {
     // Route to receipts channel (dashboard is scoreboard-only)
     const tickerId = process.env.RECEIPTS_CHANNEL_ID || process.env.SLIP_FEED_CHANNEL_ID;
@@ -4637,14 +4652,7 @@ async function postResultTicker(client, bet, status, tailerCount) {
     const emoji = isWin ? 'WIN!' : (status === 'loss' ? 'LOSS' : 'PUSH');
 
     const odds = bet.odds || -110;
-    const riskAmount = 1.0;
-    let perPayout = 0;
-    if (status === 'win') {
-      perPayout = odds > 0 ? riskAmount + (riskAmount * odds / 100) : riskAmount + (riskAmount * 100 / Math.abs(odds));
-    } else if (status === 'push') {
-      perPayout = riskAmount;
-    }
-    const totalDistributed = perPayout * tailerCount;
+    const net = Number(settlement.totalProfitUnits || 0);
 
     await channel.send({ embeds: [{
       color,
@@ -4652,7 +4660,7 @@ async function postResultTicker(client, bet, status, tailerCount) {
       description: `**Pick:** ${bet.description?.substring(0, 100) || 'Unknown'}\n**Capper:** ${bet.capper_name || 'Unknown'}`,
       fields: [
         { name: 'Odds', value: `${odds > 0 ? '+' : ''}${odds}`, inline: true },
-        { name: 'Community', value: `Paid out ${tailerCount} tailer${tailerCount === 1 ? '' : 's'} (${totalDistributed.toFixed(2)}u total)`, inline: false },
+        { name: 'Community', value: `Settled ${settlement.total} position${settlement.total === 1 ? '' : 's'} (${settlement.tailers} tail / ${settlement.faders} fade, ${net >= 0 ? '+' : ''}${net.toFixed(2)}u net)`, inline: false },
       ],
       timestamp: new Date().toISOString(),
     }] });

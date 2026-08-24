@@ -5,12 +5,13 @@
 // (#172). That script corrected the 4 externally-verified Tier B PINNED rows of
 // docs/audits/2026-07-03-pregate-tierb-reanchor.md — but its user_bets HARD GATE
 // refused 3 of them because each carries a single user_bets "tail" and
-// applyGradeOverride does not reconcile user_bets. #172 therefore applied only
-// the 0-tail row (320bc36b); the other 3 stayed uncorrected.
+// applyGradeOverride did not reconcile user_bets at the time. #172 therefore
+// applied only the 0-tail row (320bc36b); the other 3 stayed uncorrected.
 //
-// This script corrects those 3 tail-gated pinned rows AND settles their tails in
-// ONE atomic transaction: flip the bet (archive→update, reusing #172's machinery
-// verbatim) + settle the tailed user_bets row(s) for that bet. The HARD GATE is
+// This script corrects those 3 tail-gated pinned rows AND settles their community
+// positions in ONE atomic transaction. Since migration 033, the shared
+// applyGradeOverride path owns user_bets status, settlement-ledger, and virtual
+// bankroll reconciliation; this script no longer writes status itself. The gate is
 // RELAXED to a scoped allow: the tails are permitted ONLY for the one
 // synthetic/admin user_id below; any other user_id still refuses the row.
 //
@@ -21,10 +22,11 @@
 //     ONLY user_id in the table. All 25 rows are status='pending', action='fade',
 //     risk_amount=1.0 (the schema default). This is a synthetic/admin identity,
 //     not a real bettor: there is NO live P/L riding on it. (A real bettor would
-//     need a proper settlement ledger; that is out of scope — see RELAXED GATE.)
+//     originally needed a proper settlement ledger; migration 033 now provides it.)
 //   • user_bets schema (PRAGMA-verified): id INTEGER PK, user_id TEXT, bet_id
 //     TEXT, action TEXT, status TEXT DEFAULT 'pending', created_at TEXT,
-//     risk_amount REAL DEFAULT 1.0. NO stake / settlement-ledger column.
+//     risk_amount REAL DEFAULT 1.0. The ledger is the separate
+//     user_bet_settlements table added by migration 033.
 //
 // THE OPERATOR RUNS THIS — never an agent, never CI. Upload to the Fly container
 // and run there per docs/RUNBOOKS/db-interventions.md.
@@ -34,24 +36,20 @@
 //   node apply-tierb-tailed-corrections.js --apply    # writes, ONE transaction
 //
 // Env: APP_ROOT (default /app), DB_PATH (default /data/bettracker.db).
-// Self-contained for sftp upload: requires better-sqlite3 and
-// services/gradeOverride.js from APP_ROOT only; no other app module loads.
+// Self-contained for in-repo execution: requires better-sqlite3 plus
+// services/gradeOverride.js and its userBetSettlement.js dependency from APP_ROOT.
 //
-// ── Write scope: bets + bet_grade_history + user_bets ONLY. ──
-// This WIDENS #172's bets-only scope by exactly the user_bets settlement UPDATE
-// (status only). No pipeline_events, no Discord, no network, no bankrolls /
-// daily_snapshots / parlay_legs / user_bets.risk_amount writes. user_bets carries
-// NO settlement ledger (no stake column, and payoutTailers only ever moves
-// users.bankroll, and only for action='tail'), so settling a fade tail is a
-// terminal status stamp, nothing more.
+// ── Write scope: correction rows + the permanent community settlement path. ──
+// No pipeline_events, Discord, network, capper-bankroll, daily_snapshots, or
+// parlay-leg writes. applyGradeOverride writes bets + bet_grade_history and the
+// migration-033 settlement path writes user_bets.status,
+// user_bet_settlements, and the affected users.bankroll delta.
 //
-// ── Reuse of services/gradeOverride.js (re-audited 2026-07-03, UNCHANGED since
-//    #168/#172) ──
+// ── Reuse of services/gradeOverride.js (settlement-aware since migration 033) ──
 //   applyGradeOverride still archives to bet_grade_history BEFORE the bets
 //   UPDATE, is pure + dependency-injected (no Discord client, no module-level db,
-//   no import-time side effects), reconciles bankrolls + parlay legs but NOT
-//   user_bets — so --apply REUSES its archive→update core verbatim and this
-//   script adds the user_bets settlement itself. Two deps are neutered exactly as
+//   no import-time side effects), and now reconciles user_bets through the shared
+//   settlement ledger. Two capper-bankroll deps remain neutered exactly as
 //   in #172 to hold the write scope:
 //     • getBankroll → () => null. Bankroll reconciliation is OUT OF SCOPE — these
 //       are pre-gate (Beta-era) bets and bankrolls were season-reset to a fresh
@@ -63,16 +61,10 @@
 //       (grading.js is not require-safe standalone). Asserted per row against the
 //       embedded new_pu (±PU_TOLERANCE) before any write.
 //
-// ── Settled-status vocabulary decision ──
-//   Grep confirms user_bets.status is NEVER written to a terminal value anywhere
-//   in the codebase, and is NEVER read (`!mystats` derives a tailing record from
-//   the joined bets.result, not ub.status; payoutTailers ignores status). There
-//   is therefore no existing settled-status vocabulary to match, so this script
-//   uses 'won' / 'lost' (see settleTailStatus). Settling status here is
-//   forward-looking bookkeeping — nothing consumes it today — but it is the
-//   correct terminal state and it is what unblocks the tail HARD GATE. The
-//   permanent fix (a real settlement path, or marking the table test-only) is a
-//   backlog item (docs/BACKLOG.md).
+// ── Settled-status vocabulary ──
+//   The permanent path writes won/lost/push and records P/L in
+//   user_bet_settlements. settleTailStatus remains below as the historical
+//   win/loss planning mirror used by the dry-run report and DB-free regression.
 //
 // ── Fade inversion ──
 //   A FADE is a bet AGAINST the pick: the fader WINS when the bet LOSES and LOSES
@@ -87,18 +79,18 @@
 // Row gates (evaluated identically in both modes; per-row, run continues):
 //   skip   : id not found · stored result != expect_stored_result (already
 //            corrected / drifted) · grader_version NOT NULL (post-gate write —
-//            re-run inert) · a tail row already in a settled status (settle only)
+//            re-run inert). Already-settled status rows are ledger-reconciled by
+//            applyGradeOverride if the parent correction is still actionable.
 //   refuse : bet_type != straight (legs out of scope) · mirrored calcProfit
 //            differs from the embedded new_pu by > PU_TOLERANCE (odds/units
 //            drifted vs the audit) · RELAXED GATE — any tail on the bet has a
-//            user_id other than the synthetic one (a real bettor needs a ledger)
+//            user_id other than the audited synthetic one (outside this script's scope)
 //   fatal  : an id prefix matches more than one bets row (table unsafe — abort
 //            before any write)
 //
 // Idempotent: a second --apply run skips every bet (grader_version is now stamped
-// 'manual-v1' and the stored result no longer equals expect_stored_result), and
-// the settle UPDATE is guarded on status NOT IN ('won','lost'), so no tail is
-// double-settled even if a bet were somehow re-reached.
+// 'manual-v1' and the stored result no longer equals expect_stored_result). The
+// shared ledger also applies only a calculated P/L delta if a row is re-reached.
 //
 // Arithmetic (embedded, cross-checked in the DB-free test):
 //   Per row, ΔPU = new_pu − expect_stored_pu (the running-total impact, the same
@@ -380,10 +372,6 @@ function main() {
     saveDailySnapshot: () => { throw new Error('write-scope violation: saveDailySnapshot called'); },
     calcProfit,
   };
-  const settleStmt = db.prepare(
-    `UPDATE user_bets SET status = ? WHERE id = ? AND user_id = ? AND status NOT IN ('won','lost')`
-  );
-
   const runAll = db.transaction(() => {
     let flips = 0, settled = 0;
     for (const p of ok) {
@@ -398,14 +386,11 @@ function main() {
       // a hit means the bets/bankroll/legs write scope was violated — roll back all.
       if (res.bankrollApplied || res.legsTouched) throw new Error(`write-scope violation on ${p.row.id}: bankrollApplied=${res.bankrollApplied} legsTouched=${res.legsTouched}`);
       if (Math.abs(res.newProfit - p.writeValue) > 1e-9) throw new Error(`profit drift on ${p.row.id}: wrote ${res.newProfit}, planned ${p.writeValue}`);
-      flips++;
-
-      // Settle the synthetic fade tails for this bet (status only; idempotent).
-      for (const t of p.settleTails) {
-        const info = settleStmt.run(t.to, t.id, SYNTHETIC_USER_ID);
-        if (info.changes !== 1) throw new Error(`tail settle drift on ${p.row.id}: ub#${t.id} changed ${info.changes} rows (already settled / gone?) — rolling back`);
-        settled++;
+      if (res.userSettlement.total !== p.tailRows.length) {
+        throw new Error(`community settlement drift on ${p.row.id}: settled ${res.userSettlement.total}, planned ${p.tailRows.length}`);
       }
+      flips++;
+      settled += res.userSettlement.changed;
     }
     return { flips, settled };
   });
