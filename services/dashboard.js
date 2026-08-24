@@ -1,5 +1,5 @@
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
-const { getBetProps, getCapperStats, getLeaderboard, getAllPendingBets, getSentimentCounts, db, getSetting, setSetting } = require('./database');
+const { getBetProps, getCapperStats, getLeaderboard, getAllPendingBets, getUserBetSettlementSummary, db, getSetting, setSetting } = require('./database');
 
 function formatPropsLine(props) {
   if (!props || props.length === 0) return null;
@@ -116,13 +116,14 @@ async function postGradedResult(client, bet, result, profitUnits, evidence) {
   const record = stats ? `${stats.wins}W-${stats.losses}L (${stats.roi_pct >= 0 ? '+' : ''}${stats.roi_pct}% ROI)` : '';
 
   // Tail/fade summary
-  const sentiment = getSentimentCounts(bet.id);
-  const tailCount = sentiment?.tail || 0;
-  const fadeCount = sentiment?.fade || 0;
+  const settlement = getUserBetSettlementSummary(bet.id);
+  const tailCount = settlement.tailers;
+  const fadeCount = settlement.faders;
   let sentimentLine = '';
   if (tailCount > 0 || fadeCount > 0) {
-    const tailPL = result === 'win' ? `+${(pl * tailCount).toFixed(1)}u` : `${(pl * tailCount).toFixed(1)}u`;
-    const fadePL = result === 'win' ? `${(-pl * fadeCount).toFixed(1)}u` : `+${(-pl * fadeCount).toFixed(1)}u`;
+    const formatCommunityPl = value => `${value >= 0 ? '+' : ''}${value.toFixed(2)}u`;
+    const tailPL = formatCommunityPl(settlement.tailProfitUnits);
+    const fadePL = formatCommunityPl(settlement.fadeProfitUnits);
     sentimentLine = `${tailCount} tailer(s) ${tailPL} | ${fadeCount} fader(s) ${fadePL}`;
   }
 

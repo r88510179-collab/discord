@@ -1,5 +1,22 @@
 # ZoneTracker Backlog
 
+## Current status index — reconciled 2026-08-20
+
+This table is the authoritative status view. Older sections remain as incident history, but any older “pending,” “fix ready,” or “not shipped” label that conflicts with this table is stale.
+
+| Work item | Code state | Production / operator state | Next action |
+| --- | --- | --- | --- |
+| Community Tail/Fade settlement | **FIX BUILT IN THIS PR:** atomic parent grade + user status/P&L; migration 033 ledger; Tail and Fade; PUSH/VOID; correction/revert deltas; late-action guard; `/mybets` + receipts fixed | Not merged or deployed. The 25-row legacy snapshot is deliberately not auto-mutated. | Review/merge/deploy, then run a read-only legacy-row reconciliation plan before any backfill. |
+| Community bankroll exposure limit | **OPEN / deliberately not in settlement PR:** pending positions do not reserve bankroll, so several accepted risks can exceed the current balance before results settle. | Existing behavior. | Decide whether bankroll means cash-on-hand or total equity; then add an available-balance check/reservation model if oversubscription should be blocked. |
+| HRB pure-slip preservation (#207) | **SHIPPED** | Merged and deployed (operator-confirmed 2026-08-19). | Monitor `MANUAL_REVIEW_HOLD`/recovery outcomes; do not reopen the old `ai_is_bet_false` implementation item. |
+| Visible-text Twitter relay fallback (#208) | **SHIPPED** | Merged and deployed (operator-confirmed 2026-08-20). | Two post-merge P1 review findings remain open: mixed prop+team pick lists can collapse to one prop, and image posts with multiple attachments can replay the same caption fallback per image. |
+| Ambiguous bare-city normalization (`93cbe5e`) | **SHIPPED** | Code removes the 14 unsafe bare-city aliases; regression harness passed. Current production data was not re-probed in this reconciliation. | Monitor only; retain the historical section below as rationale. |
+| Stage 2 pipeline-event idempotency (#189 / migration 032) | **SHIPPED GATED** | Merge is complete. Runtime `PIPELINE_IDEM_MODE` state was not re-verified; shadow review/enforce decision remains operator work. | Verify the live flag, record it in `docs/FLAG-FLIPS.md`, and review ≥7d shadow data before enforce. |
+| Terminal-state invariant | **SHIPPED** | Later builds contain the fix; current live drift count was not re-probed. | Monitor the startup drift counter; no code task is open unless it grows. |
+| `.DS_Store` cleanup | **RESOLVED** | `git ls-files` returns no tracked `.DS_Store`. | None. |
+| Small stale code items | **RESOLVED:** `/admin pipeline-trace` accepts `bet_id`; PARSED payload no longer emits contradictory `isBet`; SF Giants routing is covered; dollar-stake/no-selection intake guards shipped; resolver env/app retired. | Runtime-only flags still require their own live verification. | Keep historical notes for provenance; do not schedule duplicate implementation work. |
+| Tier B tailed historical corrections (b5) | Script updated to use the permanent settlement ledger | Operator execution remains **UNVERIFIED**; older prose conflicts on “pending” vs “applied,” so this list does not claim a data write occurred. | Run dry-run/read-only verification before any operator apply. |
+
 ## ✅ Shipped
 
 ### DubClub email → Discord bridge (2026-05-30)
@@ -241,8 +258,8 @@ Dashboard logs show repeated `POST /api/admin/holds/:id/recover` → `TimeoutErr
 ### Regrade candidates — recycled-evidence cluster (from E14 close-out)
 Surfaced in the reconcile dry-run: `10bac8ecf867e8a3148fa214dc6297e9` is a **+62u win** graded on "Final score Lakers 118 Nuggets 112 per ESPN" — the identical evidence line appears on 5+ unrelated bets (`28b41952…`, `7228c470…`, `6bf42861…`, `7fb9fa3f…`, `472d3932…`, incl. an "NBA NRFI" and an MLB pick). Pre-Gate-3 era (grader_version null) so quote-bound grading never applied. Now `review_status='confirmed'`, so nothing will resurface them — queue as a manual regrade batch (skills/zonetracker-regrade), highest P&L first (`10bac8ec` +62u).
 
-### `.DS_Store` tracked under `.claude/`
-`.claude/.DS_Store` and `.claude/worktrees/.DS_Store` are tracked in git as repo noise even though both `.DS_Store` and `.claude/` are already in `.gitignore` (they were committed before the ignore rules, so the rules don't untrack them). Fix: `git rm --cached` the two tracked copies. (The main-loop owner is doing the actual `git rm`; this is a log entry so it isn't lost.)
+### ~~`.DS_Store` tracked under `.claude/`~~ — RESOLVED
+✅ RESOLVED — current `git ls-files` contains no tracked `.DS_Store`. The original note is retained only to explain why the ignore rules alone were insufficient after those files had once been committed.
 
 ### ~~Duplicate migration 006 — both `ADD COLUMN season`~~ — RESOLVED 2026-07-01
 ✅ RESOLVED — `006_add_season_to_bets.sql` deleted; `006_add_season_column.sql` survives (superset: same `ADD COLUMN season` + `idx_bets_season`, plus `idx_bets_capper_result` and `idx_bets_capper_season`). Safe because the migrator keys `schema_migrations` on filename and never asserts recorded filenames still exist on disk, so the already-recorded `_to_bets` row is inert; fresh DBs now run one clean 006. (Was: the migrator ran both; the second threw `duplicate column name`, swallowed by the duplicate-column tolerance `services/migrator.js:61-71` — the `database.js:62` boot guard was a separate no-op fallback, NOT the masker. See `docs/SEASON-RESET.md`.)
@@ -254,23 +271,25 @@ PR #135 (matchup-prefix reroute) grades the **recognized** matchup-prefixed legs
 
 Surfaced during the 2026-07-02 leaderboard probe (the same session that executed the Beta→S2 season bump — see `docs/SEASON-RESET.md` §Executed). DB facts below were operator-verified live that day; cite as "2026-07-02 probe".
 
-### P1 — Units intake sanity guard + dollar-stake parse
+### ~~P1 — Units intake sanity guard + dollar-stake parse~~ — RESOLVED IN CODE (#171)
 **Evidence (2026-07-02 probe):** bet `3e5c01a0` (twitter_text, bookitwithtrent) raw *"I have $5,000 on Spurs moneyline"* ingested `units=5000` with empty odds → graded win **+4545.45u** at the -110 default → single-handedly produced the **+4622u / 88.5% ROI** leaderboard top row. Sibling `02bacfc4` (*"$2500 on Avs ML"*) → `units=2500` (void, no damage). **`flagAbnormalRoi` (`services/database.js:798`) cannot catch this class:** inflated units inflate numerator and denominator together, so ROI stays plausible and the >500% monitoring line never fires. Both rows (`3e5c01a0`, `02bacfc4`) manually voided 2026-07-02. Fix lanes:
 - **(a) parser** — `"$X on <pick>"` treats X as **dollars**, not units: hold for review (`units` null) or convert via `bankrolls.unit_size` when known.
-- **(b) intake tripwire** — `units > UNITS_SANITY_MAX` (suggest 25) → `needs_review` + one #admin-log line; tri-state env `off|shadow|enforce`, shadow first (house pattern).
+- **(b) intake tripwire** — shipped as `UNITS_SANITY_MODE` + `UNITS_SANITY_MAX`; runtime mode still requires live verification before claiming enforce.
 
-### P1 — No-selection gradeability guard + pre-gate hallucinated-grade audit
+### ~~P1 — No-selection gradeability guard + pre-gate hallucinated-grade audit~~ — INTAKE GUARD SHIPPED (#171); HISTORICAL OPS REMAIN SEPARATE
 **Evidence (2026-07-02 probe):** bet `3f78b923` raw *"It's official. I have 50 units pending on an NBA Champion. Find out here."* (paywalled tease — **no selection stated**) graded WIN with grade_reason *"AI Grader: Final score Lakers 118 Nuggets 112 per ESPN"* — a **hallucinated match** — and `grader_version` NULL, i.e. graded before the Gate 2/3 provenance + quote-binding era. Manually voided 2026-07-02. Three items:
-- **(a) intake** — tease/no-selection patterns ("find out here", "link in bio", futures naming no side) are NOT covered by `FORBIDDEN_PLACEHOLDERS` (`services/ai.js:1570` — 'missing legs'/'tbd'/'placeholder'/'no picks found'/…); extend so these **hold** instead of saving.
+- **(a) intake** — RESOLVED in #171: tease/no-selection patterns are held instead of being saved as gradeable picks. Historical correction/audit bullets below remain operator/data work, not an open intake-code task.
 - **(b) audit** — one read-only probe counting + sampling other `grader_version`-NULL **settled** bets whose `grade_reason` cites entities absent from the description (the pre-gate hallucination class); **report before any regrade**. **EXECUTED 2026-07-02, downgraded per plan:** random n=15 sample showed **0/15 hallucinated-entity**, 1/15 wrong-market false WIN (`b6065d701c`, found + manually fixed) — the dominant pre-gate failure class is wrong-game/wrong-math, not hallucinated entities. Full 491-row read-only shadow regrade against the deterministic layer: **`docs/audits/2026-07-02-pregate-shadow-regrade.md`** (`scripts/shadow-regrade-pregate.js`); corrections remain a separate operator-gated step.
 - **(b2) graded-but-unpriced pre-gate class** — **15** settled pre-gate bets carry `profit_units` NULL (graded but never priced), counted by the 2026-07-02 shadow regrade run; they distort nothing today but need a price-or-void decision alongside any correction pass.
 - **(b3) Tier A applied, Tier B report open** — Tier A: `scripts/apply-pregate-corrections.js` **applied 2026-07-02** (24 rows corrected + 3 retro-archives, net +2.8u, one txn; settles 709→684). Tier B: `scripts/tierb-reanchor.js` re-anchored the remaining 467 to true tweet-post time (snowflake) — report **`docs/audits/2026-07-03-pregate-tierb-reanchor.md`** proposes **12 externally-verified new candidates** (net +1.96u; 5 pinned / 7 same-opponent-series needing per-game confirm; 1 multi-pick refuted), **report-only, operator-gated apply pending**.
-- **(b4) Tier B pinned corrections — script open** — `scripts/apply-tierb-corrections.js` (operator-run, mirrors #168) corrects the **4** externally-verified pinned rows (net **−7.64u**), one archived txn; `2c12a667` (Angels ML) reclassified out of the pinned set (same-opponent CIN series — LAA lost 7-3 on 04-11, the day before the 04-12 snowflake), so the **series bucket is now 8 rows** (7 + `2c12a667`) pending per-game disambiguation. See the audit's §Corrections applied (pinned, verified). Operator run PENDING.
-- **(b5) Tier B TAILED pinned corrections — follow-up script open** — `scripts/apply-tierb-tailed-corrections.js` (operator-run) corrects the **3** pinned rows #172's user_bets HARD GATE refused (`d7bf7159` / `b5bb1ad7` / `f4946029`, each with 1 tail) **and settles their fade tails** in one archived txn — net **ΔPU −1.91u** (the 3 rows then carry `profit_units` summing to −1.09u). Combined with #172's `320bc36b` (−5.73u) the pinned set totals **−7.64u** — the full pre-tail estimate; the gate deferred, it did not drop, any correction. Relaxed gate scoped to the single synthetic `user_id='1059681615418236948'`; settles `user_bets.status` to `'won'`/`'lost'` (no prior vocab). See the audit's §Corrections applied → "Tail-gated pinned rows settled via follow-up". Operator run PENDING.
-- **(b6) Tier B series-disambiguation — report open** — status: **Tier A applied** (24 rows, +2.8u), **Tier B pinned applied −7.64u** (b4/b5, 4 rows), **Tier B series report open**. The 8-row same-opponent-series bucket (b4) was re-examined at **minute** resolution by the snowflake-**hour** pin (`scripts/tierb-series-disambiguation.js`, report **`docs/audits/2026-07-03-pregate-series-disambig.md`**): the intended game = earliest same-opponent game whose scheduled start follows the post within 24h. Result — **4 pin + disagree** (`f754713d`/`af6e2ca4`/`b1418864`/`d61d4559`, net ΔPU **−0.0005u ≈ 0.00u**, correction candidates) and **4 UNRESOLVED** (`aef0b95b`/`e949537b`/`2c12a667`/`3a2b1755` — posts landed *after* their same-day game started; the two largest day-pin swings, +13.5u & −9.55u, are among them). Adversarially re-verified 8/8. **Report-only, operator-gated apply pending** (per-game external verify + #173 tailed-settle for any candidate carrying a synthetic tail).
+- **(b4) Tier B pinned corrections — script ready; operator execution UNVERIFIED** — `scripts/apply-tierb-corrections.js` (operator-run, mirrors #168) plans the **4** externally-verified pinned rows (net **−7.64u**), one archived txn; `2c12a667` (Angels ML) was reclassified out of the pinned set. Repo history confirms the artifact, not the production write. Run dry-run/read-only verification before claiming applied.
+- **(b5) Tier B TAILED pinned corrections — follow-up script ready; operator execution UNVERIFIED** — `scripts/apply-tierb-tailed-corrections.js` plans the **3** pinned rows the old user_bets HARD GATE refused (`d7bf7159` / `b5bb1ad7` / `f4946029`). It now delegates status, ledger, and user-bankroll delta to the permanent migration-033 settlement path inside `applyGradeOverride`; the single-synthetic-user scope gate remains. Repo history does not prove the production apply occurred.
+- **(b6) Tier B series-disambiguation — report open** — status: **Tier A applied** (24 rows, +2.8u); **Tier B pinned scripts ready but their operator execution is unverified**; **Tier B series report open**. The 8-row same-opponent-series bucket (b4) was re-examined at **minute** resolution by the snowflake-**hour** pin (`scripts/tierb-series-disambiguation.js`, report **`docs/audits/2026-07-03-pregate-series-disambig.md`**): the intended game = earliest same-opponent game whose scheduled start follows the post within 24h. Result — **4 pin + disagree** (`f754713d`/`af6e2ca4`/`b1418864`/`d61d4559`, net ΔPU **−0.0005u ≈ 0.00u**, correction candidates) and **4 UNRESOLVED** (`aef0b95b`/`e949537b`/`2c12a667`/`3a2b1755` — posts landed *after* their same-day game started; the two largest day-pin swings, +13.5u & −9.55u, are among them). Adversarially re-verified 8/8. **Report-only, operator-gated apply pending**.
 
-### `user_bets` is unsettled — 25 rows stuck `status='pending'` since Apr (design owed)
-Every `user_bets` row (all **25**) sits `status='pending'` and has since April: a single synthetic/admin `user_id='1059681615418236948'`, all `action='fade'`, `risk_amount=1.0` (schema default). **The /tail + /fade tracking never settles:** `upsertUserBet` writes only `action`+`risk_amount`, `payoutTailers` moves `users.bankroll` (and only for `action='tail'`, never fades) without touching `status`, and **nothing reads `ub.status`** (`!mystats` derives a tailing record from the joined `bets.result`). So `status` is a write-once default that no code advances or consumes. **This is exactly why the Tier B tail HARD GATE exists** — `applyGradeOverride` can't reconcile a table with no settlement semantics, so tailed rows are refused rather than silently flipped (`scripts/apply-tierb-tailed-corrections.js` (b5) settles them one-off, scoped to the synthetic id). **Action:** either design a real settlement path (settle `status` on grade, and decide whether/how fade/tail P&L feeds a ledger — today there is no stake column and `payoutTailers` ignores fades entirely), **or** mark the table test-only (it currently holds one synthetic identity, no real bettors). Until then every future correction of a tailed bet needs a manual, scoped gate like (b5).
+### 🛠️ FIX BUILT IN THIS PR — permanent `user_bets` settlement; legacy reconciliation still operator-gated
+The design gap is closed in code: migration **033** adds `user_bet_settlements`; every normal parent grade settles Tail and Fade atomically with the parent row; the correct side earns profit at the stored American price, the wrong side loses its declared risk, and PUSH/VOID is neutral. The ledger makes retries idempotent and lets `applyGradeOverride` apply only the correction delta; `revertBetToPending` reverses ledger-backed P/L and returns positions to pending. The three autonomous direct-VOID writers use the same path. Late Tail/Fade actions on terminal bets are rejected. `/mybets`, receipts, and the ticker now consume user status/P&L rather than inferring Fade results from parent P/L.
+
+**Deliberately unchanged data:** the **25-row 2026-07-02 snapshot** (one synthetic/admin identity, all fades, then all pending) is not evidence of current production state and is not auto-backfilled by migration 033. Automatic mutation would mix historical synthetic rows with the new virtual-bankroll contract. After deploy, run a read-only plan that joins those rows to their parent results and reports proposed status/P&L deltas; apply only with explicit operator approval. Until that happens, legacy rows can remain pending while all newly graded rows settle correctly.
 - **(c) confirm** — Gate 3 enforce blocks this class today (no selection → no bindable quote → forced PENDING); one synthetic test.
 
 ### P2 — zonetracker-dubclub: login-wall alert dedupe + backoff (satellite repo, NOT this repo)
@@ -377,7 +396,9 @@ The soccer share of the 435 — **185 rows** (Soccer 166 + World Cup 17 + FIFA W
 
 ## 🚨 KNOWN BUG - Priority 1
 
-### HRB slip shares dropped at `ai_is_bet_false` — Gemma gate blind to `type: 'ignore'`
+### ✅ SHIPPED + DEPLOYED (#207) — HRB pure-slip failures are preserved for review
+
+**Status correction 2026-08-20:** PR #207 is merged and operator-confirmed deployed. Failed pure-slip image parses are preserved in the review/recovery path instead of disappearing at the old terminal `ai_is_bet_false` exit. The incident analysis below remains useful history, but the implementation item is closed; monitoring/recovery quality is the follow-up.
 
 **Symptom**: DatDudeStill posts Hard Rock Bet shares in #ig-dave-picks (he stopped using #datdude-slips after 2026-04-17). Vision AI returns `type: 'ignore'` / `is_bet: false` on the slip image. `parseBetText` returns that verdict, and `messageHandler.js:1098` drops at `PRE_FILTER_NO_BET_CONTENT / filter: ai_is_bet_false`. No bet reaches war-room.
 
@@ -587,10 +608,10 @@ These hooks add enforcement teeth to Phase 3 rules 2 and 5 from the main spec.
 
 Scope: follow-on to Stage 1 BetService that shipped v297. Each item is independently deployable.
 
-### Idempotency keys — code landed shadow-first (PR: `claude/betservice-stage2-idempotency-47aa89`; NOT shipped)
+### ✅ SHIPPED GATED — Idempotency keys (#189 / migration 032); rollout evidence still pending
 Prevent double-writes when the grader retries a bet through the pipeline. Landed as migration **032** (`pipeline_events.idempotency_key` nullable TEXT + partial unique index `WHERE idempotency_key IS NOT NULL` — additive-only) behind `PIPELINE_IDEM_MODE` (`off`|`shadow`|`enforce`, unset → `off` = byte-identical no-op). Key is `(bet_id, grading_attempts at write time, stage, event_type, drop_reason || '')`, derived in `services/bets.js computeGradingIdemKey` → `services/pipeline-events.js deriveIdempotencyKey`, **DROP events only** (non-DROP grading telemetry like `event_aware_shadow` is per-poll measurement where same-attempt repeats are the signal). The original sketch here said "column on `bets` or a `grading_attempts` table, every recordDrop passes a `(bet_id, grading_attempt, stage)` key" — the landed shape keys `pipeline_events` itself (the table being inflated) and adds `event_type`/`drop_reason` so distinct failure reasons within one attempt stay distinct. Parlay legs (`<parent>-leg<N>` synthetic ids) key off the parent's `grading_attempts` with the full leg id in the key.
 
-**Rollout (operator-run, in order — merged ≠ deployed ≠ enabled):**
+**Status correction 2026-08-20:** the code/merge is shipped; the stale “NOT shipped” label referred to the pre-merge branch. Deployment/runtime mode was not re-probed in this reconciliation, so **enabled is still not claimed**. Rollout remains operator-run in order:
 1. Deploy with the flag unset (`off`) — no-op; migration 032 applies on boot.
 2. `fly secrets set PIPELINE_IDEM_MODE=shadow` — log the flip in `docs/FLAG-FLIPS.md`.
 3. Review the would-reject rate after ≥1 week of shadow:
@@ -890,9 +911,9 @@ Root cause is Discord mobile's URL deep-link handler or X app's URL scheme — n
 No fix available from our side. Desktop works correctly. Mobile users can long-press → Copy Link → open manually in Safari.
 
 
-### /admin pipeline-trace should accept bet_id
+### ~~/admin pipeline-trace should accept bet_id~~ — RESOLVED
 
-Currently only accepts ingest_id (e.g. `disc_<message_id>`, `twit_<tweet_id>`). Operators have bet_ids handy from war-room embeds and /grade output but no ingest_id, forcing a SQL lookup before tracing. Fix: detect hex bet_id input and resolve to ingest_id via `SELECT ingest_id FROM pipeline_events WHERE bet_id = ? LIMIT 1`, then trace.
+✅ RESOLVED — the command accepts a bet id, resolves its associated ingest/pipeline rows, and no longer requires the operator to perform the intermediate SQL lookup. The original request was based on an older handler shape.
 
 ## Foundation
 
@@ -1038,8 +1059,8 @@ Replace external AI dependencies with Surface Pro Ollama:
 
 ## Pipeline Observability
 
-### Parser PARSED event: `isBet` / `betCount` field mismatch
-In a v340 pipeline trace (msg=1499408189240774686, #datdude-slips, 2026-04-30), the PARSED payload showed `isBet:false` alongside `betCount:1` and `type:"bet"` — three fields telling different stories about the same parse. The bet went on to STAGED successfully so it is not blocking, but the inconsistency suggests stale flag wiring at the emit site. Audit wherever `pipeline_events.PARSED` is emitted and either drop the redundant flag or derive `isBet` from `betCount > 0` so the two cannot disagree. Risk if left: future filters that key off `isBet` could drop legitimate bets that the rest of the pipeline considers real.
+### ~~Parser PARSED event: `isBet` / `betCount` field mismatch~~ — RESOLVED
+✅ RESOLVED — the shared PARSED payload builder emits `type`, `betCount`, and `ticketStatus`; the contradictory redundant `isBet` field is gone and regression-covered. The v340 specimen remains historical evidence for why that field was removed.
 
 ### ~~Pre-existing test failures on main~~ — RESOLVED
 ✅ RESOLVED — reliability suite green as of `84650b8` (full `npm run test:reliability` EXIT=0, verified 2026-06-10): `tests/migration-validation.js` and `tests/message-handler.integration.js` now pass; `tests/twitter-pipeline-validation.js` was removed. The CI reliability gate is now meaningful.
@@ -1499,11 +1520,16 @@ Rare, and `review-holds.js` already degrades gracefully when the message is gone
 
 **Tracking:** First flagged 2026-05-20. Park until shortlink expander ships, then revisit with concrete data-use case.
 
-## 🛠️ FIX READY — Twitter-relay parser drops real picks (visible-text variant)
+## ✅ SHIPPED + DEPLOYED (#208) — Twitter-relay visible-text player-prop fallback
 
-**Prepared 2026-08-19; pending review, merge, and deploy.** `services/ai.js` now has a deterministic fallback for exactly one explicit, sport-scoped player-prop line (`O`/`U` or `Over`/`Under` + numeric line + supported stat). It strips relay headlines/emojis from the stored description, preserves explicit odds/units, leaves missing odds `null`, and is used only when the AI tier returns no usable bet. Direct Twitter vision calls pass the original tweet through `textFallbackSource`, so the fallback never has to parse the appended vision instructions. A usable AI bet or explicit `result`/`untracked_win` verdict always wins.
+**Merged and operator-confirmed deployed 2026-08-20.** `services/ai.js` now has a deterministic fallback for exactly one explicit, sport-scoped player-prop line (`O`/`U` or `Over`/`Under` + numeric line + supported stat). It strips relay headlines/emojis from the stored description, preserves explicit odds/units, leaves missing odds `null`, and is used only when the AI tier returns no usable bet. Direct Twitter vision calls pass the original tweet through `textFallbackSource`, so the fallback never has to parse the appended vision instructions. A usable AI bet or explicit `result`/`untracked_win` verdict always wins.
 
 The fallback fails closed for promo copy, settled lines, directionless stats, team totals, missing sport context, multi-pick/parlay shapes, implausible stat lines, and ambiguous ordinary one-word subjects. Regression coverage is in `tests/relay-text-prop-fallback.test.js` and is wired into both repository gates.
+
+**Open post-merge P1 review findings (not fixed by #208):**
+
+- A mixed list containing one supported player prop plus another market can take the relay fast path and silently keep only the prop; mixed-pick structure must be checked before accepting the fast path.
+- On an image-bearing message with multiple attachments and an unavailable AI tier, the same caption fallback can be replayed once per image and merged into duplicated parlay legs; caption fallback must run at most once per Discord message.
 
 **Surfaced 2026-05-21** during PR #31 (pure-slip hold-skip gate) channel sampling. The 4 gambling-twitter-* channels were intentionally left un-bypassed because Cody and Harry post real picks that get held. Sampling confirmed those holds contain real bets the parser is fumbling — not promo, not shortlink-gated, the bet text is *right there in the tweet*.
 
@@ -1535,7 +1561,7 @@ This is a third bug: bet legs visible in tweet text, parser still returns `is_be
 
 **Why P1:** Active data loss. Memory tracks ~44 holds over 14 days across Cody+Harry alone, of which sampling suggests ~20% are real picks (≈9 lost picks/14d, ≈18/month).
 
-**Implemented surface area (pending merge):**
+**Implemented surface area (shipped in #208):**
 - `services/ai.js`: `parseRelayTextPropCandidate`, `shouldUseRelayTextPropFallback`, and the narrow `parseBetText` fallback seams.
 - `services/twitter-handler.js`: preserves the original tweet as `textFallbackSource` on image-bearing posts.
 - `tests/relay-text-prop-fallback.test.js`: the five confirmed player-prop shapes, direct production-path fallback, and false-positive fences.
@@ -1587,7 +1613,8 @@ This is a third bug: bet legs visible in tweet text, parser still returns `is_be
 
 ## KNOWN BUG — Priority 1 (new 2026-05-31)
 
-### normalizeDescription injects wrong team for ambiguous cities
+### ✅ SHIPPED — normalizeDescription ambiguous bare-city alias cleanup (`93cbe5e`)
+**Status correction 2026-08-20:** the 14 unsafe bare-city aliases were removed while full team names and unambiguous aliases were preserved. The disambiguation/normalization regression harnesses passed (19/19, 4/4, 33/33, and 2/2 in the recorded verification). The incident and original removal list below remain as rationale, not an open implementation task.
 **Symptom**: "Baltimore Orioles +105" stored as "Baltimore Ravens Orioles +105". The bare city alias in data/mappings/teams.json maps to ONE team even when another team name already follows.
 **Root cause**: teams.json has bare-city aliases that fire via `\bcity\b` word-boundary match. When the city's full "City Team" string isn't also an alias key, the bare city expands wrongly. Affects raw→normalized description only; raw_text (and channel display) stays clean.
 **Ambiguous-city aliases to remove** (multi-team cities):
@@ -1625,8 +1652,8 @@ control** — private repo `r88510179-collab/zonetracker-ollama-proxy`, box dir 
 clone (secrets excluded: `ecosystem.config.js`/logs gitignored, `ecosystem.config.example.js`
 + README committed). See `docs/SURFACE-PRO.md` → ollama-proxy.
 
-### detectSport: SF Giants data gap
-`MLB_TEAMS` omits the Giants, so bare "Giants"/"SF Giants" resolves NFL. detectSport is nickname-only — needs a city-aware signal. Low frequency, but wrong sport poisons grading routing.
+### ~~detectSport: SF Giants data gap~~ — RESOLVED (#36/#99)
+✅ RESOLVED — shared-nickname disambiguation plus the offseason-bouncer rescue route `SF Giants`/MLB context without forcing the NFL Giants path; the regression harness covers the case. Keep monitoring ambiguous nickname inputs, but do not schedule the old missing-team implementation.
 
 ### normalizeDescription: player-index nickname over-match
 Same class as the team-nickname guard (3d12196) but in the player index — e.g. "Judge" → Aaron Judge fires in prose. Fix: reuse `hasBetContext` on the player replacement path. Firing rate unmeasured.
@@ -1707,7 +1734,9 @@ Migration order once unblocked:
 
 Success metric: per-source staged-bet counts identical between webhook path and direct path over a 7-day shadow window; zero new DROP enums firing on the direct path.
 
-## ✅ SHIPPED (pending deploy) — Terminal-state invariant + grader-queue drift log + Gate 3 drop classifier (2026-07-08)
+## ✅ SHIPPED + DEPLOYED — Terminal-state invariant + grader-queue drift log + Gate 3 drop classifier (2026-07-08)
+
+**Status correction 2026-08-20:** the old “pending deploy” label is stale; later deployed builds contain this code. The live drift count was not re-probed during this reconciliation, so the remaining action is monitoring the startup counter, not another implementation/deploy task.
 
 **Incident (verified live 2026-07-08):** 375 bets carried a terminal `result` (void/loss, 93% void) while `grading_state` stayed `backoff`/`ready`/`quarantined`; on the then-deployed build the grader queue kept re-picking them — **1,322 of 3,333 grading-side `pipeline_events` in the prior 7 days (~40%)** fired on already-terminal bets. A one-time DB cleanup set 372 rows to `grading_state='done'` (snapshot `/data/state-cleanup-2026-07-08.json`). This PR removes the class at its creators:
 

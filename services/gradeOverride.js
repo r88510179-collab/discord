@@ -18,6 +18,8 @@
 // legs (which would double-count bankroll and double-append ' [overridden]').
 // ═══════════════════════════════════════════════════════════════
 
+const { reconcileUserBets } = require('./userBetSettlement');
+
 const VALID_RESULTS = ['win', 'loss', 'push', 'void'];
 
 /**
@@ -129,10 +131,20 @@ function applyGradeOverride(deps, { betId, result, reason, invokerId }) {
         bankrollApplied = true;
       }
     }
-    return { legsTouched, bankrollApplied, bankrollDelta };
+
+    // Community positions follow the corrected parent result in the SAME
+    // transaction. The settlement ledger applies only the delta from their
+    // previously recorded P/L, so win→loss→win cycles and same-result reruns
+    // cannot double-credit or double-debit a user.
+    const userSettlement = reconcileUserBets(db, {
+      betId: bet.id,
+      parentResult: result,
+      odds: bet.odds,
+    });
+    return { legsTouched, bankrollApplied, bankrollDelta, userSettlement };
   });
 
-  const { legsTouched, bankrollApplied, bankrollDelta } = tx();
+  const { legsTouched, bankrollApplied, bankrollDelta, userSettlement } = tx();
 
   return {
     ok: true,
@@ -146,6 +158,7 @@ function applyGradeOverride(deps, { betId, result, reason, invokerId }) {
     legsTouched,
     bankrollApplied,
     bankrollDelta,
+    userSettlement,
     idempotent: alreadyThisResult,
   };
 }

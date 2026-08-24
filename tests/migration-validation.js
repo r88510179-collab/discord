@@ -50,11 +50,19 @@ function run() {
     assert.ok(tables.includes('tracked_twitter'), 'tracked_twitter table should exist');
     assert.ok(tables.includes('daily_snapshots'), 'daily_snapshots table should exist');
     assert.ok(tables.includes('scan_state'), 'scan_state table should exist');
+    assert.ok(tables.includes('user_bet_settlements'), 'user_bet_settlements table should exist');
 
     // Verify review_status column exists on bets
     const betCols = db.prepare("PRAGMA table_info('bets')").all().map(c => c.name);
     assert.ok(betCols.includes('review_status'), 'bets should have review_status column');
     assert.ok(betCols.includes('season'), 'bets should have season column');
+
+    const settlementCols = db.prepare("PRAGMA table_info('user_bet_settlements')").all().map(c => c.name);
+    assert.deepStrictEqual(
+      settlementCols,
+      ['user_bet_id', 'parent_result', 'profit_units', 'settled_at'],
+      'community settlement ledger should expose the expected columns',
+    );
 
     db.close();
     fs.unlinkSync(dbFile);

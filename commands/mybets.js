@@ -16,8 +16,8 @@ module.exports = {
       return interaction.editReply({ content: 'You have no tailed or faded bets yet. Hit the Tail/Fade buttons on picks to get started!' });
     }
 
-    const active = bets.filter(b => b.result === 'pending');
-    const graded = bets.filter(b => b.result !== 'pending');
+    const active = bets.filter(b => b.status === 'pending');
+    const graded = bets.filter(b => b.status !== 'pending');
 
     const lines = [];
 
@@ -27,7 +27,7 @@ module.exports = {
         const icon = b.action === 'tail' ? '🔥' : '🧊';
         const odds = b.odds != null ? (b.odds > 0 ? `+${b.odds}` : `${b.odds}`) : 'N/A';
         lines.push(`${icon} ${b.action.toUpperCase()} — **${(b.description || 'N/A').slice(0, 50)}** (${odds})`);
-        lines.push(`  └ ${b.capper_name || 'Unknown'} | ${b.sport || '??'}`);
+        lines.push(`  └ ${b.capper_name || 'Unknown'} | ${b.sport || '??'} | ${Number(b.risk_amount || 1).toFixed(2)}u risk`);
       }
     }
 
@@ -36,20 +36,18 @@ module.exports = {
       lines.push('**SETTLED**');
       for (const b of graded.slice(0, 10)) {
         const icon = b.action === 'tail' ? '🔥' : '🧊';
-        const resultIcon = b.result === 'win' ? '✅' : b.result === 'loss' ? '❌' : '➖';
-        // For tails: win is good, loss is bad. For fades: reversed.
-        const youWon = (b.action === 'tail' && b.result === 'win') || (b.action === 'fade' && b.result === 'loss');
-        const tag = youWon ? '💰' : '💸';
-        lines.push(`${icon}${resultIcon}${tag} **${(b.description || 'N/A').slice(0, 40)}** — ${b.result.toUpperCase()}`);
+        const resultIcon = b.status === 'won' ? '✅' : b.status === 'lost' ? '❌' : '➖';
+        const pl = b.profit_units == null
+          ? 'P/L N/A'
+          : `${Number(b.profit_units) >= 0 ? '+' : ''}${Number(b.profit_units).toFixed(2)}u`;
+        lines.push(`${icon}${resultIcon} **${(b.description || 'N/A').slice(0, 40)}** — ${b.status.toUpperCase()} (${pl})`);
       }
     }
 
-    const winCount = graded.filter(b =>
-      (b.action === 'tail' && b.result === 'win') || (b.action === 'fade' && b.result === 'loss'),
-    ).length;
-    const lossCount = graded.filter(b =>
-      (b.action === 'tail' && b.result === 'loss') || (b.action === 'fade' && b.result === 'win'),
-    ).length;
+    const winCount = graded.filter(b => b.status === 'won').length;
+    const lossCount = graded.filter(b => b.status === 'lost').length;
+    const pushCount = graded.filter(b => b.status === 'push').length;
+    const totalProfit = graded.reduce((sum, b) => sum + Number(b.profit_units || 0), 0);
 
     const embed = new EmbedBuilder()
       .setTitle('Your Bets')
@@ -57,7 +55,8 @@ module.exports = {
       .setDescription(lines.join('\n') || 'No bets found.')
       .addFields(
         { name: 'Active', value: `${active.length}`, inline: true },
-        { name: 'Record', value: `${winCount}W - ${lossCount}L`, inline: true },
+        { name: 'Record', value: `${winCount}W - ${lossCount}L - ${pushCount}P`, inline: true },
+        { name: 'P/L', value: `${totalProfit >= 0 ? '+' : ''}${totalProfit.toFixed(2)}u`, inline: true },
       )
       .setFooter({ text: `${bets.length} total bets tracked` })
       .setTimestamp();
