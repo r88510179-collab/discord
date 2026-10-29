@@ -8,6 +8,7 @@ const { db, getOrCreateCapper, createBetWithLegs, updateLastTweetId, logTweetAud
 const { sendStagingEmbed } = require('./warRoom');
 const { recordStage, recordDrop, recordError, makeIngestId } = require('./pipeline-events');
 const slateResplit = require('./slateResplit');
+const { reviewStatusFor } = require('./reviewPolicy');
 
 const delay = ms => new Promise(r => setTimeout(r, ms));
 
@@ -297,7 +298,7 @@ async function handleTwitterWebhookPayload(payload, client) {
           // event_date: a ladder's steps ride the same slip/game, so each step
           // inherits the pick-level extracted date (undefined on the text path
           // → write gate stores NULL, byte-identical to before).
-          const saved = createBetWithLegs({ capper_id: capper.id, sport: pick.sport || 'Unknown', bet_type: 'straight', description: step.description, odds: stepOdds, units: step.units || 1, event_date: pick.event_date || null, source: betSource, source_url: sourceUrl, source_tweet_id: tweetId, source_tweet_handle: cleanHandle, raw_text: text.slice(0, 500), review_status: 'needs_review', is_ladder: 1, ladder_step: step.ladder_step || 0 }, []);
+          const saved = createBetWithLegs({ capper_id: capper.id, sport: pick.sport || 'Unknown', bet_type: 'straight', description: step.description, odds: stepOdds, units: step.units || 1, event_date: pick.event_date || null, source: betSource, source_url: sourceUrl, source_tweet_id: tweetId, source_tweet_handle: cleanHandle, raw_text: text.slice(0, 500), review_status: reviewStatusFor({ capper, confidence: undefined, legacyStatus: 'needs_review' }), is_ladder: 1, ladder_step: step.ladder_step || 0 }, []);
           if (saved && !saved._deduped) ladderBets.push(saved);
         }
         if (ladderBets.length > 0 && client) {
@@ -340,7 +341,7 @@ async function handleTwitterWebhookPayload(payload, client) {
             // event_date: re-split picks inherit the parent slip's extracted
             // date — the same value the un-split parlay would have stored, so
             // the re-split is date-neutral vs. staging the parlay as-is.
-            const saved = createBetWithLegs({ capper_id: capper.id, sport: p.sport || pick.sport || 'Unknown', bet_type: 'straight', description: p.description, odds: p.odds ?? null, units: p.units || 1, event_date: pick.event_date || null, source: betSource, source_url: sourceUrl, source_tweet_id: tweetId, source_tweet_handle: cleanHandle, raw_text: (p.description || text).slice(0, 500), review_status: 'needs_review' }, []);
+            const saved = createBetWithLegs({ capper_id: capper.id, sport: p.sport || pick.sport || 'Unknown', bet_type: 'straight', description: p.description, odds: p.odds ?? null, units: p.units || 1, event_date: pick.event_date || null, source: betSource, source_url: sourceUrl, source_tweet_id: tweetId, source_tweet_handle: cleanHandle, raw_text: (p.description || text).slice(0, 500), review_status: reviewStatusFor({ capper, confidence: undefined, legacyStatus: 'needs_review' }) }, []);
             if (saved && !saved._deduped) sheetBets.push(saved);
           }
           for (const sb of sheetBets) {
@@ -376,7 +377,11 @@ async function handleTwitterWebhookPayload(payload, client) {
       // `event_date`: present only on the vision path (pick rebuilt from the
       // parseBetText bet above); the text path (extractPickFromTweet) has no
       // date field in its schema → undefined → write gate stores NULL.
-      const saved = createBetWithLegs({ capper_id: capper.id, sport: pick.sport || 'Unknown', bet_type: pick.type || 'straight', description: pick.description, odds: normalOdds, units: pick.units || 1, wager: pick.wager ?? null, event_date: pick.event_date || null, source: betSource, source_url: sourceUrl, source_tweet_id: tweetId, source_tweet_handle: cleanHandle, raw_text: text.slice(0, 500), review_status: 'needs_review', is_ladder: pick.is_ladder || false, ladder_step: pick.ladder_step || 0 }, legs);
+      // `review_status` (PR-3, all three createBetWithLegs sites): confidence is
+      // undefined on both twitter pick paths (the vision rebuild drops
+      // _confidence; extractPickFromTweet's schema has no confidence field), so
+      // the low-confidence hold rule is Discord-path-only today.
+      const saved = createBetWithLegs({ capper_id: capper.id, sport: pick.sport || 'Unknown', bet_type: pick.type || 'straight', description: pick.description, odds: normalOdds, units: pick.units || 1, wager: pick.wager ?? null, event_date: pick.event_date || null, source: betSource, source_url: sourceUrl, source_tweet_id: tweetId, source_tweet_handle: cleanHandle, raw_text: text.slice(0, 500), review_status: reviewStatusFor({ capper, confidence: undefined, legacyStatus: 'needs_review' }), is_ladder: pick.is_ladder || false, ladder_step: pick.ladder_step || 0 }, legs);
 
       if (saved && !saved._deduped) {
         if (client) {

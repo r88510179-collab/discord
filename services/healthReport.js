@@ -5,7 +5,7 @@
 // ═══════════════════════════════════════════════════════════
 
 const { EmbedBuilder } = require('discord.js');
-const { db } = require('./database');
+const { db, getPendingBets } = require('./database');
 // THROWAWAY (remove with SGP PR 2b): SGP would-hold pulse section. See services/sgpWouldHoldPulse.js.
 const { buildSgpWouldHoldSection } = require('./sgpWouldHoldPulse');
 const path = require('path');
@@ -356,6 +356,11 @@ async function postReport(client, type = 'full', hours = 24) {
 
 // ── Critical alert checker (runs continuously) ──────────────
 let highMemCount = 0;
+// REVIEW_QUEUE_ALERT_V1 — per-key cooldown for the review-queue-age and
+// grader-idle checks below: a standing condition DMs at most once per 6h
+// (≤4/day), while the checks themselves still run every 5 minutes.
+const REVIEW_ALERT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+const lastSent = {};
 async function checkCriticalAlerts(client) {
   if (!process.env.OWNER_ID) return;
   const alerts = [];
@@ -390,6 +395,34 @@ async function checkCriticalAlerts(client) {
 
   // DB accessible
   try { db.prepare('SELECT 1').get(); } catch (e) { alerts.push(`🚨 Database error: ${e.message}`); }
+
+  // REVIEW_QUEUE_ALERT_V1 — review-queue age + grader idle (PR-3). Both checks
+  // are SELECT-only and individually try/caught so they can never throw out of
+  // checkCriticalAlerts; both envs are read per check (flip without restart).
+  const nowMs = Date.now();
+  const canSend = (key) => !lastSent[key] || nowMs - lastSent[key] >= REVIEW_ALERT_COOLDOWN_MS;
+  try {
+    const minN = parseInt(process.env.REVIEW_QUEUE_ALERT_MIN, 10) || 20;
+    const q = db.prepare("SELECT COUNT(*) AS n, MIN(created_at) AS oldest FROM bets WHERE result='pending' AND review_status='needs_review' AND created_at < datetime('now','-24 hours')").get();
+    if (q && q.n >= minN && canSend('review_queue_age')) {
+      lastSent['review_queue_age'] = nowMs;
+      alerts.push(`⚠️ Review queue: ${q.n} bets waiting >24h (oldest ${String(q.oldest).slice(0, 10)})`);
+    }
+  } catch (e) { console.error('[Health] review-queue alert check failed:', e.message); }
+  try {
+    const idleHours = parseFloat(process.env.GRADER_IDLE_ALERT_HOURS) || 6;
+    const gradeable = getPendingBets().length;
+    if (gradeable > 0) {
+      // bets.graded_at is TEXT datetime('now') UTC — compare in SQLite's own
+      // domain rather than JS Date-parsing the space-separated format.
+      const lastGraded = db.prepare('SELECT MAX(graded_at) AS t FROM bets').get()?.t || null;
+      const idle = !lastGraded || db.prepare("SELECT CASE WHEN ? < datetime('now', ?) THEN 1 ELSE 0 END AS idle").get(lastGraded, `-${idleHours} hours`).idle === 1;
+      if (idle && canSend('grader_idle')) {
+        lastSent['grader_idle'] = nowMs;
+        alerts.push(`⚠️ Grader idle: ${gradeable} gradeable bets, last grade ${lastGraded || 'never'}`);
+      }
+    }
+  } catch (e) { console.error('[Health] grader-idle alert check failed:', e.message); }
 
   if (alerts.length > 0) {
     try {
