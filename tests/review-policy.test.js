@@ -158,6 +158,16 @@ t('trusted with empty TRUSTED_CAPPER_IDS → legacyStatus', () => {
   }
 });
 
+t("escape-hatch synthetic pick (confidence 'low') holds under all AND trusted (Codex P2, PR #210)", () => {
+  // services/twitter-handler.js stamps its structure-detected/AI-NULL escape
+  // hatch pick _confidence:'low' so the forced-review row never auto-confirms.
+  for (const mode of ['all', 'trusted']) {
+    withEnv({ REVIEW_AUTO_CONFIRM: mode, TRUSTED_CAPPER_IDS: 'abc123' }, () => {
+      assert.strictEqual(reviewStatusFor({ capper: CAPPER, confidence: 'low', legacyStatus: 'needs_review' }), 'needs_review', `mode=${mode}`);
+    });
+  }
+});
+
 console.log('review-policy: isTrustedCapper edge cases');
 
 t('null/undefined capper or empty set → false', () => {
