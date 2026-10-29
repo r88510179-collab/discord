@@ -69,6 +69,8 @@ check('A3: nextDayYmd rolls months', S.nextDayYmd('2026-08-31') === '2026-09-01'
 // grader_version).
 check('A4: void UPDATE repeats the FULL gate in its WHERE clause',
   /WHERE id = \? AND result = 'pending' AND review_status = 'needs_review' AND season = \?/.test(S.VOID_UPDATE_SQL));
+check('A4: void UPDATE carries the write-time tailed guard (NOT EXISTS user_bets)',
+  /AND NOT EXISTS \(SELECT 1 FROM user_bets ub WHERE ub\.bet_id = bets\.id\)/.test(S.VOID_UPDATE_SQL));
 check('A4: void UPDATE writes the sweeper column set',
   /result = 'void'/.test(S.VOID_UPDATE_SQL) &&
   /profit_units = 0/.test(S.VOID_UPDATE_SQL) &&
@@ -289,6 +291,49 @@ function betRow(dbFile, id) {
   const r4 = runCli([], empty);
   check('C5: DB without the expected tables → exit 2 schema mismatch', r4.status === 2 && /schema mismatch/.test(r4.out));
   fs.unlinkSync(empty);
+}
+
+// ── Section D — void-worker race seams (PR #211 review findings) ────────────
+// Drives buildVoidWorker directly on the in-process DB to simulate the
+// selection→write races the CLI cannot reproduce in one process. Runs LAST so
+// its seeds never leak into the Section C copies.
+console.log('\nSection D — write-time recheck inside the void transaction');
+{
+  const insertCols = ['bet_id', 'old_result', 'old_profit_units', 'old_grade', 'old_grade_reason', 'old_graded_at', 'archived_by', 'reason'];
+  const reason = S.buildVoidReason('Beta', '2026-10-29');
+  const voidOne = S.buildVoidWorker(db, { season: 'Beta', reason, insertCols });
+  const histCount = id => db.prepare('SELECT COUNT(*) AS n FROM bet_grade_history WHERE bet_id = ?').get(id).n;
+
+  // D1: tail/fade accepted AFTER selection (worker built = selection done).
+  seedBet('w1-race-tailed', { season: 'Beta', created_at: '2026-06-15 12:00:00' });
+  db.prepare("INSERT INTO user_bets (user_id, bet_id, action, status, created_at) VALUES ('u1', 'w1-race-tailed', 'fade', 'pending', '2026-10-29 00:00:00')").run();
+  check('D1: post-selection tail → worker outcome tailed', voidOne('w1-race-tailed') === 'tailed');
+  const w1 = db.prepare('SELECT result, review_status FROM bets WHERE id = ?').get('w1-race-tailed');
+  check('D1: race-tailed bet NOT voided (still pending needs_review)', w1.result === 'pending' && w1.review_status === 'needs_review');
+  check('D1: race-tailed bet left NO archive row', histCount('w1-race-tailed') === 0);
+  check('D1: the UPDATE itself refuses a tailed bet (NOT EXISTS guard, changes=0)',
+    db.prepare(S.VOID_UPDATE_SQL).run(reason, 'w1-race-tailed', 'Beta').changes === 0);
+
+  // D2: operator confirmed the bet AFTER selection.
+  seedBet('w2-race-confirmed', { season: 'Beta', created_at: '2026-06-15 12:00:00' });
+  db.prepare("UPDATE bets SET review_status = 'confirmed' WHERE id = 'w2-race-confirmed'").run();
+  check('D2: post-selection confirm → worker outcome gate_noop', voidOne('w2-race-confirmed') === 'gate_noop');
+  check('D2: confirmed bet NOT voided', db.prepare('SELECT result FROM bets WHERE id = ?').get('w2-race-confirmed').result === 'pending');
+  check('D2: refused void left NO archive row', histCount('w2-race-confirmed') === 0);
+
+  // D3: clean candidate still voids, archive row from the LIVE read.
+  seedBet('w3-clean', { season: 'Beta', created_at: '2026-06-15 12:00:00' });
+  check('D3: clean candidate → worker outcome voided', voidOne('w3-clean') === 'voided');
+  const w3 = db.prepare('SELECT result, grade, grading_state, grader_version FROM bets WHERE id = ?').get('w3-clean');
+  check('D3: voided with sweeper set + retro-triage-v1',
+    w3.result === 'void' && w3.grade === 'VOID' && w3.grading_state === 'done' && w3.grader_version === 'retro-triage-v1');
+  const w3h = db.prepare('SELECT old_result, archived_by FROM bet_grade_history WHERE bet_id = ?').all('w3-clean');
+  check('D3: exactly one archive row, old_result from the live read', w3h.length === 1 && w3h[0].old_result === 'pending' && w3h[0].archived_by === S.ARCHIVED_BY);
+  check('D3: worker is idempotent (second call gate_noop, no second archive row)',
+    voidOne('w3-clean') === 'gate_noop' && histCount('w3-clean') === 1);
+
+  // D4: missing bet → gate_noop, nothing written.
+  check('D4: unknown bet id → gate_noop, no archive row', voidOne('nope-does-not-exist') === 'gate_noop' && histCount('nope-does-not-exist') === 0);
 }
 
 console.log(`\nretro-triage-needs-review: ${pass} passed, ${fail} failed`);

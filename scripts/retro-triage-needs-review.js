@@ -23,11 +23,15 @@
 //                           approveBet(), ONE transaction. Defaults:
 //                           --batch 200 --since 2026-08-01 --until now.
 //   --apply --void-season X void season X's backlog rows (sweeper column set,
-//                           'retro-triage-v1' + breadcrumb), ONE transaction
-//                           per bet, archive row first. Tailed bets
-//                           (user_bets) are HARD-SKIPPED. Opt-in, separate
-//                           from --batch: combining them in one --apply run
-//                           is refused.
+//                           'retro-triage-v1' + breadcrumb), ONE IMMEDIATE
+//                           transaction per bet, archive row first. Tailed
+//                           bets (user_bets) are HARD-SKIPPED — judged again
+//                           INSIDE each bet's transaction and by a NOT EXISTS
+//                           guard on the UPDATE itself, so a tail accepted
+//                           after selection is still skipped; a refused void
+//                           rolls its archive row back. Opt-in, separate from
+//                           --batch: combining them in one --apply run is
+//                           refused.
 //
 // Safety rails (reconcile-needs-review.js mold):
 //   • dry-run by default; --apply is the only write gate; --apply --dry-run
@@ -77,7 +81,10 @@ const PENDING_NR_WHERE = "result = 'pending' AND review_status = 'needs_review'"
 // there, so it is left untouched here; review_status stays as is (deliberate
 // — this population was parked for a human, and the void IS that decision's
 // paper trail). Distinguishable from a swept void only by grader_version and
-// the grade_reason breadcrumb.
+// the grade_reason breadcrumb. The WHERE clause repeats the full gate AND the
+// tailed hard-skip (NOT EXISTS user_bets) so both are judged at WRITE time —
+// a tail/fade accepted after selection can never be voided out from under the
+// community ledger (PR #211 review).
 const VOID_UPDATE_SQL = `UPDATE bets SET
   result = 'void',
   profit_units = 0,
@@ -87,7 +94,8 @@ const VOID_UPDATE_SQL = `UPDATE bets SET
   grading_state = 'done',
   grading_lock_until = NULL,
   grader_version = '${GRADER_VERSION}'
-  WHERE id = ? AND result = 'pending' AND review_status = 'needs_review' AND season = ?`;
+  WHERE id = ? AND result = 'pending' AND review_status = 'needs_review' AND season = ?
+    AND NOT EXISTS (SELECT 1 FROM user_bets ub WHERE ub.bet_id = bets.id)`;
 
 // Every bets column this script reads or writes — preflighted via PRAGMA
 // (PREFLIGHT Rule 1: never assume columns).
@@ -199,6 +207,56 @@ function fmtRow(r) {
   return `${String(r.id).slice(0, 8)} | ${r.created_at} | ${r.season} | ${r.sport} | ${r.source} | ${cap}`;
 }
 
+// Per-bet void worker (exported for tests). Returns betId → outcome, one of
+// 'voided' | 'tailed' | 'gate_noop' | 'rolled_back'. The transaction is
+// IMMEDIATE so the write lock is held across recheck → archive → UPDATE:
+// the tailed/gate state is re-read INSIDE the transaction (a tail/fade or an
+// operator confirm landing after selection is honored at write time, never
+// the stale selection snapshot), the archive row's before-state comes from
+// that same live read, and if the gated UPDATE still refuses, the throw rolls
+// the archive insert back — no history row ever claims a void that did not
+// happen (PR #211 review, both findings).
+function buildVoidWorker(db, { season, reason, insertCols }) {
+  const insertHistory = db.prepare(
+    `INSERT INTO bet_grade_history (${insertCols.join(', ')}) VALUES (${insertCols.map(c => `@${c}`).join(', ')})`,
+  );
+  const voidStmt = db.prepare(VOID_UPDATE_SQL);
+  const recheck = db.prepare(`
+    SELECT b.result, b.review_status, b.season, b.profit_units, b.grade,
+           b.grade_reason, b.graded_at,
+           EXISTS(SELECT 1 FROM user_bets ub WHERE ub.bet_id = b.id) AS tailed
+    FROM bets b WHERE b.id = ?`);
+  const tx = db.transaction((betId) => {
+    const live = recheck.get(betId);
+    if (!live || live.result !== 'pending' || live.review_status !== 'needs_review' || live.season !== season) return 'gate_noop';
+    if (live.tailed) return 'tailed';
+    const values = {
+      bet_id: betId,
+      old_result: live.result,
+      old_profit_units: live.profit_units,
+      old_grade: live.grade,
+      old_grade_reason: live.grade_reason,
+      old_graded_at: live.graded_at,
+      archived_by: ARCHIVED_BY,
+      reason: `${reason} → new result 'void'`,
+    };
+    const picked = {};
+    for (const c of insertCols) picked[c] = values[c];
+    insertHistory.run(picked);
+    const changes = voidStmt.run(reason, betId, season).changes;
+    // Belt-and-braces: unreachable under the immediate lock + recheck above,
+    // but a refusal here must take the archive row down with it.
+    if (changes !== 1) throw new Error(`void gate refused ${betId} after in-transaction recheck (changes=${changes})`);
+    return 'voided';
+  });
+  return (betId) => {
+    try { return tx.immediate(betId); } catch (err) {
+      console.log(`  ROLLED BACK (${err.message})`);
+      return 'rolled_back';
+    }
+  };
+}
+
 module.exports = {
   parseArgs,
   isValidYmd,
@@ -208,6 +266,7 @@ module.exports = {
   missingColumns,
   ingestIdentityFor,
   fmtRow,
+  buildVoidWorker,
   PENDING_NR_WHERE,
   VOID_UPDATE_SQL,
   REQUIRED_BETS_COLS,
@@ -387,45 +446,36 @@ function applyVoidSeason(database, args, today) {
     }
   }
   const reason = buildVoidReason(season, today);
-  const candidateValues = bet => ({
-    bet_id: bet.id,
-    old_result: 'pending',
-    old_profit_units: bet.profit_units,
-    old_grade: bet.grade,
-    old_grade_reason: bet.grade_reason,
-    old_graded_at: bet.graded_at,
-    archived_by: ARCHIVED_BY,
-    reason: `${reason} → new result 'void'`,
-  });
-  const insertCols = Object.keys(candidateValues({ id: '' })).filter(c => historyCols.includes(c));
-  const insertHistory = db.prepare(
-    `INSERT INTO bet_grade_history (${insertCols.join(', ')}) VALUES (${insertCols.map(c => `@${c}`).join(', ')})`,
-  );
-  const voidStmt = db.prepare(VOID_UPDATE_SQL);
+  const CANDIDATE_HISTORY_COLS = [
+    'bet_id', 'old_result', 'old_profit_units', 'old_grade',
+    'old_grade_reason', 'old_graded_at', 'archived_by', 'reason',
+  ];
+  const insertCols = CANDIDATE_HISTORY_COLS.filter(c => historyCols.includes(c));
+  const voidOne = buildVoidWorker(db, { season, reason, insertCols });
 
   const candidates = selectVoidCandidates(db, season);
   console.log(`\nAPPLY: --void-season ${season} over ${candidates.length} candidates (archive row + sweeper-column void, ONE transaction per bet):`);
 
   let voided = 0, skippedTailed = 0;
   for (const bet of candidates) {
-    // HARD-GATE: the user-settlement ledger is not reconciled by this script.
+    // HARD-GATE at selection time — and again INSIDE the worker's immediate
+    // transaction, so a tail/fade accepted after this read is still skipped.
+    // The user-settlement ledger is not reconciled by this script.
     if (bet.tailed) {
       skippedTailed++;
       console.log(`  SKIP (tailed): ${fmtRow(bet)}`);
       continue;
     }
-    const perBet = db.transaction(() => {
-      const values = candidateValues(bet);
-      const picked = {};
-      for (const c of insertCols) picked[c] = values[c];
-      insertHistory.run(picked);
-      // Full gate repeated in the WHERE clause — a row that settled or was
-      // confirmed between read and write is judged at write time.
-      return voidStmt.run(reason, bet.id, season).changes;
-    });
-    const changes = perBet();
-    console.log(`  ${changes === 1 ? 'VOIDED' : `NO-OP (changes=${changes}, gate no longer matches)`}: ${fmtRow(bet)}`);
-    if (changes === 1) voided++;
+    const outcome = voidOne(bet.id);
+    if (outcome === 'voided') {
+      voided++;
+      console.log(`  VOIDED (changes=1): ${fmtRow(bet)}`);
+    } else if (outcome === 'tailed') {
+      skippedTailed++;
+      console.log(`  SKIP (tailed at write time): ${fmtRow(bet)}`);
+    } else {
+      console.log(`  NO-OP (changes=0, ${outcome} — gate no longer matches): ${fmtRow(bet)}`);
+    }
   }
 
   console.log(`\nvoided=${voided} skipped_tailed=${skippedTailed}`);
