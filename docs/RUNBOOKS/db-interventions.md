@@ -356,9 +356,11 @@ retried.
 **3. Beta-season leftovers LAST** — once the releasable population has
 drained, void the evidence-free Beta rows (sweeper column set,
 `grader_version='retro-triage-v1'` + `[retro-triage YYYY-MM-DD]` breadcrumb in
-`grade_reason`; archive row in `bet_grade_history` first; tailed `user_bets`
-rows are HARD-SKIPPED and printed — the user-settlement ledger is not
-reconciled by this script):
+`grade_reason`; `review_status` → `'confirmed'` in the same statement — parity
+with the sweeper's `allowAutoConfirm` sub-write, so voided rows leave the
+`/review` + dashboard needs_review queues instead of lingering there; archive
+row in `bet_grade_history` first; tailed `user_bets` rows are HARD-SKIPPED and
+printed — the user-settlement ledger is not reconciled by this script):
 
 ```bash
 fly ssh console -a bettracker-discord-bot -C "sh -c 'cd /app && node scripts/retro-triage-needs-review.js --apply --void-season Beta'"

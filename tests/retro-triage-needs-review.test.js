@@ -79,8 +79,9 @@ check('A4: void UPDATE writes the sweeper column set',
   /grading_state = 'done'/.test(S.VOID_UPDATE_SQL) &&
   /grading_lock_until = NULL/.test(S.VOID_UPDATE_SQL) &&
   /grader_version = 'retro-triage-v1'/.test(S.VOID_UPDATE_SQL));
-check('A4: void UPDATE never touches review_status or sweep_exempt_until',
-  !/review_status\s*=/.test(S.VOID_UPDATE_SQL.replace(/WHERE[\s\S]*$/, '')) &&
+check('A4: void UPDATE confirms review_status (sweeper allowAutoConfirm parity — voided rows leave the review queues)',
+  /review_status = 'confirmed'/.test(S.VOID_UPDATE_SQL.replace(/WHERE[\s\S]*$/, '')));
+check('A4: void UPDATE never touches sweep_exempt_until',
   !/sweep_exempt_until/.test(S.VOID_UPDATE_SQL));
 check('A4: population predicate pinned', S.PENDING_NR_WHERE === "result = 'pending' AND review_status = 'needs_review'");
 check('A4: breadcrumb carries the retro-triage date tag + season',
@@ -253,12 +254,13 @@ function betRow(dbFile, id) {
   check('C4: b1 carries retro-triage-v1 (the ONLY distinguisher from a swept void besides the breadcrumb)',
     after.grader_version === 'retro-triage-v1');
   const changed = Object.keys(before).filter(k => JSON.stringify(before[k]) !== JSON.stringify(after[k])).sort();
-  check('C4: changed columns are EXACTLY the sweeper void set',
-    JSON.stringify(changed) === JSON.stringify(['grade', 'grade_reason', 'graded_at', 'grader_version', 'grading_lock_until', 'grading_state', 'profit_units', 'result']),
+  check('C4: changed columns are EXACTLY the sweeper void set (incl. the auto-confirm flip)',
+    JSON.stringify(changed) === JSON.stringify(['grade', 'grade_reason', 'graded_at', 'grader_version', 'grading_lock_until', 'grading_state', 'profit_units', 'result', 'review_status']),
     `changed: ${changed.join(',')}`);
   check('C4: profit 0 / grade VOID / state done / lock cleared',
     after.profit_units === 0 && after.grade === 'VOID' && after.grading_state === 'done' && after.grading_lock_until == null);
-  check('C4: review_status stays needs_review (deliberate)', after.review_status === 'needs_review');
+  check('C4: review_status → confirmed (sweeper allowAutoConfirm parity — leaves the review queues)',
+    after.review_status === 'confirmed');
 
   const d = new Database(f);
   const hist = d.prepare('SELECT * FROM bet_grade_history WHERE bet_id = ?').all('b1-void-me');
@@ -299,7 +301,13 @@ function betRow(dbFile, id) {
 // its seeds never leak into the Section C copies.
 console.log('\nSection D — write-time recheck inside the void transaction');
 {
-  const insertCols = ['bet_id', 'old_result', 'old_profit_units', 'old_grade', 'old_grade_reason', 'old_graded_at', 'archived_by', 'reason'];
+  // Mirror the runtime's PRAGMA filter: old_review_status is archived ONLY
+  // where the column exists (the mig 022 schema does not have it).
+  const CANDIDATE_HISTORY_COLS = ['bet_id', 'old_result', 'old_review_status', 'old_profit_units', 'old_grade', 'old_grade_reason', 'old_graded_at', 'archived_by', 'reason'];
+  const historyCols = db.prepare('PRAGMA table_info(bet_grade_history)').all().map(c => c.name);
+  const insertCols = CANDIDATE_HISTORY_COLS.filter(c => historyCols.includes(c));
+  check('D0: old_review_status archived only if the column exists (PRAGMA-gated)',
+    insertCols.includes('old_review_status') === historyCols.includes('old_review_status'));
   const reason = S.buildVoidReason('Beta', '2026-10-29');
   const voidOne = S.buildVoidWorker(db, { season: 'Beta', reason, insertCols });
   const histCount = id => db.prepare('SELECT COUNT(*) AS n FROM bet_grade_history WHERE bet_id = ?').get(id).n;
@@ -324,11 +332,14 @@ console.log('\nSection D — write-time recheck inside the void transaction');
   // D3: clean candidate still voids, archive row from the LIVE read.
   seedBet('w3-clean', { season: 'Beta', created_at: '2026-06-15 12:00:00' });
   check('D3: clean candidate → worker outcome voided', voidOne('w3-clean') === 'voided');
-  const w3 = db.prepare('SELECT result, grade, grading_state, grader_version FROM bets WHERE id = ?').get('w3-clean');
+  const w3 = db.prepare('SELECT result, grade, grading_state, grader_version, review_status FROM bets WHERE id = ?').get('w3-clean');
   check('D3: voided with sweeper set + retro-triage-v1',
     w3.result === 'void' && w3.grade === 'VOID' && w3.grading_state === 'done' && w3.grader_version === 'retro-triage-v1');
-  const w3h = db.prepare('SELECT old_result, archived_by FROM bet_grade_history WHERE bet_id = ?').all('w3-clean');
+  check('D3: review_status → confirmed on the void (sweeper parity)', w3.review_status === 'confirmed');
+  const w3h = db.prepare('SELECT * FROM bet_grade_history WHERE bet_id = ?').all('w3-clean');
   check('D3: exactly one archive row, old_result from the live read', w3h.length === 1 && w3h[0].old_result === 'pending' && w3h[0].archived_by === S.ARCHIVED_BY);
+  check('D3: old_review_status archived iff the column exists',
+    !historyCols.includes('old_review_status') || w3h[0].old_review_status === 'needs_review');
   check('D3: worker is idempotent (second call gate_noop, no second archive row)',
     voidOne('w3-clean') === 'gate_noop' && histCount('w3-clean') === 1);
 

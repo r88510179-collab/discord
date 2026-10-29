@@ -29,9 +29,11 @@
 //                           INSIDE each bet's transaction and by a NOT EXISTS
 //                           guard on the UPDATE itself, so a tail accepted
 //                           after selection is still skipped; a refused void
-//                           rolls its archive row back. Opt-in, separate from
-//                           --batch: combining them in one --apply run is
-//                           refused.
+//                           rolls its archive row back. review_status →
+//                           'confirmed' (sweeper allowAutoConfirm parity, so
+//                           voided rows leave the review queues). Opt-in,
+//                           separate from --batch: combining them in one
+//                           --apply run is refused.
 //
 // Safety rails (reconcile-needs-review.js mold):
 //   • dry-run by default; --apply is the only write gate; --apply --dry-run
@@ -77,14 +79,17 @@ const PENDING_NR_WHERE = "result = 'pending' AND review_status = 'needs_review'"
 // The EXACT column set the 7-day sweeper writes for a void (sweepExpiredBet →
 // gradeBetRecord, services/grading.js + services/database.js): result,
 // profit_units, grade, grade_reason, graded_at, grading_state='done',
-// grading_lock_until=NULL, grader_version. evidence_hash is COALESCE-kept
-// there, so it is left untouched here; review_status stays as is (deliberate
-// — this population was parked for a human, and the void IS that decision's
-// paper trail). Distinguishable from a swept void only by grader_version and
-// the grade_reason breadcrumb. The WHERE clause repeats the full gate AND the
-// tailed hard-skip (NOT EXISTS user_bets) so both are judged at WRITE time —
-// a tail/fade accepted after selection can never be voided out from under the
-// community ledger (PR #211 review).
+// grading_lock_until=NULL, grader_version — PLUS review_status='confirmed',
+// because the sweeper calls gradeBet with allowAutoConfirm=true, whose
+// sub-write flips needs_review → confirmed. Without that flip the voided rows
+// would stay in stmts.needsReviewBets (no result filter) and the /review +
+// dashboard queues (the prior review_status is archived in bet_grade_history
+// where an old_review_status column exists). evidence_hash is COALESCE-kept
+// there, so it is left untouched here. Distinguishable from a swept void only
+// by grader_version and the grade_reason breadcrumb. The WHERE clause repeats
+// the full gate AND the tailed hard-skip (NOT EXISTS user_bets) so both are
+// judged at WRITE time — a tail/fade accepted after selection can never be
+// voided out from under the community ledger (PR #211 review).
 const VOID_UPDATE_SQL = `UPDATE bets SET
   result = 'void',
   profit_units = 0,
@@ -93,7 +98,8 @@ const VOID_UPDATE_SQL = `UPDATE bets SET
   graded_at = datetime('now'),
   grading_state = 'done',
   grading_lock_until = NULL,
-  grader_version = '${GRADER_VERSION}'
+  grader_version = '${GRADER_VERSION}',
+  review_status = 'confirmed'
   WHERE id = ? AND result = 'pending' AND review_status = 'needs_review' AND season = ?
     AND NOT EXISTS (SELECT 1 FROM user_bets ub WHERE ub.bet_id = bets.id)`;
 
@@ -233,6 +239,7 @@ function buildVoidWorker(db, { season, reason, insertCols }) {
     const values = {
       bet_id: betId,
       old_result: live.result,
+      old_review_status: live.review_status,
       old_profit_units: live.profit_units,
       old_grade: live.grade,
       old_grade_reason: live.grade_reason,
@@ -446,8 +453,10 @@ function applyVoidSeason(database, args, today) {
     }
   }
   const reason = buildVoidReason(season, today);
+  // old_review_status is filled only where the column exists (PRAGMA filter
+  // below) — the mig 022 schema does not have it.
   const CANDIDATE_HISTORY_COLS = [
-    'bet_id', 'old_result', 'old_profit_units', 'old_grade',
+    'bet_id', 'old_result', 'old_review_status', 'old_profit_units', 'old_grade',
     'old_grade_reason', 'old_graded_at', 'archived_by', 'reason',
   ];
   const insertCols = CANDIDATE_HISTORY_COLS.filter(c => historyCols.includes(c));
