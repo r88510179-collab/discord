@@ -1,6 +1,7 @@
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const { parseBetText, parseBetSlipImage, processImageForAI, evaluateTweet, validateParsedBet } = require('../services/ai');
 const { getOrCreateCapper, createBetWithLegs, isAuditMode, db } = require('../services/database');
+const { reviewStatusFor, resolveAutoConfirmMode } = require('../services/reviewPolicy');
 const { betEmbed } = require('../utils/embeds');
 const { postPickTracked } = require('../services/dashboard');
 const { sendStagingEmbed } = require('../services/warRoom');
@@ -1586,7 +1587,9 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
           }
 
           const auditOn = isAuditMode();
-          const reviewStatus = (auditOn || bet._confidence === 'low') ? 'needs_review' : 'confirmed';
+          // PR-3 review policy: legacyStatus is exactly today's computation, so
+          // with REVIEW_AUTO_CONFIRM unset this stays byte-identical (test-pinned).
+          const reviewStatus = reviewStatusFor({ capper, confidence: bet._confidence, legacyStatus: (auditOn || bet._confidence === 'low') ? 'needs_review' : 'confirmed' });
 
           const saved = await createBetWithLegs({
             capper_id: capper.id,
@@ -1605,7 +1608,7 @@ async function processAggregatedMessage(message, combinedRawText, combinedImages
             review_status: reviewStatus,
           }, bet.legs || []);
           if (!saved?._deduped) {
-            recordStage({ ingestId, betId: saved?.id || null, sourceType: 'discord', sourceRef, stage: 'VALIDATED', eventType: 'STAGE_EXIT', payload: { reviewStatus } });
+            recordStage({ ingestId, betId: saved?.id || null, sourceType: 'discord', sourceRef, stage: 'VALIDATED', eventType: 'STAGE_EXIT', payload: { reviewStatus, autoConfirm: resolveAutoConfirmMode() } });
             recordStage({ ingestId, betId: saved?.id || null, sourceType: 'discord', sourceRef, stage: 'STAGED', eventType: 'STAGE_EXIT', payload: { reviewStatus, sport: bet.sport, betType: bet.bet_type } });
             if (reviewStatus === 'needs_review') {
               reviewBets.push(saved);

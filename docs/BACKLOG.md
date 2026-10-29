@@ -16,6 +16,7 @@ This table is the authoritative status view. Older sections remain as incident h
 | `.DS_Store` cleanup | **RESOLVED** | `git ls-files` returns no tracked `.DS_Store`. | None. |
 | Small stale code items | **RESOLVED:** `/admin pipeline-trace` accepts `bet_id`; PARSED payload no longer emits contradictory `isBet`; SF Giants routing is covered; dollar-stake/no-selection intake guards shipped; resolver env/app retired. | Runtime-only flags still require their own live verification. | Keep historical notes for provenance; do not schedule duplicate implementation work. |
 | Tier B tailed historical corrections (b5) | Script updated to use the permanent settlement ledger | Operator execution remains **UNVERIFIED**; older prose conflicts on “pending” vs “applied,” so this list does not claim a data write occurred. | Run dry-run/read-only verification before any operator apply. |
+| Review-gate auto-confirm + queue alerts (PR-3) | **SHIPPED GATED** once merged — `REVIEW_AUTO_CONFIRM` ships `off` (unset = byte-identical, test-pinned); review-queue-age + grader-idle DM alerts always-on in `checkCriticalAlerts` (6h cooldown) | Flag not set in prod; no ingest behavior change until flipped. Does NOT touch the 3,327-bet backlog (PR-4). | flip `REVIEW_AUTO_CONFIRM=trusted` after setting `TRUSTED_CAPPER_IDS`; log in FLAG-FLIPS |
 
 ## ✅ Shipped
 
