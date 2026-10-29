@@ -319,6 +319,58 @@ already selects it) and line both timestamps up against the deploy in UTC first.
 
 ---
 
+## Releasing the needs_review backlog (retro-triage)
+
+`scripts/retro-triage-needs-review.js` releases the `result='pending',
+review_status='needs_review'` backlog to the production grader in controlled
+batches through the existing atomic `approveBet()` gate (confirm + clean-slate
+grading reset + 3-day `sweep_exempt_until`, one gated UPDATE), so the
+deterministic adapters get first shot and normal backoff / retry-cap / sweeper
+semantics decide the rest. Dry-run is the default and opens the DB readonly.
+
+**1. Dry-run report** (population breakdown + what an apply WOULD do):
+
+```bash
+fly ssh console -a bettracker-discord-bot -C "sh -c 'cd /app && node scripts/retro-triage-needs-review.js --void-season Beta'"
+```
+
+(`--void-season Beta` without `--apply` only *previews* the void set, tailed
+rows marked SKIP.)
+
+**2. Batch release** — approve the N newest in range (newest first, so the
+freshest games grade first):
+
+```bash
+fly ssh console -a bettracker-discord-bot -C "sh -c 'cd /app && node scripts/retro-triage-needs-review.js --apply --batch 300 --since 2026-08-01'"
+```
+
+Recommended cadence: **one `--batch 300` per day**, newest first. Between
+batches watch `/admin snapshot` and the daily grading-attempt cap — only run
+the next batch once the previous one has drained (approved bets that fall
+through the adapters go to search+LLM, which is the spend you are pacing).
+Re-running the same range is safe: approved rows no longer match the gate
+(`approved=0`), so each run drains the remainder only. A `refused=N` count is
+rows that settled or were confirmed between selection and write — never
+retried.
+
+**3. Beta-season leftovers LAST** — once the releasable population has
+drained, void the evidence-free Beta rows (sweeper column set,
+`grader_version='retro-triage-v1'` + `[retro-triage YYYY-MM-DD]` breadcrumb in
+`grade_reason`; archive row in `bet_grade_history` first; tailed `user_bets`
+rows are HARD-SKIPPED and printed — the user-settlement ledger is not
+reconciled by this script):
+
+```bash
+fly ssh console -a bettracker-discord-bot -C "sh -c 'cd /app && node scripts/retro-triage-needs-review.js --apply --void-season Beta'"
+```
+
+All writes repeat the full gate in their WHERE clause and print `info.changes`;
+`--apply --dry-run` together is refused (exit 2). Tests:
+`tests/retro-triage-needs-review.test.js` (in `npm run check` and
+`test:reliability`).
+
+---
+
 ## Case study 1 — wrong column name (aborted, no write)
 
 A nudge script intended to re-ready one bet referenced a column `attempts`. The
